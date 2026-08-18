@@ -10,6 +10,7 @@ enum GameLanguage : s32 {
     LangFrench,
     LangItalian,
     LangSpanish,
+    LangPortuguese,
     NumLanguages,
 };
 

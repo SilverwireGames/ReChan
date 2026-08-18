@@ -21,7 +21,10 @@ project "rechan"
     targetdir "bin"
     objdir    ("%{wks.location}/obj/" .. outputdir .. "/%{prj.name}")
     debugdir  "bin"
-    multiprocessorcompile "on"
+    -- Linux
+    if multiprocessorcompile then
+        multiprocessorcompile "on"
+    end
 
     files {
         "src/**.h",

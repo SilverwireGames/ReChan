@@ -529,6 +529,7 @@ static const char* GetLanguageDisplayToken(s32 index) {
         case LangFrench: return "FE_LFRE";
         case LangItalian: return "FE_LITA";
         case LangSpanish: return "FE_LSPA";
+        case LangPortuguese: return "FE_LPOR";
         default: return nullptr;
     }
 }
@@ -4679,10 +4680,14 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
                                      selectedColor.GetBlue8(), 255);
         }
 
-        char slotText[16] = {};
-        snprintf(slotText, sizeof(slotText), "%s", slotIndex == SAVEGAME_AUTOSAVE_SLOT
-                 ? Localize("FE_SVAUTO_SHORT") : "");
-        if (slotIndex != SAVEGAME_AUTOSAVE_SLOT) {
+        char slotText[32] = {};
+        const char* slotLabel = slotIndex == SAVEGAME_AUTOSAVE_SLOT
+            ? Localize("FE_SVAUTO_SHORT")
+            : nullptr;
+        if (slotLabel && slotLabel[0] != '\0') {
+            snprintf(slotText, sizeof(slotText), "%s", slotLabel);
+        }
+        else {
             snprintf(slotText, sizeof(slotText), "%02d", slotIndex + 1);
         }
 
@@ -4814,7 +4819,7 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
     }
     ScreenDraw::SetScissor(0, 0, (s32)(SCREEN_WIDTH + 0.5f), (s32)(SCREEN_HEIGHT + 0.5f));
 
-    char rangeText[24] = {};
+    char rangeText[32] = {};
     snprintf(rangeText, sizeof(rangeText), "%d-%d / %d", m_saveSlotScrollTop + 1,
              m_saveSlotScrollTop + DEF_SAVE_VISIBLE_ROWS, SAVEGAME_VISIBLE_SLOT_COUNT);
     g_textManager->SetScale(SCREEN_SCALE_Y(0.22f), SCREEN_SCALE_Y(0.22f));
@@ -5403,7 +5408,7 @@ void feCustomMenuMgr::RenderCurrentPage() {
 
         s32 totalGold = g_scoreManager ? g_scoreManager->GetTotalGoldDragon() : 0;
         if (totalGold > 99) totalGold = 99;
-        char dragonCountStr[8];
+        char dragonCountStr[16] = {};
         std::snprintf(dragonCountStr, sizeof(dragonCountStr), "%d", totalGold);
 
         g_textManager->SetScale(SCREEN_SCALE_Y(DEF_MENU_DRAGON_COUNT_SCALE), SCREEN_SCALE_Y(DEF_MENU_DRAGON_COUNT_SCALE));

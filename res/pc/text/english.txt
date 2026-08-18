@@ -148,6 +148,9 @@ Italian
 [FE_LSPA]
 Spanish
 
+[FE_LPOR]
+Portuguese
+
 [FE_CTL]
 Controller Settings
 

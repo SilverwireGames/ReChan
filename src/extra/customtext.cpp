@@ -25,6 +25,9 @@ void CustomText::Init() {
         case LangSpanish:
             langPath = "pc/text/spanish.txt";
             break;
+        case LangPortuguese:
+            langPath = "pc/text/portuguese.txt";
+            break;
         default:
             langPath = "pc/text/english.txt";
             break;
