@@ -583,6 +583,8 @@ void feCustomMenuMgr::BuildPages() {
     SetEntries(feMain, {
         Button("FE_RSM", EntryEvent_Resume),
         Button("FE_STG", EntryEvent_GoPage, MenuPage_StartGame),
+        Button("FE_LDG", EntryEvent_Load),
+        Button("FE_SVG", EntryEvent_Save),
         Button("FE_OPT", EntryEvent_GoPage, MenuPage_Options),
         Button("FE_QTG", EntryEvent_GoPage, MenuPage_QuitConfirm),
                });
@@ -785,9 +787,11 @@ void feCustomMenuMgr::BuildPages() {
         Info("FE_QUI"),
                });
 
-    auto& pauseMain = AddPage(MenuPage_Pause, "FE_PSD", "Menu_GameOption", MenuPage_None, 0, true, -1, 120);
+    auto& pauseMain = AddPage(MenuPage_Pause, "FE_PSD", "Menu_GameOption", MenuPage_None, 0, true, -1, -1);
     SetEntries(pauseMain, {
         Button("FE_RSG", EntryEvent_Resume),
+        Button("FE_SVG", EntryEvent_Save),
+        Button("FE_LDG", EntryEvent_Load),
         Button("FE_OPT", EntryEvent_GoPage, MenuPage_Options),
         Button("FE_EXL", EntryEvent_GoPage, MenuPage_ExitLevelConfirm),
         Button("FE_QTG", EntryEvent_GoPage, MenuPage_QuitConfirm),
