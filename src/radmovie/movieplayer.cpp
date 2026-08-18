@@ -1,7 +1,11 @@
 #include "gen/common.h"
 #include "radmovie/movieplayer.h"
 #include "pc/audio.h"
+#include "pc/textmgr.h"
 #include "pc/tim.h"
+#ifdef MOD_LOADER
+#include "extra/modloader.h"
+#endif
 #include "p3d/texture.h"
 #include "p3d/context.h"
 #include "pddi/pddi.h"
@@ -13,7 +17,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <unordered_map>
+#include <vector>
+#include <filesystem>
 
 // Reference: "The PlayStation 1 Video (STR) Format" v1.20 by Michael Sabin (MIT license)
 
@@ -89,6 +96,32 @@ static f64 MovieSyncElapsedSeconds(const MoviePlayer* movie) {
     return MovieNowSeconds() - it->second.startTimeSeconds;
 }
 
+static std::string TrimMovieSubtitleText(const std::string& text) {
+    const size_t first = text.find_first_not_of(" \t\r");
+    if (first == std::string::npos) return {};
+    const size_t last = text.find_last_not_of(" \t\r");
+    return text.substr(first, last - first + 1);
+}
+
+static bool ParseMovieSubtitleTime(const std::string& value, f64& outSeconds) {
+    unsigned int hours = 0, minutes = 0, seconds = 0, milliseconds = 0;
+    if (std::sscanf(value.c_str(), "%u:%u:%u,%u", &hours, &minutes, &seconds, &milliseconds) != 4) {
+        return false;
+    }
+    outSeconds = (f64)hours * 3600.0 + (f64)minutes * 60.0
+        + (f64)seconds + (f64)milliseconds / 1000.0;
+    return true;
+}
+
+static bool ParseMovieSubtitleTiming(const std::string& line, f64& outStart, f64& outEnd) {
+    const size_t separator = line.find("-->");
+    if (separator == std::string::npos) return false;
+    const std::string start = TrimMovieSubtitleText(line.substr(0, separator));
+    const std::string end = TrimMovieSubtitleText(line.substr(separator + 3));
+    return ParseMovieSubtitleTime(start, outStart) && ParseMovieSubtitleTime(end, outEnd)
+        && outEnd >= outStart;
+}
+
 
 // MoviePlayer implementation
 
@@ -115,6 +148,7 @@ bool MoviePlayer::Open(const char* path) {
     }
 
     fileData = rawData;
+    LoadSubtitles(path);
 
     // Auto-detect sector format from file content
     // Raw 2352: starts with CD sync 00 FF FF FF FF FF FF FF FF FF FF 00
@@ -277,6 +311,107 @@ bool MoviePlayer::Open(const char* path) {
     return true;
 }
 
+bool MoviePlayer::LoadSubtitles(const char* moviePath) {
+    subtitles.clear();
+    if (!moviePath || !moviePath[0]) return false;
+
+    std::string subtitlePath(moviePath);
+    const size_t extension = subtitlePath.find_last_of('.');
+    if (extension == std::string::npos) {
+        subtitlePath += ".srt";
+    }
+    else {
+        subtitlePath.replace(extension, std::string::npos, ".srt");
+    }
+
+#ifdef MOD_LOADER
+    const std::string movieStem = std::filesystem::path(moviePath).stem().string();
+    if (const std::string* modSubtitle = ModLoader::Instance().FindSubtitleOverridePath(movieStem.c_str())) {
+        subtitlePath = *modSubtitle;
+    }
+#endif
+
+    u8* subtitleData = nullptr;
+    u32 subtitleSize = 0;
+    if (!xcReadFileLow(subtitlePath.c_str(), &subtitleData, &subtitleSize)) {
+        return false;
+    }
+
+    std::string contents(reinterpret_cast<const char*>(subtitleData), subtitleSize);
+    delete[] subtitleData;
+    if (contents.size() >= 3 && (u8)contents[0] == 0xEF
+        && (u8)contents[1] == 0xBB && (u8)contents[2] == 0xBF) {
+        contents.erase(0, 3);
+    }
+
+    std::stringstream lines(contents);
+    std::string line;
+    MovieSubtitleEntry current;
+    bool readingText = false;
+    while (std::getline(lines, line)) {
+        line = TrimMovieSubtitleText(line);
+
+        if (!readingText) {
+            f64 start = 0.0;
+            f64 end = 0.0;
+            if (ParseMovieSubtitleTiming(line, start, end)) {
+                current = {};
+                current.startSeconds = start;
+                current.endSeconds = end;
+                readingText = true;
+            }
+            continue;
+        }
+
+        if (line.empty()) {
+            if (!current.text.empty()) subtitles.push_back(std::move(current));
+            current = {};
+            readingText = false;
+        }
+        else {
+            if (!current.text.empty()) current.text += '\n';
+            current.text += line;
+        }
+    }
+
+    if (readingText && !current.text.empty()) subtitles.push_back(std::move(current));
+    if (!subtitles.empty()) {
+        LOG("[MoviePlayer] Loaded %zu subtitles from %s", subtitles.size(), subtitlePath.c_str());
+    }
+    return !subtitles.empty();
+}
+
+void MoviePlayer::RenderSubtitle() const {
+    if (subtitles.empty() || !g_textManager) return;
+
+    const f64 elapsed = MovieSyncElapsedSeconds(this);
+    const MovieSubtitleEntry* active = nullptr;
+    for (const MovieSubtitleEntry& subtitle : subtitles) {
+        if (elapsed >= subtitle.startSeconds && elapsed <= subtitle.endSeconds) {
+            active = &subtitle;
+            break;
+        }
+    }
+    if (!active) return;
+
+    g_textManager->PushState();
+    if (!g_textManager->SetFontByName("Menu") && !g_textManager->SetFontByName("Legal")) {
+        g_textManager->PopState();
+        return;
+    }
+    g_textManager->SetScale(SCREEN_SCALE_Y(0.40f));
+    g_textManager->SetWrapWidth(SCREEN_SCALE_X(900.0f));
+    g_textManager->SetLineSpacing(2);
+    g_textManager->SetAlignment(TextAlign_Center);
+    g_textManager->SetColor(255, 255, 255, 255);
+    g_textManager->SetShadow(true, 2.0f, 2.0f, 0, 0, 0, 220);
+    g_textManager->SetOutline(true, 1.0f, 0, 0, 0, 255);
+    g_textManager->PrintString(active->text.c_str(),
+        SCALE_AND_CENTER_X(DEFAULT_SCREEN_WIDTH * 0.5f),
+        SCREEN_HEIGHT - SCREEN_SCALE_Y(60.0f));
+    g_textManager->PopState();
+}
+
 void MoviePlayer::Close() {
     MovieSyncReset(this);
     if (audioVoice) {
@@ -312,6 +447,7 @@ void MoviePlayer::Close() {
     finished = false;
     frameWidth = 0;
     frameHeight = 0;
+    subtitles.clear();
 }
 
 // Sector parsing
@@ -693,6 +829,8 @@ void MoviePlayer::Render() {
                 true);
         }
     }
+
+    RenderSubtitle();
 }
 
 // BitReader
