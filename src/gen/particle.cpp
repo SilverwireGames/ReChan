@@ -746,10 +746,13 @@ s32 ParticleSystem::ParseData(const u8* body, u32 bodySize) {
             const u32 hash = static_cast<u32>(readLongStream());
 
             char nameBuffer[32] = {};
-            for (s32 i = 0; i < 32; i++) {
+            // The on-disk field is fixed at 32 bytes. Keep one byte for the
+            // terminator and still consume the complete field so the next
+            // particle tag remains aligned.
+            for (s32 i = 0; i < static_cast<s32>(sizeof(nameBuffer) - 1); i++) {
                 nameBuffer[i] = readCharStream();
             }
-            nameBuffer[31] = '\0';
+            (void)readCharStream();
             SetName(nameBuffer, 0);
 
             nameCRC = hash;

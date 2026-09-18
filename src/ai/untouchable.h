@@ -39,6 +39,7 @@ public:
     void HandleHumanoidCollision(Humanoid* hum) override;
 
 private:
+    void DrawLate();
     s32 CreateSound();
     s32 UpdateSound();
     s32 ReleaseSound();

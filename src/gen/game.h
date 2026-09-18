@@ -206,6 +206,10 @@ private:
 };
 
 // Global game pointer (PSX: accessible through gp-relative)
+// The profile PSP target may seed this value to exercise a real gameplay
+// scene without requiring an interactive front-end selection.  Release builds
+// keep the normal front-end flow.
+extern s16 g_selectedLevel;
 extern Game* g_game;
 extern s32 g_directorActive;
 

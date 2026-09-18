@@ -252,8 +252,8 @@ inline const CameraParamClip* FindCameraParamClip(const CameraParamAnim* anim, s
     }
 
     localFrameReal = frameReal - (clip->startFrame << 16);
-    const s32 maxFrameReal = std::max(0, (clip->numFrames - 1) << 16);
-    localFrameReal = std::clamp(localFrameReal, 0, maxFrameReal);
+    const s32 maxFrameReal = std::max<s32>(0, static_cast<s32>((clip->numFrames - 1) << 16));
+    localFrameReal = std::clamp(localFrameReal, static_cast<s32>(0), maxFrameReal);
     return clip;
 }
 

@@ -1558,7 +1558,7 @@ void DebugUI::Draw() {
             ImGui::Separator();
             ImGui::MenuItem("Asset Exporter", nullptr, &sShowAssetExporter);
             ImGui::MenuItem("Mods", nullptr, &sShowMods);
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
             {
                 bool realTextureMode = p3d::context && p3d::context->IsRealTextureModeEnabled();
                 if (ImGui::MenuItem("Real Textures", nullptr, &realTextureMode)) {

@@ -157,13 +157,13 @@ bool ExportWDBParameters(const u8* data, u32 size, const std::string& outputPath
     out.close();
     g_database = previousDatabase;
     LOG("[AssetExporter] Level parameters: %s (%zu objects)", outputPath.c_str(), objects.size());
-#ifdef MOD_LOADER
+#if MOD_LOADER
     VerifyWDBParameterRoundTrip(data, size, outputPath.c_str());
 #endif
     return true;
 }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/jsondataloader.h"
 #include <cstdlib>
 #include <cstring>

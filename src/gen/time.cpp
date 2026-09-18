@@ -1,7 +1,11 @@
 #include "gen/time.h"
 #include <cmath>
+#if defined(RC_PLATFORM_PSP)
+#include <pspkernel.h>
+#else
 #include <chrono>
 #include <thread>
+#endif
 
 // PSX: gp-relative global
 Time* g_time = nullptr;
@@ -77,18 +81,36 @@ s32 Time::BeginPlayFixedStep() {
 #endif
 
 f64 Time::GetTimeInSeconds() {
+#if defined(RC_PLATFORM_PSP)
+    return static_cast<f64>(sceKernelGetSystemTimeWide()) / 1000000.0;
+#else
     static auto sStart = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     return std::chrono::duration<f64>(now - sStart).count();
+#endif
 }
 
 void Time::Sleep(f32 seconds) {
+#if defined(RC_PLATFORM_PSP)
+    if (seconds > 0.0f) {
+        sceKernelDelayThread(static_cast<unsigned int>(seconds * 1000000.0f));
+    }
+#else
     if (seconds > 0.0f) {
         std::this_thread::sleep_for(std::chrono::duration<f32>(seconds));
     }
+#endif
 }
 
 void Time::WaitForFrameEnd(f64 frameStart) const {
+#if defined(RC_PLATFORM_PSP)
+    const f64 frameEnd = frameStart + static_cast<f64>(GetTargetDt());
+    const f64 remaining = frameEnd - GetTimeInSeconds();
+    if (remaining > 0.0) {
+        sceKernelDelayThread(static_cast<unsigned int>(remaining * 1000000.0));
+    }
+    return;
+#else
     f32 target = GetTargetDt();
     if (target <= 0.0f) {
         return;
@@ -130,4 +152,5 @@ void Time::WaitForFrameEnd(f64 frameStart) const {
             std::this_thread::yield();
         }
     }
+#endif
 }

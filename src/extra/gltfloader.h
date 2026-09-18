@@ -2,7 +2,7 @@
 #include "core.h"
 #include "gen/config.h"
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 struct OriginalSTree;
 struct OriginalGeo;

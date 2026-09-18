@@ -25,7 +25,7 @@
 #include "pc/log.h"
 #include <algorithm>
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 // Registers a real-texture entry for a named VRAM-rect texture, preferring a
 // ModLoader override (at its own native resolution) and falling back to
 // decoding the original data already uploaded into world's VRAM (native PSX
@@ -35,7 +35,7 @@ static void RegisterRealTexture(World* world, const char* scope, const char* nam
                                  float offsetX, float offsetY, float sizeX, float sizeY) {
     if (!world) return;
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     std::vector<u8> overrideRgba;
     int overrideW = 0, overrideH = 0;
     if (ModLoader::Instance().GetTextureOverrideRGBA(scope, name, overrideRgba, overrideW, overrideH)) {
@@ -80,7 +80,7 @@ static void P3DLoadTextures(const u8* data, u32 size, const char* textureScope =
     u32 cpos = 6;
     u32 cend = (rootSize < size) ? rootSize : size;
 
-#if defined(MOD_LOADER) || defined(REAL_TEXTURE_RENDERING)
+#if MOD_LOADER || REAL_TEXTURE_RENDERING
     // CLUT chunks (e.g. "jeans5 CLUT") always precede their indexed data chunk
     // (e.g. "jeans5") within the stream. Remember each CLUT's VRAM rect by base
     // name so the matching data chunk can re-quantize+repaint (or register a
@@ -121,7 +121,7 @@ static void P3DLoadTextures(const u8* data, u32 size, const char* textureScope =
                 p + (u32)(rw * rh * 2) <= dend) {
                 world->UploadToVRAM(rx, ry, rw, rh, data + p);
 
-#if defined(MOD_LOADER) || defined(REAL_TEXTURE_RENDERING)
+#if MOD_LOADER || REAL_TEXTURE_RENDERING
                 static constexpr const char* kClutSuffix = " CLUT";
                 const size_t suffixPos = texName.size() >= 5 ? texName.size() - 5 : std::string::npos;
                 const bool isClut = suffixPos != std::string::npos && texName.compare(suffixPos, 5, kClutSuffix) == 0;
@@ -134,7 +134,7 @@ static void P3DLoadTextures(const u8* data, u32 size, const char* textureScope =
                     if (clutIt != pendingCluts.end()) {
                         const PendingClutRect& clutRect = clutIt->second;
                         const s16 paletteColorCount = clutRect.rw * clutRect.rh;
-#ifdef MOD_LOADER
+#if MOD_LOADER
                         std::vector<u16> clutOverride, indexOverride;
                         if (ModLoader::Instance().GetIndexedTextureOverride(
                                 textureScope, texName.c_str(), rw, rh, paletteColorCount,
@@ -145,7 +145,7 @@ static void P3DLoadTextures(const u8* data, u32 size, const char* textureScope =
                             LOG("[ModLoader] Character texture override: %s", texName.c_str());
                         }
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                         {
                             const u8 ttx = static_cast<u8>(rx / 64), tty = static_cast<u8>(ry / 256);
                             const int dep = (paletteColorCount == 256) ? 1 : 0;
@@ -161,14 +161,14 @@ static void P3DLoadTextures(const u8* data, u32 size, const char* textureScope =
 #endif
                     }
                     else {
-#ifdef MOD_LOADER
+#if MOD_LOADER
                         std::vector<u16> overridePixels;
                         if (ModLoader::Instance().GetTextureOverridePixels(textureScope, texName.c_str(), rw, rh, overridePixels)) {
                             world->UploadToVRAM(rx, ry, rw, rh, reinterpret_cast<const u8*>(overridePixels.data()));
                             LOG("[ModLoader] Character texture override: %s", texName.c_str());
                         }
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                         {
                             const u8 ttx = static_cast<u8>(rx / 64), tty = static_cast<u8>(ry / 256);
                             const u16 tpage = static_cast<u16>(ttx | (tty << 4) | (2 << 7));
@@ -376,7 +376,7 @@ static bool PopulateCharacterOriginal(OriginalSTree* original, CharFile* cf, u32
     else {
         original->meshBuffer = primGeomData
             ? BuildPrimBufferFromRawPrimGeom(primGeomData, primGeomSize
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                               , &original->realTexGroups
 #endif
                                               )
@@ -739,24 +739,60 @@ CharFile::CharFile(u32 type) {
     char pathBuf[128];
     snprintf(pathBuf, sizeof(pathBuf), "RCHARS/%s.RR", g_charNameTable[type]);
 
-    auto wholeFile = p3d::io::ReadFile(pathBuf);
-    if (!wholeFile) {
+    LOG("[CharFile] ReadFile begin: %s", pathBuf);
+    p3d::io::FileHandle sourceFile;
+    if (!sourceFile.Open(pathBuf, p3d::io::FileHandle::Mode::Read)) {
         LOG("[CharFile] Failed to open: %s", pathBuf);
         next = g_charFileList;
         g_charFileList = this;
         return;
     }
 
-    s32 fileSize = (s32)wholeFile->size();
+    const int64_t sourceSize = sourceFile.Size();
+    if (sourceSize <= 0 || sourceSize > INT32_MAX) {
+        LOG("[CharFile] Invalid file size: %lld", (long long)sourceSize);
+        sourceFile.Close();
+        next = g_charFileList;
+        g_charFileList = this;
+        return;
+    }
+
+    s32 fileSize = (s32)sourceSize;
+    LOG("[CharFile] ReadFile size: %d", fileSize);
     wholeFileBuf = std::malloc((size_t)fileSize);
-    std::memcpy(wholeFileBuf, wholeFile->data(), (size_t)fileSize);
+    LOG("[CharFile] whole file allocation: %s", wholeFileBuf ? "ok" : "failed");
+    if (!wholeFileBuf) {
+        sourceFile.Close();
+        next = g_charFileList;
+        g_charFileList = this;
+        return;
+    }
+    if (sourceFile.Read(wholeFileBuf, (size_t)fileSize) != (size_t)fileSize) {
+        LOG("[CharFile] whole file read failed");
+        sourceFile.Close();
+        std::free(wholeFileBuf);
+        wholeFileBuf = nullptr;
+        next = g_charFileList;
+        g_charFileList = this;
+        return;
+    }
+    sourceFile.Close();
+    LOG("[CharFile] whole file read complete");
 
     fileHandle = new ccFile();
+    LOG("[CharFile] ccFile allocated");
     fileHandle->OpenMem((u8*)wholeFileBuf, (u32)fileSize);
     s32 probeSize = (fileSize < (s32)(2 * sizeof(RREntry))) ? fileSize : (s32)(2 * sizeof(RREntry));
     rrHeader = (RREntry*)std::malloc(probeSize);
+    LOG("[CharFile] RR header allocation: %s (%d)", rrHeader ? "ok" : "failed", probeSize);
+    if (!rrHeader) {
+        next = g_charFileList;
+        g_charFileList = this;
+        return;
+    }
     fileHandle->Seek(0, ccFile::SEEK_FROM_START);
     fileHandle->Read(rrHeader, (u32)probeSize);
+    LOG("[CharFile] RR header read complete");
 
     s32 headerSize = probeSize;
     if (probeSize >= (s32)(2 * sizeof(RREntry))) {
@@ -778,11 +814,19 @@ CharFile::CharFile(u32 type) {
     //      rCDReadA(handle, dataBuffer, rrSize(header, 1))
     //      rCDWaitUntilDone()
     s32 dataByteSize = rrSize(rrHeader, 1);
+    LOG("[CharFile] resource 1 size: %d", dataByteSize);
     if (dataByteSize > 0) {
         dataBuffer = std::malloc(dataByteSize);
+        LOG("[CharFile] resource 1 allocation: %s", dataBuffer ? "ok" : "failed");
+        if (!dataBuffer) {
+            next = g_charFileList;
+            g_charFileList = this;
+            return;
+        }
         fileHandle->Seek((u32)rrOffset(rrHeader, 1), ccFile::SEEK_FROM_START);
         fileHandle->Read(dataBuffer, (u32)dataByteSize);
         dataSize = dataByteSize / 4; // PSX stores size in words
+        LOG("[CharFile] resource 1 read complete");
     }
 
     // Link into global list (PSX: next = gp+800; gp+800 = this)
@@ -970,7 +1014,7 @@ void CharacterManager::CloseCharacter(u32 type) {
 // PSX: Full async CD pipeline. PC: synchronous file read from .RR.
 // Reuses an existing NPC slot, while player type 0 still reloads slot 0 to refresh Jackie resources.
 void CharacterManager::LoadCharacter(u32 type, CharMgrCallback* callback) {
-#ifdef MOD_LOADER
+#if MOD_LOADER
     {
         const char* characterName = g_charNameTable[type];
         std::string scope = characterName ? characterName : "";
@@ -1275,7 +1319,7 @@ void CharacterManager::LoadCharacter(u32 type, CharMgrCallback* callback) {
                 pddiPrimBuffer* meshBuf = nullptr;
                 if (primGeomData) {
                     meshBuf = BuildPrimBufferFromRawPrimGeom(primGeomData, primGeomSize
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                                               , &original->realTexGroups
 #endif
                                                               );
@@ -1589,6 +1633,7 @@ void CharacterManager::LoadAnimationBatch(u32 type, s32 animEnum, CharMgrCallbac
     }
 
     if (animNameUID == 0) {
+        LOG("[AnimReq] type=%u enum=%d ABSENT idx=%d size=%d", type, animEnum, animEnum + 2, cf->dataSize);
         if (callback) callback->Callback();
         return;
     }
@@ -1630,6 +1675,9 @@ void CharacterManager::LoadAnimationBatch(u32 type, s32 animEnum, CharMgrCallbac
     // Resource at p3dIdx is a TexturePage (0xFF04) for animation-specific textures.
     s32 p3dIdx = animEnum * 2 + 9;
     s32 paramIdx = animEnum * 2 + 8;
+
+    LOG("[AnimLoad] type=%u enum=%d nameUID=%08X paramIdx=%d p3dIdx=%d",
+        type, animEnum, animNameUID, paramIdx, p3dIdx);
 
     // Read raw animation data from .RR (not P3D format)
     s32 animSize = 0;

@@ -1,6 +1,6 @@
 #include "extra/realtexture.h"
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 
 #include "p3d/context.h"
 #include "pddi/pddidev.h"

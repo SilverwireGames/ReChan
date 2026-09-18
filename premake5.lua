@@ -33,6 +33,14 @@ project "rechan"
         "vendor/cgltf/cgltf.h",
     }
 
+    -- PSP has a separate PSPSDK Makefile and native replacements for the
+    -- desktop implementations. Keep those translation units out of every
+    -- desktop configuration.
+    removefiles {
+        "src/psp/**.h",
+        "src/psp/**.cpp",
+    }
+
     filter "system:windows"
         files { "src/pc/rechan.rc" }
     filter {}

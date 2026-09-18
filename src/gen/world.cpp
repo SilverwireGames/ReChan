@@ -49,6 +49,9 @@
 #include "pddi/pddidev.h"
 
 #include "extra/shadowcsm.h"
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#include "psp/psp_perf.h"
+#endif
 
 static void UploadRawTextureToWorldVRAM(s16 x, s16 y, s16 w, s16 h, const u8* raw) {
     if (!g_game || !g_game->GetWorld()) {
@@ -60,22 +63,27 @@ static void UploadRawTextureToWorldVRAM(s16 x, s16 y, s16 w, s16 h, const u8* ra
 #include "ai/colfight.h"
 #include "pc/log.h"
 #include "gen/config.h"
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/modloader.h"
 #include "extra/gltfloader.h"
 #include "extra/parameterdata.h"
 #include "vendor/stb/stb_image.h"
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #endif
 
 #include "gen/uvdata.h"
 #include "ai/obstacle.h"
 
+#if MOD_LOADER
 #include <filesystem>
+#endif
 #include <algorithm>
 #include <cstring>
+#if defined(RC_PLATFORM_PSP)
+#include <pspsysmem.h>
+#endif
 #include <cstdlib>
 #include <unordered_map>
 #include <vector>
@@ -2152,7 +2160,7 @@ static tPrimGeom* CloneDynGeoVertexPrimGeom(const u8* geoData, u32 geoSize) {
     return geom;
 }
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 // Registers a real-texture entry for a named VRAM-rect geo texture, preferring
 // a ModLoader override (at its own native resolution) and falling back to
 // decoding the original data already uploaded into world's VRAM (native PSX
@@ -2162,7 +2170,7 @@ static void RegisterRealTexture(World* world, const char* name,
                                 float offsetX, float offsetY, float sizeX, float sizeY) {
     if (!world) return;
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     std::vector<u8> overrideRgba;
     int overrideW = 0, overrideH = 0;
     char levelScope[16];
@@ -2213,7 +2221,7 @@ static void LoadGeoPair(
     struct PrmInfo { u32 permOffset; u32 permSize; };
     std::unordered_map<u32, PrmInfo> prmMap; // nameHash = perm location
 
-#if defined(MOD_LOADER) || defined(REAL_TEXTURE_RENDERING)
+#if MOD_LOADER || REAL_TEXTURE_RENDERING
     // CLUT chunks (e.g. "name CLUT") always precede their indexed data chunk
     // within the stream. Remember each CLUT's VRAM rect by base name so the
     // matching data chunk can re-quantize+repaint (or register a real-texture
@@ -2297,7 +2305,7 @@ static void LoadGeoPair(
                 else {
                     u32 modelHash = p3dReadU32LE(permData + permCursor + 0);
                     if (!g_levelManager->FindGeo(static_cast<s32>(modelHash))) {
-#ifdef MOD_LOADER
+#if MOD_LOADER
                         u32 lookupCrc = modelHash ? modelHash : p3dHash(names[0].c_str());
                         char levelScope[16];
                         std::snprintf(levelScope, sizeof(levelScope), "lev%02d", world->GetCurLevelID());
@@ -2759,7 +2767,7 @@ static void LoadGeoPair(
                 world->UploadToVRAM(rx, ry, rw, rh, chunkBody + p);
                 LOG("[GeoTex] VRAM upload: x=%d y=%d w=%d h=%d", rx, ry, rw, rh);
 
-#if defined(MOD_LOADER) || defined(REAL_TEXTURE_RENDERING)
+#if MOD_LOADER || REAL_TEXTURE_RENDERING
                 static constexpr const char* kClutSuffix = " CLUT";
                 const size_t suffixPos = geoTexName.size() >= 5 ? geoTexName.size() - 5 : std::string::npos;
                 const bool isClut = suffixPos != std::string::npos && geoTexName.compare(suffixPos, 5, kClutSuffix) == 0;
@@ -2772,7 +2780,7 @@ static void LoadGeoPair(
                     if (clutIt != pendingGeoCluts.end()) {
                         const PendingClutRect& clutRect = clutIt->second;
                         const s16 paletteColorCount = clutRect.rw * clutRect.rh;
-#ifdef MOD_LOADER
+#if MOD_LOADER
                         std::vector<u16> clutOverride, indexOverride;
                         char levelScope[16];
                         std::snprintf(levelScope, sizeof(levelScope), "lev%02d", world->GetCurLevelID());
@@ -2785,7 +2793,7 @@ static void LoadGeoPair(
                             LOG("[ModLoader] Geo texture override: %s", geoTexName.c_str());
                         }
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                         {
                             const u8 ttx = static_cast<u8>(rx / 64), tty = static_cast<u8>(ry / 256);
                             const int dep = (paletteColorCount == 256) ? 1 : 0;
@@ -2801,7 +2809,7 @@ static void LoadGeoPair(
 #endif
                     }
                     else {
-#ifdef MOD_LOADER
+#if MOD_LOADER
                         std::vector<u16> overridePixels;
                         char levelScope[16];
                         std::snprintf(levelScope, sizeof(levelScope), "lev%02d", world->GetCurLevelID());
@@ -2810,7 +2818,7 @@ static void LoadGeoPair(
                             LOG("[ModLoader] Geo texture override: %s", geoTexName.c_str());
                         }
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                         {
                             const u8 ttx = static_cast<u8>(rx / 64), tty = static_cast<u8>(ry / 256);
                             const u16 tpage = static_cast<u16>(ttx | (tty << 4) | (2 << 7));
@@ -2923,7 +2931,7 @@ static void LoadGeoPair(
                             else {
                                 pddiPrimBuffer* meshBuf = BuildPrimBufferFromRawPrimGeom(
                                     permData + prm.permOffset, prm.permSize
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                     , &original->realTexGroups
 #endif
                                 );
@@ -3073,7 +3081,7 @@ static bool LoadBlocksForPetalFromStream(
 }
 // Database::Scan handles WDB parsing now (see database.cpp).
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 // Upload a PNG file as a PSX texture page into the VRAM simulation.
 // tpage encodes: tx = bits 0-3 (64-word column), ty = bit 4 (256-row band).
 // A texture page is 256x256 pixels; in 15-bit mode each pixel = 1 word at (tx*64+x, ty*256+y).
@@ -3111,29 +3119,11 @@ static void UploadPngToVRAMPage(PsxVRAM& vram, u16 tpage, const char* pngPath) {
 }
 #endif
 
-void World::LoadTPGTextures(const u8* lcfData, u32 lcfSize) {
-    // Re-parse stream header to find TPG entries
-    if (lcfSize < 4) return;
-    u32 count = (lcfData[0] << 24) | (lcfData[1] << 16) | (lcfData[2] << 8) | lcfData[3];
-    u32 pos = 4;
-    for (u32 i = 0; i < count; i++) {
-        if (pos + 16 > lcfSize) break;
-        char magic[5] = {};
-        memcpy(magic, lcfData + pos, 4);
-        u32 size = (lcfData[pos + 4] << 24) | (lcfData[pos + 5] << 16) | (lcfData[pos + 6] << 8) | lcfData[pos + 7];
-        u32 offset = (lcfData[pos + 8] << 24) | (lcfData[pos + 9] << 16) | (lcfData[pos + 10] << 8) | lcfData[pos + 11];
-        u32 extraLen = (lcfData[pos + 12] << 24) | (lcfData[pos + 13] << 16) | (lcfData[pos + 14] << 8) | lcfData[pos + 15];
-        pos += 16;
-        if (extraLen > 0)
-            pos += (extraLen + 3) & ~3;
-
-        if (strncmp(magic, ".TPG", 4) != 0) continue;
-        if (offset + size > lcfSize || size < 6) continue;
-
-        const u8* d = lcfData + offset;
-        u16 rootId = p3dReadU16LE(d);
-        u32 rootSize = p3dReadU32LE(d + 2);
-        if (rootId != 0xFF04) continue;
+void World::LoadTPGTexturePayload(const u8* d, u32 size) {
+    if (!d || size < 6) return;
+    u16 rootId = p3dReadU16LE(d);
+    u32 rootSize = p3dReadU32LE(d + 2);
+    if (rootId != 0xFF04) return;
 
         u32 cpos = 6;
         u32 cend = (rootSize < size) ? rootSize : size;
@@ -3162,13 +3152,34 @@ void World::LoadTPGTextures(const u8* lcfData, u32 lcfSize) {
 
                 // Upload raw pixel data to VRAM
                 if (rw > 0 && rh > 0 && rw <= 1024 && rh <= 512 &&
-                    p + rw * rh * 2 <= offset + size) {
+                    p + rw * rh * 2 <= size) {
                     vram.Upload(rx, ry, rw, rh, d + p);
                     LOG("[World] VRAM upload: x=%d y=%d w=%d h=%d", rx, ry, rw, rh);
                 }
             }
             cpos += chunkSize;
         }
+}
+
+void World::LoadTPGTextures(const u8* lcfData, u32 lcfSize) {
+    // Re-parse stream header to find TPG entries
+    if (lcfSize < 4) return;
+    u32 count = (lcfData[0] << 24) | (lcfData[1] << 16) | (lcfData[2] << 8) | lcfData[3];
+    u32 pos = 4;
+    for (u32 i = 0; i < count; i++) {
+        if (pos + 16 > lcfSize) break;
+        char magic[5] = {};
+        memcpy(magic, lcfData + pos, 4);
+        u32 size = (lcfData[pos + 4] << 24) | (lcfData[pos + 5] << 16) | (lcfData[pos + 6] << 8) | lcfData[pos + 7];
+        u32 offset = (lcfData[pos + 8] << 24) | (lcfData[pos + 9] << 16) | (lcfData[pos + 10] << 8) | lcfData[pos + 11];
+        u32 extraLen = (lcfData[pos + 12] << 24) | (lcfData[pos + 13] << 16) | (lcfData[pos + 14] << 8) | lcfData[pos + 15];
+        pos += 16;
+        if (extraLen > 0)
+            pos += (extraLen + 3) & ~3;
+
+        if (strncmp(magic, ".TPG", 4) != 0) continue;
+        if (offset + size > lcfSize) continue;
+        LoadTPGTexturePayload(lcfData + offset, size);
     }
 
     // Upload raw VRAM as R16UI texture for shader-side palette lookup
@@ -3180,7 +3191,423 @@ void World::LoadTPGTextures(const u8* lcfData, u32 lcfSize) {
     LOG("[World] Uploaded raw VRAM as R16UI (1024x512, handle=%u)", vramHandle);
 }
 
+#if defined(RC_PLATFORM_PSP)
+namespace {
+
+static bool ReadPspStreamEntry(
+    p3d::io::FileHandle& file,
+    const tStreamEntry& entry,
+    int64_t fileSize,
+    std::vector<u8>& scratch) {
+    if (entry.offset > static_cast<u64>(fileSize) ||
+        entry.size > static_cast<u64>(fileSize) - entry.offset) {
+        return false;
+    }
+
+    scratch.resize(entry.size);
+    if (entry.size == 0) {
+        return true;
+    }
+
+    if (!file.Seek(entry.offset, SEEK_SET)) {
+        return false;
+    }
+    return file.Read(scratch.data(), scratch.size()) == scratch.size();
+}
+
+static bool OpenPspStreamDirectory(
+    const std::string& lcfPath,
+    p3d::io::FileHandle& file,
+    int64_t& fileSize,
+    std::vector<tStreamEntry>& entries) {
+    if (!file.Open(p3d::io::ResolvePath(lcfPath), p3d::io::FileHandle::Mode::Read)) {
+        return false;
+    }
+
+    fileSize = file.Size();
+    if (fileSize < 4 || fileSize > INT32_MAX) {
+        return false;
+    }
+
+    // Stream directory records are at the front of the file. Keep the header
+    // bounded; payloads are fetched separately by offset below.
+    const size_t headerBytes = std::min<size_t>(static_cast<size_t>(fileSize), 64 * 1024);
+    std::vector<u8> header(headerBytes);
+    if (file.Read(header.data(), header.size()) != header.size()) {
+        return false;
+    }
+
+    entries = ParseStreamHeader(header.data(), static_cast<u32>(header.size()));
+    return !entries.empty();
+}
+
+static bool FindPspPetalRange(
+    const std::vector<tStreamEntry>& entries,
+    u32 targetPetal,
+    u32& outStart,
+    u32& outEnd,
+    u32& outPetal) {
+    std::vector<u32> wdbIndices;
+    wdbIndices.reserve(8);
+    for (u32 i = 0; i < static_cast<u32>(entries.size()); i++) {
+        if (strncmp(entries[i].magic, ".WDB", 4) == 0) {
+            wdbIndices.push_back(i);
+        }
+    }
+    if (wdbIndices.empty()) {
+        return false;
+    }
+
+    outPetal = targetPetal < static_cast<u32>(wdbIndices.size()) ? targetPetal : 0;
+    outStart = wdbIndices[outPetal];
+    outEnd = (outPetal + 1 < static_cast<u32>(wdbIndices.size()))
+        ? wdbIndices[outPetal + 1]
+        : static_cast<u32>(entries.size());
+    return true;
+}
+
+static bool LoadPspBlocksForPetal(
+    BlockManager& blockMgr,
+    p3d::io::FileHandle& file,
+    int64_t fileSize,
+    const std::vector<tStreamEntry>& entries,
+    u32 petalStart,
+    u32 petalEnd,
+    u32 startBlockNum,
+    std::vector<u8>& scratch,
+    const char* logTag) {
+    u32 blockIndex = 0;
+    for (u32 i = petalStart; i < petalEnd; i++) {
+        if (strncmp(entries[i].magic, ".BLK", 4) != 0) {
+            continue;
+        }
+
+        if (!ReadPspStreamEntry(file, entries[i], fileSize, scratch)) {
+            LOG("[%s] Failed to read BLK entry %u", logTag, i);
+            blockIndex++;
+            continue;
+        }
+        blockMgr.LoadBlockAt(blockIndex, scratch.data(), static_cast<u32>(scratch.size()));
+        blockIndex++;
+    }
+
+    // Recompute the active/load lists after all individual BLK parses. The
+    // zero-entry call updates manager state without requiring resident arrays.
+    blockMgr.LoadBlocks(startBlockNum, nullptr, nullptr, 0);
+    LOG("[%s] Parsed %u BLK entries for PSP petal", logTag, blockIndex);
+    return blockIndex != 0;
+}
+
+} // namespace
+
+bool World::LoadPspStream(const std::string& lcfPath) {
+    if (!g_blockManager) {
+        ASSERT(false);
+        return false;
+    }
+
+    g_wEffectChunkCount = 0;
+    g_particleSystemChunkCount = 0;
+    streamPath = lcfPath;
+    streamEntries.clear();
+    streamData.clear();
+    vram.Clear();
+
+    p3d::io::FileHandle file;
+    int64_t fileSize = 0;
+    LOG("[World] PSP stream directory open: %s", lcfPath.c_str());
+    if (!OpenPspStreamDirectory(lcfPath, file, fileSize, streamEntries)) {
+        LOG("[World] Failed to open/parse PSP stream: %s", lcfPath.c_str());
+        streamPath.clear();
+        streamEntries.clear();
+        return false;
+    }
+    LOG("[World] PSP stream directory ready: %u entries, %lld bytes",
+        static_cast<u32>(streamEntries.size()), static_cast<long long>(fileSize));
+    PspPerf::Trace("psp stream: directory ready");
+
+    FillMeter(20);
+
+    // TPGs are independent payloads. Fetch and decode each one into the same
+    // bounded scratch buffer, then create one persistent VRAM texture.
+    for (const tStreamEntry& entry : streamEntries) {
+        if (strncmp(entry.magic, ".TPG", 4) != 0) {
+            continue;
+        }
+        if (!ReadPspStreamEntry(file, entry, fileSize, pspStreamScratch)) {
+            LOG("[World] Failed to read TPG entry");
+            continue;
+        }
+        LoadTPGTexturePayload(pspStreamScratch.data(), static_cast<u32>(pspStreamScratch.size()));
+    }
+    RefreshVRAMTexture();
+    FillMeter(40);
+    PspPerf::Trace("psp stream: tpg ready");
+
+    // RCI/RCP resources are level-wide and must be loaded before the selected
+    // petal, exactly as on the resident desktop path.
+    for (u32 i = 0; i + 1 < static_cast<u32>(streamEntries.size()); i++) {
+        if (strncmp(streamEntries[i].magic, ".RCI", 4) != 0) {
+            continue;
+        }
+        const tStreamEntry& p3dEntry = streamEntries[i + 1];
+        if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspPermScratch) ||
+            !ReadPspStreamEntry(file, p3dEntry, fileSize, pspP3dScratch)) {
+            LOG("[World] Failed to read RCI/RCP pair %u", i);
+            continue;
+        }
+        LoadGeoPair(this,
+                    pspPermScratch.data(), static_cast<u32>(pspPermScratch.size()),
+                    pspP3dScratch.data(), static_cast<u32>(pspP3dScratch.size()), 1);
+    }
+    PspPerf::Trace("psp stream: permanent geometry ready");
+
+    u32 petalStart = 0, petalEnd = 0, petalIdx = 0;
+    if (!FindPspPetalRange(streamEntries, targetPetalIndex, petalStart, petalEnd, petalIdx)) {
+        LOG("[World] No WDB entries in %s", lcfPath.c_str());
+        return false;
+    }
+    targetPetalIndex = petalIdx;
+    LOG("[World] PSP loading petal %u: entries %u-%u", petalIdx, petalStart, petalEnd - 1);
+
+    BlockManager& blockMgr = *g_blockManager;
+    g_database->Close();
+    for (u32 i = petalStart; i < petalEnd; i++) {
+        if (strncmp(streamEntries[i].magic, ".WDB", 4) != 0) {
+            continue;
+        }
+        if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspStreamScratch)) {
+            LOG("[World] Failed to read WDB entry %u", i);
+            continue;
+        }
+        g_database->Scan(pspStreamScratch.data(), static_cast<u32>(pspStreamScratch.size()));
+    }
+    PspPerf::Trace("psp stream: database ready");
+
+    for (u32 i = petalStart; i + 1 < petalEnd; i++) {
+        if (strncmp(streamEntries[i].magic, ".PCI", 4) != 0) {
+            continue;
+        }
+        const tStreamEntry& p3dEntry = streamEntries[i + 1];
+        if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspPermScratch) ||
+            !ReadPspStreamEntry(file, p3dEntry, fileSize, pspP3dScratch)) {
+            LOG("[World] Failed to read PCI/PCP pair %u", i);
+            continue;
+        }
+        LoadGeoPair(this,
+                    pspPermScratch.data(), static_cast<u32>(pspPermScratch.size()),
+                    pspP3dScratch.data(), static_cast<u32>(pspP3dScratch.size()), 2);
+    }
+    PspPerf::Trace("psp stream: petal geometry ready");
+    RefreshVRAMTexture();
+
+    std::vector<DBVolume*> blockVolumes;
+    for (DBRoot* v = g_database->GetFirstBlock(); v; v = static_cast<DBRoot*>(v->next)) {
+        blockVolumes.push_back(static_cast<DBVolume*>(v));
+    }
+    blockMgr.LoadBlocksFunc(blockVolumes);
+    PspPerf::Trace("psp stream: block metadata ready");
+
+    s32 minX = 0x7FFFFFFF, minY = 0x7FFFFFFF, minZ = 0x7FFFFFFF;
+    s32 maxX = -0x7FFFFFFF, maxY = -0x7FFFFFFF, maxZ = -0x7FFFFFFF;
+    for (u32 i = 0; i < blockMgr.GetNumBlocks(); i++) {
+        Block* b = blockMgr.GetBlock(i);
+        if (!b) continue;
+        s32 bMinX = b->posX + b->halfExtNegX, bMaxX = b->posX + b->halfExtPosX;
+        s32 bMinY = b->posY + b->halfExtNegY, bMaxY = b->posY + b->halfExtPosY;
+        s32 bMinZ = b->posZ + b->halfExtNegZ, bMaxZ = b->posZ + b->halfExtPosZ;
+        if (bMinX < minX) minX = bMinX;
+        if (bMaxX > maxX) maxX = bMaxX;
+        if (bMinY < minY) minY = bMinY;
+        if (bMaxY > maxY) maxY = bMaxY;
+        if (bMinZ < minZ) minZ = bMinZ;
+        if (bMaxZ > maxZ) maxZ = bMaxZ;
+    }
+    levelMin = { minX, minY, minZ };
+    levelMax = { maxX, maxY, maxZ };
+
+    // The directory stays resident, but payload scratch must not remain
+    // reserved while AI creates level entities. Re-acquire it on demand for
+    // deferred BLK parsing and petal transitions; this returns roughly 300 KB
+    // to the PSP heap before the first gameplay population pass.
+    std::vector<u8>().swap(pspStreamScratch);
+    std::vector<u8>().swap(pspPermScratch);
+    std::vector<u8>().swap(pspP3dScratch);
+    for (ccList& list : switchLists) {
+        list.head = nullptr;
+        list.tail = nullptr;
+    }
+    PspPerf::Trace("psp stream: scratch released");
+    FillMeter(65);
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("psp stream: memory query begin");
+    LOG("[World] PSP heap after stream: free=%u max=%u",
+        (u32)sceKernelTotalFreeMemSize(), (u32)sceKernelMaxFreeMemSize());
+    PspPerf::Trace("psp stream: memory query done");
+#endif
+    LOG("[World] PSP stream metadata load complete: blocks=%u", blockMgr.GetNumBlocks());
+    return blockMgr.GetNumBlocks() > 0;
+}
+
+void World::LoadPspPetal(u32 petalIndex) {
+    MARKFUNCTION(0x8004604C);
+
+    if (levelList && currentLevelIndex < static_cast<u32>(levelCount) &&
+        levelList[currentLevelIndex * 2] == 7) {
+        previousLevelIndex = currentLevelIndex;
+    }
+
+    StartLogo("RUNFIRST.TIM");
+
+    const s32 petalCount = GetCurLevelPetals();
+    if (petalCount <= 0 || petalIndex >= static_cast<u32>(petalCount)) {
+        petalIndex = 0;
+    }
+
+    if (petalSoundIDs && currentLevelIndex < static_cast<u32>(levelCount)) {
+        const s32 soundLocation = static_cast<s32>(petalSoundIDs[currentLevelIndex][petalIndex]) - 1;
+        rsEvent(RS_SET_LOCATION, soundLocation, 0, 0);
+    }
+
+    targetPetalIndex = petalIndex;
+    currentPetalIndex = petalIndex;
+
+    if (!g_blockManager || !g_database || streamPath.empty() || streamEntries.empty()) {
+        StopLogo();
+        return;
+    }
+
+    BlockManager& blockMgr = *g_blockManager;
+    blockMgr.SetDeathVolumeFlag(1);
+    g_wEffectChunkCount = 0;
+    g_particleSystemChunkCount = 0;
+
+    if (g_scoreManager) {
+        if (Player::s_player && Player::s_player->checkpoint.IsValid()) {
+            g_scoreManager->HandleCheckpointBegin();
+        }
+        else {
+            g_scoreManager->HandleLevelBegin();
+        }
+    }
+    if (g_hud) {
+        g_hud->OnLoadLevel();
+    }
+
+    p3d::io::FileHandle file;
+    const bool opened = file.Open(p3d::io::ResolvePath(streamPath),
+                                  p3d::io::FileHandle::Mode::Read);
+    const int64_t fileSize = opened ? file.Size() : 0;
+    u32 petalStart = 0, petalEnd = 0, resolvedPetal = 0;
+    if (!opened || !FindPspPetalRange(streamEntries, petalIndex,
+                                      petalStart, petalEnd, resolvedPetal)) {
+        StopLogo();
+        return;
+    }
+
+    petalIndex = resolvedPetal;
+    targetPetalIndex = resolvedPetal;
+    currentPetalIndex = resolvedPetal;
+
+    // Rebuild only the selected petal's database and geometry. Payloads are
+    // fetched one at a time into bounded scratch buffers, matching the PSP
+    // level-load memory budget used by LoadPspStream.
+    PurgeSwitches();
+    g_database->Close();
+    for (u32 i = petalStart; i < petalEnd; i++) {
+        if (strncmp(streamEntries[i].magic, ".WDB", 4) != 0) {
+            continue;
+        }
+        if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspStreamScratch)) {
+            continue;
+        }
+        g_database->Scan(pspStreamScratch.data(), static_cast<u32>(pspStreamScratch.size()));
+    }
+
+    for (u32 i = petalStart; i + 1 < petalEnd; i++) {
+        if (strncmp(streamEntries[i].magic, ".PCI", 4) != 0) {
+            continue;
+        }
+        const tStreamEntry& p3dEntry = streamEntries[i + 1];
+        if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspPermScratch) ||
+            !ReadPspStreamEntry(file, p3dEntry, fileSize, pspP3dScratch)) {
+            continue;
+        }
+        LoadGeoPair(this,
+                    pspPermScratch.data(), static_cast<u32>(pspPermScratch.size()),
+                    pspP3dScratch.data(), static_cast<u32>(pspP3dScratch.size()), 2);
+    }
+
+    WEffect_InitWorldEffects(g_database->GetFirstPoint());
+    PWEffect_InitWorldEffects(g_database->GetFirstPoint());
+    ParticleSystem_InitParticleInfoMemory();
+
+    std::vector<DBVolume*> blockVolumes;
+    blockVolumes.reserve(blockMgr.GetNumBlocks());
+    for (DBRoot* v = g_database->GetFirstBlock(); v;
+         v = static_cast<DBRoot*>(v->next)) {
+        blockVolumes.push_back(static_cast<DBVolume*>(v));
+    }
+    blockMgr.LoadBlocksFunc(blockVolumes);
+
+    std::vector<u8>().swap(pspStreamScratch);
+    std::vector<u8>().swap(pspPermScratch);
+    std::vector<u8>().swap(pspP3dScratch);
+    for (ccList& list : switchLists) {
+        list.head = nullptr;
+        list.tail = nullptr;
+    }
+    FillMeter(40);
+
+    if (g_ai) {
+        g_ai->Populate();
+    }
+    FillMeter(85);
+
+    u32 startBlockNum = 0;
+    if (Player::s_player) {
+        startBlockNum = Player::s_player->blockNum;
+    }
+    if (file.Seek(0, SEEK_SET)) {
+        LoadPspBlocksForPetal(blockMgr, file, fileSize, streamEntries,
+                              petalStart, petalEnd, startBlockNum,
+                              pspStreamScratch, "World::LoadPetal");
+    }
+
+    if (g_ai) {
+        g_ai->PopulateBlock();
+    }
+    WEffect_PopulateWEffects();
+    FillMeter(100);
+    RefreshVRAMTexture();
+
+    if (g_director) {
+        g_director->Reset();
+        g_director->SetScript();
+    }
+    ProcessSwitches();
+    if (g_cameraManager) {
+        g_cameraManager->SetupPaths();
+    }
+    SyncSwitchLoadGroup(0);
+    SyncSwitchLoadGroup(1);
+    rsEvent(RS_LEVEL_BEGIN, 0, 0, 0);
+    StopLogo();
+    if (g_director) {
+        g_director->SkipNextWideScreenEnterAnim();
+    }
+}
+#endif
+
 World::World() {
+    // Keep intrusive switch lists explicitly empty on PSP. The target's
+    // low-memory allocator can return patterned blocks; relying only on the
+    // aggregate's implicit initialization made stale list pointers visible
+    // after the streaming load.
+    for (ccList& list : switchLists) {
+        list.head = nullptr;
+        list.tail = nullptr;
+    }
     p3d::rawTextureUploader = UploadRawTextureToWorldVRAM;
 }
 
@@ -3242,33 +3669,55 @@ void World::ProcessPendingSwitchActions() {
 }
 
 void World::ProcessSwitches() {
+    LOG("[World] ProcessSwitches: enter");
+#if !defined(RC_PLATFORM_PSP)
     PurgeSwitches();
+#endif
+    LOG("[World] ProcessSwitches: purge complete");
 
     if (!g_database) {
+        LOG("[World] ProcessSwitches: no database");
         return;
     }
 
-    for (DBRoot* root = static_cast<DBRoot*>(g_database->GetFirstVolume()); root;
+    u32 switchCount = 0;
+    DBRoot* firstVolume = static_cast<DBRoot*>(g_database->GetFirstVolume());
+    LOG("[World] ProcessSwitches: first volume=%p", (void*)firstVolume);
+    for (DBRoot* root = firstVolume; root;
          root = static_cast<DBRoot*>(root->next)) {
         if (root->type != 9 || root->subType != 0x9B) {
             continue;
         }
 
+        LOG("[World] ProcessSwitches: setup #%u crc=0x%08X", switchCount, root->nameCRC);
         WDBVolumeSwitch* sw = new WDBVolumeSwitch();
-        if (!sw->Setup(root) || !sw->Bind(ResolveSwitchGameFuncByName)) {
+        const bool setupOk = sw->Setup(root);
+        const bool bindOk = setupOk && sw->Bind(ResolveSwitchGameFuncByName);
+        LOG("[World] ProcessSwitches: setup #%u result setup=%d bind=%d",
+            switchCount, setupOk ? 1 : 0, bindOk ? 1 : 0);
+        switchCount++;
+        if (!setupOk || !bindOk) {
             delete sw;
             continue;
         }
 
+        LOG("[World] ProcessSwitches: set volume #%u", switchCount - 1);
         sw->SetVolume(static_cast<DBVolume*>(root));
 
         if (sw->listBucket < 4) {
+            LOG("[World] ProcessSwitches: add bucket=%u", sw->listBucket);
+            LOG("[World] ProcessSwitches: list head=%p tail=%p",
+                (void*)switchLists[sw->listBucket].head,
+                (void*)switchLists[sw->listBucket].tail);
             switchLists[sw->listBucket].AddNode(switchLists[sw->listBucket].tail, sw);
+            LOG("[World] ProcessSwitches: add complete");
         }
         else {
+            LOG("[World] ProcessSwitches: discard bucket=%u", sw->listBucket);
             delete sw;
         }
     }
+    LOG("[World] ProcessSwitches: complete count=%u", switchCount);
 }
 
 void World::CheckSwitchList(ccList& list, Thing* thing) {
@@ -3438,18 +3887,24 @@ void World::LoadLevelNames() {
 
 // PSX: LoadPermanent__5World (WORLD.CPP:1062, 0x80045D6C)
 void World::LoadPermanent() {
+    LOG("[World] LoadPermanent: level names begin");
     LoadLevelNames();
+    LOG("[World] LoadPermanent: level names complete (%d levels)", levelCount);
 
     // PSX: LoadLevel__12LevelManager() - no-op on PSX
     // PSX: PurgeLevelP3DInventory__12LevelManager() - also no-op
 
     // PSX: OpenCharacter(type=0), EnableCache(type=0, 1)
     if (g_characterManager) {
+        LOG("[World] LoadPermanent: character open");
         g_characterManager->OpenCharacter(0);
+        LOG("[World] LoadPermanent: character open complete");
         g_characterManager->EnableCache(0, 1);
+        LOG("[World] LoadPermanent: character cache enabled");
 
         // PSX: allocate CharMgrCallback, LoadCharacter(type=0, callback), spin until done
         CharMgrCallback* callback = new CharMgrCallback();
+        LOG("[World] LoadPermanent: character load begin");
         g_characterManager->LoadCharacter(0, callback);
         // PSX spins: while (!callback->done) rDoTaskList(rMainTaskList, 0);
         // PC: LoadCharacter is synchronous, callback already fired
@@ -3457,22 +3912,27 @@ void World::LoadPermanent() {
         // PSX: LoadAnimation(type=0, animEnum=0, count=124, callback), spin until done
         callback->done = 0;
         g_characterManager->LoadAnimation(0, 0, 124, callback);
+        LOG("[World] LoadPermanent: character animations first batch complete");
         // PSX spins again - PC is synchronous
 
         // PSX immediately issues the same load again without waiting. This keeps
         // a second reference on the core 0..123 player set.
         g_characterManager->LoadAnimation(0, 0, 124, nullptr);
+        LOG("[World] LoadPermanent: character animations second batch complete");
 
         // PSX: EnableCache(type=0, 0), delete callback
         g_characterManager->EnableCache(0, 0);
         delete callback;
+        LOG("[World] LoadPermanent: character complete");
     }
 
     // PSX: AddThingNoTagList("Jackie", 0, {0,0,0}, {0,0,0}, "JACKIELOHIER", nullptr)
     if (g_ai) {
+        LOG("[World] LoadPermanent: add Jackie begin");
         LVector zeroPos = { 0, 0, 0 };
         SVector zeroOrient = { 0, 0, 0 };
         g_ai->AddThingNoTagList("Jackie", 0, &zeroPos, &zeroOrient, "JACKIELOHIER", nullptr);
+        LOG("[World] LoadPermanent: add Jackie complete");
     }
 }
 
@@ -3521,6 +3981,7 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         StopLogo();
         return false;
     }
+    PspPerf::Trace("level index: stream load returned");
 
     PumpLoadingScreen();
 
@@ -3584,6 +4045,8 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     if (g_ai) {
         g_ai->Populate();
     }
+    PspPerf::Trace("level index: ai populated");
+    LOG("[World] Construct: AI populate complete");
     FillMeter(85);
 
     // PSX: v5 = player->blockNum (after Populate sets it from attrib 15)
@@ -3599,46 +4062,77 @@ bool World::LoadLevelIndex(u32 levelIndex) {
 
     // PSX: LoadBG, InitBG - background rendering setup
     BackG::LoadBG();
+    LOG("[World] Construct: background load complete");
     BackG::InitBG();
+    LOG("[World] Construct: background init complete");
 
     // PSX: ScoreManager::SetPar
     if (g_scoreManager) {
         g_scoreManager->SetPar();
     }
+    LOG("[World] Construct: score setup complete");
 
     // PSX: Director->Reset() then Director->SetScript()
     if (g_director) {
         g_director->Reset();
         g_director->SetScript();
     }
+    LOG("[World] Construct: director setup complete");
 
     if (g_environmentManager && g_levelManager) {
+        LOG("[World] Construct: ambient setup begin");
         g_environmentManager->SetupModelAmbientLighting(&g_levelManager->modelLists[0]);
+        LOG("[World] Construct: ambient setup complete");
     }
 
     // PSX: SetupModelAmbientLighting, ProcessSwitches
+    LOG("[World] Construct: switches begin");
     ProcessSwitches();
+    PspPerf::Trace("level index: switches processed");
+    LOG("[World] Construct: switches processed");
 
     // PSX: Close__8Database(0)
     if (g_database) {
         g_database->Close();
     }
+    LOG("[World] Construct: database closed");
 
     // PSX: AllocBlockPool__12BlockManager(0) - allocate block node pool
     // PC: blocks already allocated by LoadBlocksFunc
 
     // PSX: LoadBlocks__12BlockManagerUl(0, startBlockNum)
     // On PC we deferred Parse() in Load() and do it here to match PSX timing.
+#if defined(RC_PLATFORM_PSP)
+    {
+        p3d::io::FileHandle pspStreamFile;
+        const bool pspStreamOpen = pspStreamFile.Open(
+            p3d::io::ResolvePath(streamPath), p3d::io::FileHandle::Mode::Read);
+        if (pspStreamOpen) {
+            u32 pspPetalStart = 0, pspPetalEnd = 0, pspPetal = 0;
+            if (FindPspPetalRange(streamEntries, currentPetalIndex,
+                                  pspPetalStart, pspPetalEnd, pspPetal)) {
+                LoadPspBlocksForPetal(blockMgr, pspStreamFile, pspStreamFile.Size(),
+                                      streamEntries, pspPetalStart, pspPetalEnd,
+                                      startBlockNum, pspStreamScratch, "World");
+                PspPerf::Trace("level index: blocks loaded");
+            }
+        }
+    }
+#else
     LoadBlocksForPetalFromStream(blockMgr, streamData, currentPetalIndex, startBlockNum, "World");
+#endif
 
     // PopulateBlock is called by LoadBlocks on PSX. On PC we call it explicitly.
     if (g_ai) {
         g_ai->PopulateBlock();
     }
+    PspPerf::Trace("level index: block population done");
 
     WEffect_PopulateWEffects();
+    PspPerf::Trace("level index: effects populated");
 
     FillMeter(100);
+    PspPerf::Trace("level index: meter complete");
 
     // PSX: if (IsValidBlockNumber(playerBlockNum) == 4096) -> reposition player
     // PSX returns 0x1000 (4096) when block is NOT valid.
@@ -3744,19 +4238,26 @@ bool World::LoadLevelIndex(u32 levelIndex) {
             }
         }
     }
+    PspPerf::Trace("level index: return position complete");
 
     // PSX: gSyncLoadGroup(0); gSyncLoadGroup(1)
     SyncSwitchLoadGroup(0);
     SyncSwitchLoadGroup(1);
+    PspPerf::Trace("level index: sync groups complete");
 
     // PSX: rsEvent(5, 0, 0, 0) - start music for current location
+    PspPerf::Trace("level index: music begin");
     rsEvent(RS_LEVEL_BEGIN, 0, 0, 0);
+    PspPerf::Trace("level index: music done");
 
     // PSX: StopLogo after load completes
+    PspPerf::Trace("level index: logo stop begin");
     StopLogo();
+    PspPerf::Trace("level index: logo stop done");
     if (g_director) {
         g_director->SkipNextWideScreenEnterAnim();
     }
+    PspPerf::Trace("level index: complete");
     return true;
 }
 
@@ -3774,13 +4275,39 @@ bool World::Load(const std::string& lcfPath) {
 
     FillMeter(20);
 
-    // Read LCF file from disc (PC equivalent of Stream::Open + disc read)
-    auto lcfData = p3d::io::ReadFile(p3d::io::ResolvePath(lcfPath));
-    if (!lcfData) {
+#if defined(RC_PLATFORM_PSP)
+    return LoadPspStream(lcfPath);
+#endif
+
+    // Read LCF file from disc (PC equivalent of Stream::Open + disc read).
+    // Keep this as one direct allocation on PSP: ReadFile() first creates an
+    // optional vector and its temporary lifetime made large level streams
+    // fragile under the PSP heap's limited/fragmented memory.
+    p3d::io::FileHandle lcfFile;
+    LOG("[World] LCF open begin: %s", lcfPath.c_str());
+    if (!lcfFile.Open(p3d::io::ResolvePath(lcfPath), p3d::io::FileHandle::Mode::Read)) {
         LOG("[World] Failed to open: %s", lcfPath.c_str());
         return false;
     }
-    streamData = std::move(*lcfData);
+    LOG("[World] LCF open complete");
+    const int64_t lcfFileSize = lcfFile.Size();
+    LOG("[World] LCF size: %lld", (long long)lcfFileSize);
+    if (lcfFileSize <= 0 || lcfFileSize > INT32_MAX) {
+        LOG("[World] Invalid LCF size: %lld", (long long)lcfFileSize);
+        return false;
+    }
+#if defined(RC_PLATFORM_PSP)
+    LOG("[World] PSP heap before LCF: free=%u max=%u",
+        (u32)sceKernelTotalFreeMemSize(), (u32)sceKernelMaxFreeMemSize());
+#endif
+    streamData.resize(static_cast<size_t>(lcfFileSize));
+    LOG("[World] LCF buffer allocated");
+    if (lcfFile.Read(streamData.data(), streamData.size()) != streamData.size()) {
+        LOG("[World] Failed to read LCF: %s", lcfPath.c_str());
+        streamData.clear();
+        return false;
+    }
+    LOG("[World] LCF read complete: %u bytes", (u32)streamData.size());
 
     u32 dataSize = static_cast<u32>(streamData.size());
     const u8* data = streamData.data();
@@ -3792,12 +4319,15 @@ bool World::Load(const std::string& lcfPath) {
         streamData.clear();
         return false;
     }
+    LOG("[World] LCF header parsed: %u entries", (u32)entries.size());
 
     // Load TPG textures into VRAM (PSX HandleTPGChunk)
+    LOG("[World] TPG load begin");
     LoadTPGTextures(data, dataSize);
+    LOG("[World] TPG load complete");
     FillMeter(40);
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     // After base VRAM load, let mods paint over individual texture pages.
     // Mod files are named "{levelname}_tpg{tpage:04x}.png" in mods/<mod>/textures/.
     {
@@ -3828,7 +4358,9 @@ bool World::Load(const std::string& lcfPath) {
 #endif
 
     // RCI/RCP resources are level-wide and survive petal reloads until PurgeLevel.
+    LOG("[World] RCI/RCP load begin");
     LoadGeoPairsInRange(this, entries, data, dataSize, 0, (u32)entries.size(), ".RCI", ".RCP", 1);
+    LOG("[World] RCI/RCP load complete");
 
     // PSX petal-based loading: the LCF contains multiple WDB+BLK groups,
     // one per petal. Each petal starts with a .WDB entry followed by .BLK entries.
@@ -3872,13 +4404,15 @@ bool World::Load(const std::string& lcfPath) {
     }
 
     // Scan only this petal's WDB into the database
+    LOG("[World] WDB scan begin");
     g_database->Close();
     for (u32 i = petalStart; i < petalEnd; i++) {
         if (strncmp(entries[i].magic, ".WDB", 4) != 0) continue;
         if (entries[i].offset + entries[i].size > dataSize) continue;
         g_database->Scan(data + entries[i].offset, entries[i].size);
     }
-#ifdef MOD_LOADER
+    LOG("[World] WDB scan complete");
+#if MOD_LOADER
     {
         char levelScope[16], parameterName[32];
         std::snprintf(levelScope, sizeof(levelScope), "lev%02d", GetCurLevelID());
@@ -3889,9 +4423,13 @@ bool World::Load(const std::string& lcfPath) {
     }
 #endif
 
+    LOG("[World] PCI/PCP load begin");
     LoadGeoPairsInRange(this, entries, data, dataSize, petalStart, petalEnd, ".PCI", ".PCP", 2);
+    LOG("[World] PCI/PCP load complete");
 
+    LOG("[World] VRAM refresh begin");
     RefreshVRAMTexture();
+    LOG("[World] VRAM refresh complete");
 
     // Build block volume list from this petal's WDB
     std::vector<DBVolume*> blockVolumes;
@@ -3901,7 +4439,9 @@ bool World::Load(const std::string& lcfPath) {
     LOG("[World] Parsed %u block volumes from petal %u WDB", (u32)blockVolumes.size(), petalIdx);
 
     // Initialize blocks from volumes (PSX _LoadBlocksFunc - Block::Init)
+    LOG("[World] block metadata init begin");
     blockMgr.LoadBlocksFunc(blockVolumes);
+    LOG("[World] block metadata init complete");
 
     // PSX timing: BLK parse/load is performed later during Construct, after AI::Populate.
     // Keep only block metadata (LoadBlocksFunc) here and defer Parse() to preserve
@@ -4058,6 +4598,9 @@ static void DrawEntityCasterList(ccList& list, u16 blockNum, u32 vramHandle) {
 // checks InDrawList, renders entities + block geometry.
 void World::DrawEverythingHandler(const LVector* playerPos) {
     MARKFUNCTION(0x8002A98C);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("world render: begin");
+#endif
 
     if (!g_blockManager) {
         ASSERT(false);
@@ -4069,7 +4612,13 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 
     // PSX: DemandLoading when game state == 8
     if (g_game && g_game->GetState() == GameState::Play) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("world render: demand begin");
+#endif
         blockMgr.DemandLoading();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("world render: demand done");
+#endif
     }
 
     // Build draw entry array: {Block*, distSq, zDepth}
@@ -4096,6 +4645,9 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
     }
 
     if (count == 0) return;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("world render: draw list done");
+#endif
 
     // PSX selection sort: DESCENDING by distSq (farthest first = back-to-front)
     // PSX inner loop finds the entry with the SMALLEST distSq, swaps to front.
@@ -4169,8 +4721,14 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 #endif
 
     // Pass 1: render visible block entities + geometry.
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("world render: pass1 begin");
+#endif
     for (u32 i = 0; i < visibleCount; i++) {
         DrawEntry& entry = drawArray[i];
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("world render: pass1 block begin");
+#endif
 
         // Copy block->pos to local and apply OffsetToPreventSeams
         LVector localPos;
@@ -4203,10 +4761,25 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 #endif
                 ComEffect_BeginLateRenderQueue(static_cast<s32>(bn));
                 DrawEntityList(g_ai->humanoidList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+                PspPerf::Trace("world render: humanoids done");
+#endif
                 DrawEntityList(g_ai->inactivePickupList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+                PspPerf::Trace("world render: inactive pickups done");
+#endif
                 DrawEntityList(g_ai->pickupList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+                PspPerf::Trace("world render: pickups done");
+#endif
                 DrawEntityList(g_ai->moveList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+                PspPerf::Trace("world render: moves done");
+#endif
                 ComEffect_EndLateRenderQueue();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+                PspPerf::Trace("world render: late queue ended");
+#endif
 #if MODERN_GRAPHICS
                 ShadowCSM::SetCasterWorldOffset(0.0f, 0.0f, 0.0f);
 #endif
@@ -4222,21 +4795,43 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
             p3d::context->SetReceiveShadows(true);
 #endif
             p3d::context->SetWorldMatrix(blockBaseWorld);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("world render: block geometry begin");
+#endif
             entry.block->Draw(&localPos);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("world render: block geometry done");
+#endif
 #if MODERN_GRAPHICS
             p3d::context->SetReceiveShadows(false);
 #endif
 
             // Flush queued model shadows after block geometry.
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("world render: model shadows begin");
+#endif
             FlushModelShadowQueue();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("world render: model shadows done");
+            PspPerf::Trace("world render: late entity begin");
+#endif
             FlushLateEntityDrawQueue();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("world render: late entity done");
+#endif
         }
     }
 
     EndModelShadowQueue();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("world render: pass1 done");
+#endif
 
     // Pass 2: render per-block effects after all block geometry to prevent
     // cross-block overdraw from clipping effects drawn earlier in the frame.
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("world render: pass2 begin");
+#endif
     for (u32 i = 0; i < visibleCount; i++) {
         DrawEntry& entry = drawArray[i];
 
@@ -4280,6 +4875,9 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
     p3d::context->SetDepthClamp(false);
 
     p3d::context->SetWorldMatrix(passBaseWorld);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("world render: pass2 done");
+#endif
 
     // PSX: DebugDrawSector, ExitLayer(2), profile end(7)
 }
@@ -4520,7 +5118,13 @@ void World::Unload() {
         g_hud->OnUnloadLevel();
     }
 
-    const bool hadLoadedLevel = !streamData.empty() || (vramHandle != 0);
+    const bool hadLoadedLevel =
+#if defined(RC_PLATFORM_PSP)
+        !streamEntries.empty() ||
+#else
+        !streamData.empty() ||
+#endif
+        (vramHandle != 0);
     if (hadLoadedLevel) {
         if (g_blockManager) {
             g_blockManager->InternalClose();
@@ -4573,6 +5177,13 @@ void World::Unload() {
     BackG::DeleteBG();
 
     streamData.clear();
+#if defined(RC_PLATFORM_PSP)
+    streamPath.clear();
+    streamEntries.clear();
+    pspStreamScratch.clear();
+    pspPermScratch.clear();
+    pspP3dScratch.clear();
+#endif
     if (vramHandle && p3d::context) {
         p3d::context->DestroyVRAMTexture(vramHandle);
         vramHandle = 0;
@@ -4632,6 +5243,11 @@ void World::UnloadPetal() {
 // PSX: LoadPetal__5WorldUl (WORLD.CPP:1222, 0x8004604C)
 void World::LoadPetal(u32 petalIndex) {
     MARKFUNCTION(0x8004604C);
+
+#if defined(RC_PLATFORM_PSP)
+    LoadPspPetal(petalIndex);
+    return;
+#endif
 
     // PSX: if current level is DestSelect (lev07), save as previous
     if (levelList && currentLevelIndex < (u32)levelCount) {
@@ -4720,7 +5336,7 @@ void World::LoadPetal(u32 petalIndex) {
             if (entries[i].offset + entries[i].size > dataSize) continue;
             g_database->Scan(data + entries[i].offset, entries[i].size);
         }
-#ifdef MOD_LOADER
+#if MOD_LOADER
         {
             char levelScope[16], parameterName[32];
             std::snprintf(levelScope, sizeof(levelScope), "lev%02d", GetCurLevelID());
@@ -4858,8 +5474,3 @@ s32 World::LevelMenuExecute(hdMenuItem* item) {
 
     return 4;
 }
-
-
-
-
-

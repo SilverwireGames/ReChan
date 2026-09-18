@@ -2,7 +2,7 @@
 #include "core.h"
 #include "gen/config.h"
 #include <vector>
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #endif
 
@@ -68,12 +68,13 @@ u8* RP_FixUpPolysCBF_CL(tPrimGeom* geometry, void* view, u32 loopIndex, u32 poly
 int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos = nullptr);
 int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 fogFar, u32 fogColour);
 pddiPrimBuffer* BuildUnculledPrimBufferFromPrimGeom(const tPrimGeom* geom);
+void ShutdownPspGeometryFrameScratch();
 
 // Legacy host bridge for non-block call sites that still consume a raw
 // pddiPrimBuffer instead of owning a reversed tPrimGeom object.
 tPrimGeom* CloneRawPrimGeom(const u8* primData, u32 primSize);
 pddiPrimBuffer* BuildPrimBufferFromRawPrimGeom(const u8* primData, u32 primSize
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                                , std::vector<RealTextureGroup>* outRealTexGroups = nullptr
 #endif
                                                );

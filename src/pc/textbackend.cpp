@@ -4,6 +4,7 @@
 #include "pc/tim.h"
 #include "p3d/texture.h"
 #include <cmath>
+#include <array>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -18,6 +19,32 @@
 static u32 PackRgba(u8 r, u8 g, u8 b, u8 a) {
     return ((u32)a << 24) | ((u32)b << 16) | ((u32)g << 8) | (u32)r;
 }
+
+#if defined(RC_PLATFORM_PSP)
+class PspLineWidthBuffer {
+public:
+    static constexpr size_t kCapacity = 128;
+
+    void clear() { count = 0; }
+    bool empty() const { return count == 0; }
+    size_t size() const { return count; }
+    f32& operator[](size_t index) { return values[index]; }
+    const f32& operator[](size_t index) const { return values[index]; }
+    void push_back(f32 value) {
+        if (count < kCapacity) {
+            values[count++] = value;
+        }
+    }
+
+private:
+    std::array<f32, kCapacity> values = {};
+    size_t count = 0;
+};
+
+using LineWidthBuffer = PspLineWidthBuffer;
+#else
+using LineWidthBuffer = std::vector<f32>;
+#endif
 
 static bool DecodeNextUtf8(const char* text, s32 len, s32& cursor, u32& outCodepoint) {
     if (!text || cursor >= len) {
@@ -68,10 +95,23 @@ static bool DecodeNextUtf8(const char* text, s32 len, s32& cursor, u32& outCodep
 class StbTextBackend : public ITextBackend {
 public:
     static constexpr s32 kLayoutReferencePixelHeight = 32;
+#if defined(RC_PLATFORM_PSP)
+    // A 2048² atlas briefly needs more than 20 MB while it is assembled
+    // (alpha + RGBA staging). That exceeds the PSP user heap once the game,
+    // font data and runtime state are resident. 1024² at native sampling is
+    // sufficient for the 480x272 UI and keeps registration below the memory
+    // budget.
+    static constexpr s32 kAtlasSize = 1024;
+    static constexpr u32 kOversampleX = 1;
+    static constexpr u32 kOversampleY = 1;
+#else
     static constexpr s32 kAtlasSize = 2048;
+#endif
     static constexpr s32 kPackPadding = 2;
+#if !defined(RC_PLATFORM_PSP)
     static constexpr u32 kOversampleX = 3;
     static constexpr u32 kOversampleY = 3;
+#endif
 
     struct PackedRange {
         u32 first = 0;
@@ -136,7 +176,9 @@ public:
         font.scale = stbtt_ScaleForPixelHeight(&font.info, (f32)desc.pixelHeight);
         font.metricScale = (f32)kLayoutReferencePixelHeight / (f32)desc.pixelHeight;
 
-        s32 ascent = 0, descent = 0, lineGap = 0;
+        // stb_truetype's public ABI uses native C++ int regardless of the
+        // platform typedefs used by the game (s32 is long on PSP).
+        int ascent = 0, descent = 0, lineGap = 0;
         stbtt_GetFontVMetrics(&font.info, &ascent, &descent, &lineGap);
         font.ascentPx = (f32)ascent * font.scale * font.metricScale;
         font.lineHeightPx = ((f32)(ascent - descent + lineGap)) * font.scale * font.metricScale;
@@ -149,7 +191,9 @@ public:
             { 32, 95 },        // Basic Latin
             { 160, 96 },       // Latin-1 Supplement
             { 0x0100, 128 },   // Latin Extended-A
+#if !defined(RC_PLATFORM_PSP)
             { 0x0180, 208 },   // Latin Extended-B subset
+#endif
             { 0x20AC, 1 },     // Euro sign
         };
 
@@ -235,7 +279,7 @@ public:
             return bounds;
         }
 
-        std::vector<f32> widths;
+        LineWidthBuffer widths;
         BuildLineWidths(*font, text, state, widths);
         if (widths.empty()) {
             return bounds;
@@ -270,7 +314,7 @@ public:
             return;
         }
 
-        std::vector<f32> lineWidths;
+        LineWidthBuffer lineWidths;
         BuildLineWidths(*font, text, state, lineWidths);
         if (lineWidths.empty()) {
             return;
@@ -611,7 +655,7 @@ private:
     }
 
     void BuildLineWidths(const FontRecord& font, Utf8TextView text,
-        const TextRenderState& state, std::vector<f32>& outLineWidths) const {
+        const TextRenderState& state, LineWidthBuffer& outLineWidths) const {
         outLineWidths.clear();
         if (text.IsEmpty()) {
             return;

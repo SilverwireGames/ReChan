@@ -11,16 +11,114 @@
 #include "p3d/fileio.h"
 #include "pddi/pddidev.h"
 #include "pddi/pdditex.h"
+#include "pc/log.h"
+#if defined(RC_PLATFORM_PSP)
+#include "pddi/psp/psprender.h"
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "vendor/stb/stb_image.h"
 
 #include <string>
+#include <algorithm>
 #include <cstring>
 
 namespace p3d {
     RawTextureUploadCallback rawTextureUploader = nullptr;
 }
+
+#if defined(RC_PLATFORM_PSP)
+namespace {
+
+#pragma pack(push, 1)
+struct PspNativeTextureHeader {
+    char magic[4];
+    u16 width;
+    u16 height;
+    u16 format;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(PspNativeTextureHeader) == 10, "unexpected PSTX header padding");
+
+static std::string PspNativeTexturePath(const char* path) {
+    std::string result = path ? path : "";
+    const std::size_t extension = result.rfind(".png");
+    if (extension != std::string::npos && extension + 4 == result.size()) {
+        result.replace(extension, 4, ".ptex");
+    }
+    return result;
+}
+
+static tTexture* LoadPspNativeTexture(const char* path, s32* outWidth, s32* outHeight) {
+    const std::string nativePath = PspNativeTexturePath(path);
+    const auto file = p3d::io::ReadFile(nativePath);
+    if (!file || file->size() < sizeof(PspNativeTextureHeader)) {
+        return nullptr;
+    }
+
+    PspNativeTextureHeader header{};
+    std::memcpy(&header, file->data(), sizeof(header));
+    if (std::memcmp(header.magic, "PSTX", 4) != 0
+        || header.format != 1
+        || header.width == 0 || header.height == 0
+        || header.width > 512 || header.height > 512) {
+        return nullptr;
+    }
+
+    const std::size_t pixelCount = static_cast<std::size_t>(header.width) * header.height;
+    if (file->size() != sizeof(header) + pixelCount * sizeof(u16)) {
+        return nullptr;
+    }
+
+    tTexture* texture = new tTexture();
+    if (!texture->Create(header.width, header.height, 16, 4, nullptr)) {
+        texture->Release();
+        return nullptr;
+    }
+
+    auto* nativeTexture = static_cast<pspTexture*>(texture->GetTexture());
+    nativeTexture->SetNative4444Data(header.width, header.height,
+        reinterpret_cast<const u16*>(file->data() + sizeof(header)));
+    if (!nativeTexture->IsValid()) {
+        texture->Release();
+        return nullptr;
+    }
+
+    if (outWidth) *outWidth = header.width;
+    if (outHeight) *outHeight = header.height;
+    return texture;
+}
+
+// PNG/JPEG frontend art is authored for the desktop at 1920x1080.  Keeping
+// those dimensions until pspTexture::SetData would briefly require an 8 MiB
+// 16-bit texture plus the decoder's RGBA buffer for every image.  The PSP has
+// no use for that source resolution: its native framebuffer is 480x272 and
+// the GE's largest practical texture for this title is 512x512.
+static void GetPspTextureDimensions(int sourceWidth, int sourceHeight,
+                                     int& targetWidth, int& targetHeight) {
+    targetWidth = sourceWidth;
+    targetHeight = sourceHeight;
+
+    if (sourceWidth <= 512 && sourceHeight <= 512) {
+        return;
+    }
+
+    if (sourceWidth >= 960 && sourceHeight >= 540
+        && sourceWidth >= sourceHeight * 3 / 2) {
+        targetWidth = 480;
+        targetHeight = 272;
+        return;
+    }
+
+    const float scale = std::min(512.0f / static_cast<float>(sourceWidth),
+                                 512.0f / static_cast<float>(sourceHeight));
+    targetWidth = std::max(1, static_cast<int>(sourceWidth * scale + 0.5f));
+    targetHeight = std::max(1, static_cast<int>(sourceHeight * scale + 0.5f));
+}
+
+} // namespace
+#endif
 
 // tTexture
 
@@ -31,28 +129,56 @@ tTexture* tTexture::LoadFromImagePath(const char* path, s32* outWidth, s32* outH
         return nullptr;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    if (tTexture* native = LoadPspNativeTexture(path, outWidth, outHeight)) {
+        return native;
+    }
+#endif
+
     int width = 0;
     int height = 0;
     int channels = 0;
     const std::string resolvedPath = p3d::io::ResolvePath(path);
     unsigned char* rgbaBytes = stbi_load(resolvedPath.c_str(), &width, &height, &channels, 4);
     if (!rgbaBytes || width <= 0 || height <= 0) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        LOG("[PspTexture] stbi_load failed path=%s reason=%s", resolvedPath.c_str(),
+            stbi_failure_reason() ? stbi_failure_reason() : "unknown");
+#endif
         return nullptr;
     }
 
-    u32* packedPixels = new u32[(size_t)width * (size_t)height];
-    for (s32 i = 0; i < width * height; i++) {
-        const u8 r = rgbaBytes[i * 4 + 0];
-        const u8 g = rgbaBytes[i * 4 + 1];
-        const u8 b = rgbaBytes[i * 4 + 2];
-        const u8 a = rgbaBytes[i * 4 + 3];
-        packedPixels[i] = ((u32)a << 24) | ((u32)b << 16) | ((u32)g << 8) | (u32)r;
+    int targetWidth = width;
+    int targetHeight = height;
+#if defined(RC_PLATFORM_PSP)
+    GetPspTextureDimensions(width, height, targetWidth, targetHeight);
+#endif
+
+    u32* packedPixels = new u32[(size_t)targetWidth * (size_t)targetHeight];
+    for (s32 y = 0; y < targetHeight; ++y) {
+        const s32 sourceY = std::min<s32>(static_cast<s32>(height - 1),
+            static_cast<s32>((static_cast<int64_t>(y) * height) / targetHeight));
+        for (s32 x = 0; x < targetWidth; ++x) {
+            const s32 sourceX = std::min<s32>(static_cast<s32>(width - 1),
+                static_cast<s32>((static_cast<int64_t>(x) * width) / targetWidth));
+            const size_t sourceIndex = (static_cast<size_t>(sourceY) * width + sourceX) * 4;
+            const u8 r = rgbaBytes[sourceIndex + 0];
+            const u8 g = rgbaBytes[sourceIndex + 1];
+            const u8 b = rgbaBytes[sourceIndex + 2];
+            const u8 a = rgbaBytes[sourceIndex + 3];
+            packedPixels[static_cast<size_t>(y) * targetWidth + x] =
+                ((u32)a << 24) | ((u32)b << 16) | ((u32)g << 8) | (u32)r;
+        }
     }
 
     stbi_image_free(rgbaBytes);
 
     tTexture* tex = new tTexture();
-    if (!tex->Create(width, height, 32, 8, packedPixels)) {
+    if (!tex->Create(targetWidth, targetHeight, 32, 8, packedPixels)) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        LOG("[PspTexture] create failed path=%s source=%dx%d target=%dx%d",
+            resolvedPath.c_str(), width, height, targetWidth, targetHeight);
+#endif
         delete[] packedPixels;
         tex->Release();
         return nullptr;
@@ -89,6 +215,13 @@ bool tTexture::Create(int width, int height, int bpp, int alphaDepth,
     }
     texture = p3d::device->NewTexture();
     texture->SetData(width, height, bpp, alphaDepth, rgba);
+#if defined(RC_PLATFORM_PSP)
+    if (!static_cast<pspTexture*>(texture)->IsValid()) {
+        texture->Release();
+        texture = nullptr;
+        return false;
+    }
+#endif
     return true;
 }
 

@@ -171,7 +171,47 @@ namespace RsdFormat {
         u32 numChunks = totalBlocks / CHUNK_BLOCKS;
         u32 numPairs = numChunks / 2;
 
-        // Decode each chunk independently (filter state resets per chunk)
+#if defined(RC_PLATFORM_PSP)
+        // The PSP cannot afford a second full decoded copy of a music track.
+        // Decode one L/R pair at a time, downmix to mono and keep every other
+        // source frame. The native output is still mixed at 44.1 kHz, while
+        // music uses its original 11.025 kHz equivalent with interpolation.
+        const u32 sourceFrames = numPairs * SAMPLES_PER_CHUNK;
+        const u32 framesPerPair = SAMPLES_PER_CHUNK;
+        track.numFrames = sourceFrames / 2;
+        track.channels = 1;
+        track.sampleRate = 11025;
+        track.pcmData.resize(track.numFrames);
+
+        std::vector<s16> left(SAMPLES_PER_CHUNK);
+        std::vector<s16> right(SAMPLES_PER_CHUNK);
+        for (u32 p = 0; p < numPairs; p++) {
+            const u32 chunkIndices[2] = {p * 2, p * 2 + 1};
+            std::vector<s16>* channels[2] = {&left, &right};
+            for (u32 channel = 0; channel < 2; channel++) {
+                const u8* chunkBase = adpcmData + chunkIndices[channel] * CHUNK_BYTES;
+                s32 prev0 = 0, prev1 = 0;
+                for (u32 b = 0; b < CHUNK_BLOCKS; b++) {
+                    s16 blockOut[28];
+                    SpuAdpcm::DecodeBlock(chunkBase + b * 16, blockOut, prev0, prev1);
+                    memcpy(&(*channels[channel])[b * 28], blockOut, 28 * sizeof(s16));
+                }
+            }
+
+            s16* dst = &track.pcmData[p * (framesPerPair / 2)];
+            for (u32 i = 0; i < framesPerPair; i += 2) {
+                const s32 mixed = static_cast<s32>(left[i]) + static_cast<s32>(right[i]);
+                dst[i / 2] = static_cast<s16>(mixed / 2);
+            }
+        }
+#else
+        // Interleave even chunks (L) with odd chunks (R) into stereo PCM.
+        u32 framesPerPair = SAMPLES_PER_CHUNK;
+        track.numFrames = numPairs * framesPerPair;
+        track.channels = 2;
+        track.pcmData.resize(track.numFrames * 2);
+
+        // Decode each chunk independently (filter state resets per chunk).
         std::vector<std::vector<s16>> chunkPcm(numChunks);
         for (u32 c = 0; c < numChunks; c++) {
             const u8* chunkBase = adpcmData + c * CHUNK_BYTES;
@@ -184,12 +224,6 @@ namespace RsdFormat {
             }
         }
 
-        // Interleave even chunks (L) with odd chunks (R) into stereo PCM
-        u32 framesPerPair = SAMPLES_PER_CHUNK;
-        track.numFrames = numPairs * framesPerPair;
-        track.channels = 2;
-        track.pcmData.resize(track.numFrames * 2);
-
         for (u32 p = 0; p < numPairs; p++) {
             const s16* left = chunkPcm[p * 2].data();
             const s16* right = chunkPcm[p * 2 + 1].data();
@@ -199,6 +233,7 @@ namespace RsdFormat {
                 dst[i * 2 + 1] = right[i];
             }
         }
+#endif
 
         return track;
     }

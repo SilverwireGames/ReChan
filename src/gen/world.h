@@ -3,6 +3,7 @@
 #include "gen/manager.h"
 #include "gen/block.h"
 #include "gen/blockmgr.h"
+#include "p3d/stream.h"
 #include <vector>
 #include <string>
 
@@ -179,6 +180,15 @@ private:
     PsxVRAM vram;
     u32 vramHandle = 0;
     std::vector<u8> streamData; // LCF file data (kept alive for block pointers)
+#if defined(RC_PLATFORM_PSP)
+    // PSP streams stay on the Memory Stick; only the parsed directory and
+    // bounded entry scratch buffers remain resident in user RAM.
+    std::string streamPath;
+    std::vector<tStreamEntry> streamEntries;
+    std::vector<u8> pspStreamScratch;
+    std::vector<u8> pspPermScratch;
+    std::vector<u8> pspP3dScratch;
+#endif
     LVector levelMin = {}, levelMax = {};
 
     // Level table data (from RTARGET/GAME_LN.TXT via LoadLevelNames)
@@ -200,6 +210,11 @@ private:
     ccList switchLists[4];
 
     void LoadTPGTextures(const u8* lcfData, u32 lcfSize);
+    void LoadTPGTexturePayload(const u8* payload, u32 payloadSize);
+#if defined(RC_PLATFORM_PSP)
+    bool LoadPspStream(const std::string& lcfPath);
+    void LoadPspPetal(u32 petalIndex);
+#endif
     void PurgeSwitches();
     void CheckSwitchList(ccList& list, Thing* thing);
 

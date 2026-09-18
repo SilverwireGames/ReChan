@@ -15,6 +15,9 @@
 #include "pc/inputaction.h"
 #include "p3d/context.h"
 #include "pddi/pddidev.h"
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#include "psp/psp_perf.h"
+#endif
 
 #include <cctype>
 
@@ -106,15 +109,36 @@ void HUD::InternalReset() {
 // PSX: Display__3HUD (HUD.CPP:357, 0x8003F67C)
 void HUD::Display() {
     MARKFUNCTION(0x8003F67C);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud begin");
+#endif
     // PSX: EnterLayer(view0, 4)
 #if HIGH_FPS_PLAY_PRESENTATION
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud step flag begin");
+#endif
     const bool isPlayRenderOnlyFrame =
         (g_game && g_game->GetState() == GameState::Play && g_time && !g_time->DidPlayLogicStepThisFrame());
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud step flag done");
+#endif
     if (!isPlayRenderOnlyFrame) {
         if (tally.state == 9) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("render: hud game data begin");
+#endif
             GetGameData();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("render: hud game data done");
+#endif
         }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("render: hud update begin");
+#endif
         Update();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("render: hud update done");
+#endif
     }
 #else
     if (tally.state == 9) {
@@ -124,9 +148,18 @@ void HUD::Display() {
 #endif
     // Custom HUD rendering path replaces FE section overlays while preserving
     // all original HUD state/update behavior.
-#if CUSTOM_MENU
+#if CUSTOM_MENU && !defined(RC_PLATFORM_PSP)
+    #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud custom begin");
+    #endif
     g_customHudMgr.Render(*this);
+    #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud custom done");
+    #endif
 #else
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud section begin");
+#endif
     if (section) {
 #if FIX_ASPECT_RATIO
         widescreenPatches.DrawSection(section);
@@ -134,6 +167,12 @@ void HUD::Display() {
         section->Draw();
 #endif
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud section done");
+#endif
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: hud done");
 #endif
     // PSX: ExitLayer(view0, 4)
 }

@@ -19,15 +19,20 @@
 #include "gen/game.h"
 #include "gen/time.h"
 #include "gen/display.h"
+#include "gen/geometry.h"
 #include "snd/rsevent.h"
 #include "extra/fecustommenumgr.h"
+#if !defined(RC_PLATFORM_PSP)
 #include "extra/assetexporter.h"
+#endif
 #include "pc/apppaths.h"
+#if MOD_LOADER
 #include "extra/gltfloader.h"
+#endif
 #include "gen/model.h"
 #include "radlib/rtask.h"
 #include "ai/player.h"
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/modloader.h"
 #endif
 
@@ -44,6 +49,25 @@
 #include <unistd.h>
 #include <switch.h>
 #include "pddi/gles/glesrender.h"
+#endif
+
+#if defined(RC_PLATFORM_PSP)
+#include <pspiofilemgr.h>
+#include <pspkernel.h>
+#include <psppower.h>
+#include "psp/psp_perf.h"
+namespace p3d::io { void SetPspDevice(const char* device); }
+
+static void ConfigurePspPerformance() {
+    // The native 60 Hz target is CPU-bound while decoding PSX pages and
+    // submitting GU geometry.  Request the maximum supported user-mode PSP
+    // clock before constructing the game so load-time and frame-time work use
+    // the same performance envelope on hardware and PPSSPP.
+    const int result = scePowerSetClockFrequency(333, 333, 166);
+    if (result < 0) {
+        LOG("[PSP] scePowerSetClockFrequency failed: %d", result);
+    }
+}
 #endif
 
 static f32 sSavedMasterVolume = 1.0f;
@@ -130,7 +154,7 @@ static bool OnWndProc(const pddiWndMessage& msg) {
 }
 
 int main(int argc, char** argv) {
-#if !defined(NDEBUG)
+#if !defined(NDEBUG) && !defined(RC_PLATFORM_PSP)
     Log::Get().Init();
 #endif
     CrashReporter::Install();
@@ -167,6 +191,7 @@ int main(int argc, char** argv) {
 
     // Headless verification/export path used by automated round-trip checks
     // and mod authors who want the same output as the DebugUI button.
+#if !defined(RC_PLATFORM_PSP)
     if (argc >= 2 && std::strcmp(argv[1], "--export-assets") == 0) {
         const char* outputDir = (argc >= 3 && argv[2] && argv[2][0])
             ? argv[2]
@@ -180,8 +205,9 @@ int main(int argc, char** argv) {
 #endif
         return exported > 0 ? 0 : 2;
     }
+#endif
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (argc >= 3 && std::strcmp(argv[1], "--verify-png-baseline") == 0) {
         const bool unchanged = ModLoader::Instance().IsUnmodifiedTextureDump(argv[2]);
         LOG("[ModLoader] PNG baseline %s: %s", unchanged ? "matched" : "not matched", argv[2]);
@@ -190,6 +216,29 @@ int main(int argc, char** argv) {
 #endif
         return unchanged ? 0 : 5;
     }
+#endif
+
+#if defined(RC_PLATFORM_PSP)
+    ConfigurePspPerformance();
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::Reset();
+    PspPerf::Trace("main: telemetry reset");
+#endif
+
+    // EBOOT launches with the game directory as the working root on most
+    // shells, but explicitly selecting it also makes loading deterministic in
+    // PPSSPP and on installations using a different launch directory.
+    if (sceIoChdir("ms0:/PSP/GAME/RECHAN/data") < 0) {
+        if (sceIoChdir("ef0:/PSP/GAME/RECHAN/data") < 0) {
+            sceIoChdir("ms0:/PSP/GAME/RECHAN");
+        }
+        else {
+            p3d::io::SetPspDevice("ef0:");
+        }
+    }
+#if !defined(NDEBUG)
+    Log::Get().Init("PSP_LOG.TXT");
+#endif
 #endif
 
     tPlatform* platform = tPlatform::Create();
@@ -220,7 +269,7 @@ int main(int argc, char** argv) {
 
     TrySetPlatformWindowIcon();
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (argc >= 3 && std::strcmp(argv[1], "--verify-glb") == 0) {
         OriginalGeo* geometry = GLTFLoader::LoadGeo(argv[2]);
         const bool valid = geometry && geometry->meshBuffer;
@@ -284,7 +333,21 @@ int main(int argc, char** argv) {
 
     game.Open();
 
-#ifdef MOD_LOADER
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("main: game open");
+#endif
+
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    // The profile EBOOT is intended for unattended PPSSPP/hardware captures.
+    // Seed the first playable level and use the existing title auto-start path
+    // so the measured window contains real Play frames rather than title/menu
+    // rendering.  This is compiled out of the release target.
+    g_selectedLevel = 0;
+    game.QueueTitleNewGameStart();
+    PspPerf::Trace("main: queued auto start");
+#endif
+
+#if MOD_LOADER
     ModLoader::Instance().Init();
 #endif
 
@@ -295,6 +358,9 @@ int main(int argc, char** argv) {
     MARKFUNCTION(0x8002635C);
 
     f64 prevTime = Time::GetTimeInSeconds();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    u32 pspPlayTraceFrames = 0;
+#endif
 
     while (!p3d::display->ShouldClose()) {
         f64 frameStart = Time::GetTimeInSeconds();
@@ -352,9 +418,29 @@ int main(int argc, char** argv) {
 
         const GameState stateBeforeStep = game.GetState();
         const f64 stepT0 = Time::GetTimeInSeconds();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        const bool tracePspPlayFrame = stateBeforeStep == GameState::Play && pspPlayTraceFrames < 3;
+        if (tracePspPlayFrame) {
+            PspPerf::Trace("play: before Step");
+        }
+#endif
         g_frameProfile.drawSubmitMs = 0.0f;
+        g_frameProfile.swapMs = 0.0f;
         bool running = game.Step();
-        g_frameProfile.logicMs = (f32)((Time::GetTimeInSeconds() - stepT0) * 1000.0) - g_frameProfile.drawSubmitMs;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        if (tracePspPlayFrame) {
+            PspPerf::Trace("play: after Step");
+        }
+#endif
+        const f32 stepTotalMs = (f32)((Time::GetTimeInSeconds() - stepT0) * 1000.0);
+        g_frameProfile.logicMs = stepTotalMs
+            - g_frameProfile.drawSubmitMs
+            - g_frameProfile.swapMs;
+        if (g_frameProfile.logicMs < 0.0f) {
+            // Timer granularity can make the subtraction round a tiny amount
+            // below zero on a short frame; never publish a negative phase.
+            g_frameProfile.logicMs = 0.0f;
+        }
         if (!running) {
             // PC: If the game loop signals to stop, break out of the loop to shut down.
             if (game.GetState() == GameState::End) {
@@ -373,11 +459,45 @@ int main(int argc, char** argv) {
         else {
             rDoTaskList(&rMainTaskList, static_cast<u32>(rFrameCount60));
         }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        if (tracePspPlayFrame) {
+            PspPerf::Trace("play: after main tasks");
+        }
+#endif
 
         jcsUpdateAmbience();
         jcsUpdateDialogCD();
 
         g_time->WaitForFrameEnd(frameStart);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        if (tracePspPlayFrame) {
+            PspPerf::Trace("play: after WaitForFrameEnd");
+        }
+#endif
+#if defined(RC_PLATFORM_PSP)
+#if defined(PSP_PERF_TELEMETRY)
+        // Profile only the interactive game state. Boot, title and loading
+        // have intentionally different costs and would hide the gameplay
+        // frame budget. Once 600 gameplay frames are collected, stop cleanly
+        // so an unattended PPSSPP run still emits PSP_PERF.TXT.
+        if (game.GetState() == GameState::Play) {
+            PspPerf::RecordFrame(
+                static_cast<u32>((Time::GetTimeInSeconds() - frameStart) * 1000000.0),
+                g_frameProfile.logicMs,
+                g_frameProfile.drawSubmitMs,
+                g_frameProfile.swapMs);
+            if (PspPerf::ShouldStop()) {
+                break;
+            }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            if (tracePspPlayFrame) {
+                PspPerf::Trace("play: after RecordFrame");
+                ++pspPlayTraceFrames;
+            }
+#endif
+        }
+#endif
+#endif
 
         static f32 titleAccumSec = 0.0f;
         titleAccumSec += g_time->deltaTime;
@@ -389,6 +509,13 @@ int main(int argc, char** argv) {
         }
     }
 
+#if defined(RC_PLATFORM_PSP)
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::WriteReport();
+    PspPerf::Trace("main: report written");
+#endif
+    ShutdownPspGeometryFrameScratch();
+#endif
     platform->DestroyContext(ctx);
     tPlatform::Destroy();
 
@@ -415,7 +542,7 @@ int main(int argc, char** argv) {
     delete g_actionInput;
     g_actionInput = nullptr;
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     ModLoader::Instance().Shutdown();
 #endif
 

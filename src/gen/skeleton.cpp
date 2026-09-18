@@ -16,7 +16,7 @@
 #include <cstdlib>
 #include <vector>
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 // Registers a real-texture entry for a named VRAM-rect texture, preferring a
 // ModLoader override (at its own native resolution) and falling back to
 // decoding the original data already uploaded into world's VRAM (native PSX
@@ -26,7 +26,7 @@ static void RegisterRealTexture(World* world, const char* scope, const char* nam
                                  float offsetX, float offsetY, float sizeX, float sizeY) {
     if (!world) return;
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     std::vector<u8> overrideRgba;
     int overrideW = 0, overrideH = 0;
     if (ModLoader::Instance().GetTextureOverrideRGBA(scope, name, overrideRgba, overrideW, overrideH)) {
@@ -218,7 +218,7 @@ STreeData* ParseP3DStreamFull(const u8* data,
     u32 cpos = 6;
     u32 cend = (rootSize < size) ? rootSize : size;
 
-#if defined(MOD_LOADER) || defined(REAL_TEXTURE_RENDERING)
+#if MOD_LOADER || REAL_TEXTURE_RENDERING
     // CLUT chunks (e.g. "jeans5 CLUT") always precede their indexed data chunk
     // (e.g. "jeans5") within the stream. Remember each CLUT's VRAM rect by base
     // name so the matching data chunk can re-quantize+repaint (or register a
@@ -259,7 +259,7 @@ STreeData* ParseP3DStreamFull(const u8* data,
                     tp + (u32)(rw * rh * 2) <= tend) {
                     world->UploadToVRAM(rx, ry, rw, rh, data + tp);
 
-#if defined(MOD_LOADER) || defined(REAL_TEXTURE_RENDERING)
+#if MOD_LOADER || REAL_TEXTURE_RENDERING
                     static constexpr const char* kClutSuffix = " CLUT";
                     const size_t suffixPos = texName.size() >= 5 ? texName.size() - 5 : std::string::npos;
                     const bool isClut = suffixPos != std::string::npos && texName.compare(suffixPos, 5, kClutSuffix) == 0;
@@ -272,7 +272,7 @@ STreeData* ParseP3DStreamFull(const u8* data,
                         if (clutIt != pendingCluts.end()) {
                             const PendingClutRect& clutRect = clutIt->second;
                             const s16 paletteColorCount = clutRect.rw * clutRect.rh;
-#ifdef MOD_LOADER
+#if MOD_LOADER
                             std::vector<u16> clutOverride, indexOverride;
                             if (ModLoader::Instance().GetIndexedTextureOverride(
                                     textureScope, texName.c_str(), rw, rh, paletteColorCount,
@@ -283,7 +283,7 @@ STreeData* ParseP3DStreamFull(const u8* data,
                                 LOG("[ModLoader] Skeleton texture override: %s", texName.c_str());
                             }
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                             {
                                 const u8 ttx = static_cast<u8>(rx / 64), tty = static_cast<u8>(ry / 256);
                                 const int dep = (paletteColorCount == 256) ? 1 : 0;
@@ -299,14 +299,14 @@ STreeData* ParseP3DStreamFull(const u8* data,
 #endif
                         }
                         else {
-#ifdef MOD_LOADER
+#if MOD_LOADER
                             std::vector<u16> overridePixels;
                             if (ModLoader::Instance().GetTextureOverridePixels(textureScope, texName.c_str(), rw, rh, overridePixels)) {
                                 world->UploadToVRAM(rx, ry, rw, rh, reinterpret_cast<const u8*>(overridePixels.data()));
                                 LOG("[ModLoader] Skeleton texture override: %s", texName.c_str());
                             }
 #endif
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                             {
                                 const u8 ttx = static_cast<u8>(rx / 64), tty = static_cast<u8>(ry / 256);
                                 const u16 tpage = static_cast<u16>(ttx | (tty << 4) | (2 << 7));
@@ -1118,7 +1118,7 @@ void BuildPerJointMeshes(OriginalSTree* original, const u8* primGeomData, u32 pr
         return;
     }
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     // Re-sort the (already complete, triangle-list) index buffer by each
     // triangle's (tpage, cba) so the real-texture path can sub-range-draw
     // one material at a time. Vertex data/order is untouched -- only the

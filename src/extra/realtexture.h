@@ -3,7 +3,7 @@
 #include "gen/config.h"
 #include <unordered_map>
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 
 class pddiTexture;
 

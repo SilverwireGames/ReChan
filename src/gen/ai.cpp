@@ -562,6 +562,11 @@ Thing* AI::AddThingNoTagList(const char* name, u16 type,
                 shouldLoadCharacter = g_characterManager->GetNumberCharactersLoaded() < 4;
             }
 
+            LOG("[CharLoad] type=%u isLoaded=%d count=%d shouldLoad=%d",
+                type,
+                g_characterManager->IsCharacterLoaded(type) ? 1 : 0,
+                g_characterManager->GetNumberCharactersLoaded(),
+                shouldLoadCharacter ? 1 : 0);
             if (shouldLoadCharacter) {
                 g_characterManager->EnableCache(type, 1);
                 g_characterManager->LoadCharacter(type, nullptr);
@@ -953,6 +958,7 @@ void AI::Populate() {
             }
             AddThingNoTagList(pt->GetName(), subType, &pt->pos,
                               (const SVector*)&pt->field40, modelName, pt);
+            LOG("[AI::Populate] spawned subtype=%u", subType);
         }
         else {
             // Player spawn point (type 6, subType 0)
@@ -1084,6 +1090,7 @@ void AI::Populate() {
         AddThingNoTagList(vol->GetName(), vol->subType, &vol->pos,
                           nullptr, nullptr, vol);
     }
+    LOG("[AI::Populate] complete");
 }
 
 // PSX: UnPopulate__2AIs (AI.CPP:1906, 0x800567CC)

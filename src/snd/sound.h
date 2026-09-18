@@ -1,4 +1,5 @@
 #pragma once
+#include "gen/config.h"
 #include "gen/manager.h"
 #include "pc/audio.h"
 
@@ -70,7 +71,7 @@ public:
     f32 pendingMusicVolume = 1.0f;
     bool PreloadMusicTrack(const char* fagPath, f32 volume = 1.0f);
     bool StartPreloadedMusic();
-#ifdef MOD_LOADER
+#if MOD_LOADER
     bool TryPlayMusicOverride(const char* fagPath, f32 volume);
 #endif
     void StopMusic();

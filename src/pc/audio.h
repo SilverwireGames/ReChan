@@ -1,5 +1,6 @@
 #pragma once
 #include "core.h"
+#include <vector>
 
 // Opaque handle types
 using AudioSample = u32;  // handle to a loaded sample in the engine
@@ -27,6 +28,12 @@ public:
     // Sample management (preloaded PCM in memory)
     // data: interleaved s16 PCM, takes ownership via copy
     static AudioSample LoadSample(const s16* data, u32 numFrames, u32 sampleRate, u32 channels);
+#if defined(RC_PLATFORM_PSP)
+    // PSP-only fast path: transfer ownership of a decoded track instead of
+    // copying a multi-megabyte music buffer into the sample table.
+    static AudioSample LoadSampleOwned(std::vector<s16>&& data, u32 numFrames,
+                                       u32 sampleRate, u32 channels);
+#endif
     static void UnloadSample(AudioSample handle);
     static void UnloadAllSamples();
 
@@ -64,6 +71,11 @@ public:
 
     // Streaming music (reads from file, decoded on the fly)
     static bool PlayMusic(const char* path, f32 volume = 1.0f, bool loop = true);
+#if defined(RC_PLATFORM_PSP)
+    // Select a song entry from a multi-song FAG without decoding the whole file.
+    static bool PlayMusicSong(const char* path, u32 songIndex,
+                              f32 volume = 1.0f, bool loop = true);
+#endif
     static bool PlayMusicSample(AudioSample sample, f32 volume = 1.0f, bool loop = true);
     static void StopMusic();
     static void SetMusicVolume(f32 volume);

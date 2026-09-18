@@ -4,7 +4,7 @@
 #include "gen/cclist.h"
 #include "gen/shadows.h"
 #include "gen/config.h"
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #include <vector>
 #endif
@@ -152,7 +152,7 @@ struct OriginalSTree : public OriginalBasic {
     pddiPrimBuffer* meshBuffer = nullptr;
     u32 meshVertCount = 0;
     u32 meshTriCount = 0;
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     // Index-buffer ranges grouped by (tpage, cba), built once alongside
     // meshBuffer, for the real-texture rendering path's sub-range draws.
     std::vector<RealTextureGroup> realTexGroups;
@@ -186,7 +186,7 @@ struct OriginalSTree : public OriginalBasic {
 // PC: stores a PC-ready prim buffer built from tDynGeom polygon data.
 struct OriginalGeo : public OriginalBasic {
     pddiPrimBuffer* meshBuffer = nullptr;
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     // Index-buffer ranges grouped by (tpage, cba), built once alongside
     // meshBuffer, for the real-texture rendering path's sub-range draws.
     std::vector<RealTextureGroup> realTexGroups;

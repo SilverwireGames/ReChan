@@ -29,6 +29,10 @@ public:
                     const u32* blkSizes,
                     u32 blkCount);
 
+    // PSP streaming path parses one BLK at a time from the Memory Stick so
+    // the complete LCF never has to remain resident.
+    void LoadBlockAt(u32 index, const u8* blkData, u32 blkSize);
+
     // get block by index
     Block* GetBlock(u32 index);
 

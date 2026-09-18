@@ -1894,6 +1894,10 @@ void Humanoid::CreateModel(const char* name) {
     // PSX: calls Thing::CreateModel which does the LevelManager lookup
     Thing::CreateModel(name);
 
+    LOG("[Spawn] id=%p type=%u pos=(%d,%d,%d) subType=%d",
+        static_cast<void*>(this), static_cast<u32>(thingType),
+        pos.x, pos.y, pos.z, static_cast<s32>(characterSubType));
+
     // PSX: ApplyAnimToModel(thingType, 0, 2, 0, 0) then InitSemiTransMode
     Model* m = static_cast<Model*>(model);
     if (m) {
@@ -2158,6 +2162,12 @@ void Humanoid::HandleCollision(Thing* other, s32 damage, ...) {
 
     if (hitPoints == 0) {
         hitPoints = damage;
+    }
+
+    if (thingType != 0) {
+        LOG("[Hit] id=%p type=%u otherType=%u hitType=%d region=%d dmg=%d state=%d",
+            static_cast<void*>(this), static_cast<u32>(thingType), static_cast<u32>(other->thingType),
+            hitType, impactRegion, hitPoints, static_cast<s32>(actionState));
     }
 
     const bool otherIsHumanoid = other->thingType < static_cast<u16>(AITypes::TT_HUMANOID_LAST + 1);
@@ -2514,6 +2524,23 @@ void Humanoid::SetActionState(u32 state, s32 param) {
 
     s32 prevState = actionState;
     (void)prevState;
+
+    if (thingType != 0 && static_cast<s32>(state) != prevState) {
+        s32 curAnim = -1;
+        if (model) {
+            Model* dbgModel = static_cast<Model*>(model);
+            if (dbgModel->animStructure) {
+                curAnim = static_cast<AnimStructure*>(dbgModel->animStructure)->animEnum;
+            }
+        }
+        LOG(
+            "[State] thingType=%u %d -> %d param=%d anim=%d",
+            static_cast<u32>(thingType),
+            prevState,
+            static_cast<s32>(state),
+            param,
+            curAnim);
+    }
 
     // PSX preamble: clear combatFlag, set flags bit 11, end sounds
     combatFlag = 0;
@@ -3408,6 +3435,10 @@ s32 Humanoid::GetStraifPhase() {
 void Humanoid::RequestAction(u32 actionID) {
     MARKFUNCTION(0x8006CFFC);
     commandBits |= (1 << actionID);
+    if (thingType == 22 || thingType == 16) {
+        LOG("[RequestAction] thingType=%u id=%u cmd=0x%08X state=%d",
+            static_cast<u32>(thingType), actionID, static_cast<u32>(commandBits), static_cast<s32>(actionState));
+    }
 }
 
 // PSX: FaceThing__8HumanoidP5Thingi (HUMANOID.CPP:2252)
@@ -6075,6 +6106,15 @@ s32 Humanoid::SetCurrentFightingNode() {
 
     const PsxFightingMoveRaw* move = nextNode->moveData;
     HumanoidModel* hm = static_cast<HumanoidModel*>(model);
+    if (thingType != 0) {
+        LOG(
+            "[FightNode] id=%p thingType=%u node=0x%08X anim=%d loaded=%d state=%d",
+            static_cast<void*>(this), static_cast<u32>(thingType),
+            static_cast<u32>(nextNode->psxAddress),
+            static_cast<s32>(move->anim),
+            static_cast<s32>(hm->IsAnimationLoaded(static_cast<s32>(move->anim))),
+            static_cast<s32>(actionState));
+    }
     if (!hm->IsAnimationLoaded(static_cast<s32>(move->anim))) {
         if (rightHandObj || leftHandObj) {
             const Pickup* heldPickup = rightHandObj
@@ -7058,6 +7098,13 @@ s32 Humanoid::EnterCombatCombo() {
     field488 = FindSiblingWithRequestedCommand(
         static_cast<const FightingComboNode*>(defaultFightingSystem),
         static_cast<u32>(commandBits));
+
+    if (thingType == 22 || thingType == 16) {
+        LOG("[EnterCombo] thingType=%u cmd=0x%08X root=0x%08X node=0x%08X state=%d",
+            static_cast<u32>(thingType), static_cast<u32>(commandBits),
+            static_cast<u32>(reinterpret_cast<uintptr_t>(defaultFightingSystem)),
+            static_cast<u32>(field488), static_cast<s32>(actionState));
+    }
 
     if (field488 == 0) {
         if (heldPickup) {

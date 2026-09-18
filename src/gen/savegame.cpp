@@ -10,9 +10,9 @@
 #if NEW_CHEATS
 #include "extra/cheats.h"
 #endif
-#include <filesystem>
-#include <ctime>
 #include <cstdio>
+#include <cerrno>
+#include <ctime>
 #include <cstring>
 
 static constexpr u32 kSaveMagic = 0x53415645u;    // SAVE
@@ -54,7 +54,7 @@ static bool BuildSlotPath(s32 slotIndex, char* outPath, s32 outPathLen) {
         return false;
     }
 
-    snprintf(outPath, outPathLen, kSavePathFmt, slotIndex + 1);
+    snprintf(outPath, outPathLen, kSavePathFmt, static_cast<int>(slotIndex + 1));
     return true;
 }
 
@@ -291,9 +291,8 @@ bool SaveGameWriteAutosave() {
 }
 
 bool SaveGameDeleteAutosave() {
-    std::error_code ec;
-    std::filesystem::remove(kAutosavePath, ec);
-    return !ec;
+    const int result = std::remove(kAutosavePath);
+    return result == 0 || errno == ENOENT;
 }
 
 bool SaveGameDeleteSlot(s32 slotIndex) {
@@ -302,9 +301,8 @@ bool SaveGameDeleteSlot(s32 slotIndex) {
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    return !ec;
+    const int result = std::remove(path);
+    return result == 0 || errno == ENOENT;
 }
 
 bool SaveGameLoadSlot(s32 slotIndex) {

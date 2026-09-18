@@ -44,6 +44,22 @@ struct QueuedShadowFan {
 static bool s_modelShadowQueueActive = false;
 static std::vector<QueuedShadowFan> s_modelShadowQueue;
 
+#if defined(RC_PLATFORM_PSP)
+static pddiPrimBuffer* GetPspShadowBuffer(s32 pointCount) {
+    static pddiPrimBuffer* buffers[2] = {};
+    const s32 bufferIndex = (pointCount == 4) ? 0 : 1;
+    if (!buffers[bufferIndex] && p3d::device) {
+        const u32 format = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        buffers[bufferIndex] = p3d::device->NewPrimBuffer(
+            pddiPrimBufferDesc(PDDI_PRIM_TRIANGLES,
+                               format,
+                               static_cast<u32>(pointCount + 1),
+                               static_cast<u32>(pointCount * 3)));
+    }
+    return buffers[bufferIndex];
+}
+#endif
+
 static bool IsValidShadowFloorHeight(s32 floorHeight) {
     return floorHeight > COLLISION_SECTOR_MIN_HEIGHT;
 }
@@ -197,7 +213,11 @@ void ShadowShow(const LVector& center, LVector* points, s32 pointCount) {
                             PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO,
                             vertCount,
                             indexCount);
+#if defined(RC_PLATFORM_PSP)
+    pddiPrimBuffer* buffer = GetPspShadowBuffer(pointCount);
+#else
     pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+#endif
     if (!buffer) {
         return;
     }
@@ -218,7 +238,9 @@ void ShadowShow(const LVector& center, LVector* points, s32 pointCount) {
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     p3d::context->SetWorldMatrix(savedWorld);
 
+#if !defined(RC_PLATFORM_PSP)
     buffer->Release();
+#endif
 }
 
 // PSX: TreeShadow::TreeShadow (SHADOW.CPP:249, 0x800AEFE0)
@@ -376,6 +398,11 @@ void SimpleShadow::Show(void* /*view*/) {
 
 void BeginModelShadowQueue() {
     s_modelShadowQueueActive = true;
+#if defined(RC_PLATFORM_PSP)
+    if (s_modelShadowQueue.capacity() < 128u) {
+        s_modelShadowQueue.reserve(128u);
+    }
+#endif
     s_modelShadowQueue.clear();
 }
 
@@ -396,22 +423,59 @@ void EndModelShadowQueue() {
     s_modelShadowQueue.clear();
 }
 
+#if defined(RC_PLATFORM_PSP)
+struct LateEntityDraw {
+    LateEntityDrawCallback callback = nullptr;
+    void* context = nullptr;
+};
+
+static std::vector<LateEntityDraw> s_lateEntityDrawQueue;
+static std::vector<LateEntityDraw> s_lateEntityDrawPending;
+
+void QueueLateEntityDraw(LateEntityDrawCallback callback, void* context) {
+    if (!callback) {
+        return;
+    }
+    if (s_lateEntityDrawQueue.capacity() < 64u) {
+        s_lateEntityDrawQueue.reserve(64u);
+    }
+    s_lateEntityDrawQueue.push_back({ callback, context });
+}
+#else
 static std::vector<std::function<void()>> s_lateEntityDrawQueue;
+static std::vector<std::function<void()>> s_lateEntityDrawPending;
 
 void QueueLateEntityDraw(std::function<void()> drawFn) {
     s_lateEntityDrawQueue.push_back(std::move(drawFn));
 }
+#endif
 
 void FlushLateEntityDrawQueue() {
     if (s_lateEntityDrawQueue.empty()) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    if (s_lateEntityDrawPending.capacity() < s_lateEntityDrawQueue.size()) {
+        s_lateEntityDrawPending.reserve(s_lateEntityDrawQueue.size());
+    }
+    s_lateEntityDrawPending.clear();
+    s_lateEntityDrawPending.swap(s_lateEntityDrawQueue);
+    std::vector<LateEntityDraw>& pending = s_lateEntityDrawPending;
+#else
     std::vector<std::function<void()>> pending = std::move(s_lateEntityDrawQueue);
     s_lateEntityDrawQueue.clear();
+#endif
     for (auto& drawFn : pending) {
+#if defined(RC_PLATFORM_PSP)
+        drawFn.callback(drawFn.context);
+#else
         if (drawFn) {
             drawFn();
         }
+#endif
     }
+#if defined(RC_PLATFORM_PSP)
+    pending.clear();
+#endif
 }

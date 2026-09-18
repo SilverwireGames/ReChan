@@ -1,5 +1,6 @@
 #pragma once
 #include "core.h"
+#include "gen/config.h"
 #include "gen/savegame.h"
 #include "extra/customtext.h"
 #include "extra/colorpulse.h"
@@ -35,7 +36,7 @@ enum MenuPage : s32 {
 #if NEW_CHEATS
     MenuPage_Cheats,
 #endif
-#ifdef MOD_LOADER
+#if MOD_LOADER
     MenuPage_Mods,
 #endif
     MenuPage_LoadSlots,
@@ -207,7 +208,7 @@ enum EntryEvent : u8 {
 #define DEF_SAVE_AUTOSAVE_GAP 12
 #define DEF_SAVE_TABLE_SIDE_PAD 12
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #define DEF_MODS_WINDOW_W 400
 #define DEF_MODS_WINDOW_H 198
 #define DEF_MODS_VISIBLE_ROWS 8
@@ -499,11 +500,25 @@ private:
 
     // frontend
     static constexpr const char* kMenuOrnamentTexturePath = "pc/textures/frontend/menu_ornament.png";
+#if defined(RC_PLATFORM_PSP)
+    // PSP packages contain a pre-scaled 480x272 frontend set.  Loading the
+    // desktop 1920x1080 PNGs would need several megabytes of transient RGBA
+    // memory before the GU texture is even created.
+    static constexpr const char* kTitleScreenBackgroundTexturePath = "psp/textures/frontend/background.ptex";
+    static constexpr const char* kTitleScreenJackieTexturePath = "psp/textures/frontend/jackie.ptex";
+    static constexpr const char* kTitleScreenLogoTexturePath = "psp/textures/frontend/jcslogo.ptex";
+#else
     static constexpr const char* kTitleScreenBackgroundTexturePath = "pc/textures/frontend/background.png";
     static constexpr const char* kTitleScreenJackieTexturePath = "pc/textures/frontend/jackie.png";
     static constexpr const char* kTitleScreenLogoTexturePath = "pc/textures/frontend/jcslogo.png";
+#endif
+#if defined(RC_PLATFORM_PSP)
+    static constexpr const char* kGameOverTexturePath = "psp/textures/frontend/game_over.ptex";
+    static constexpr const char* kLoadingBarTexturePath = "psp/textures/frontend/loading_bar.ptex";
+#else
     static constexpr const char* kGameOverTexturePath = "pc/textures/frontend/game_over.png";
     static constexpr const char* kLoadingBarTexturePath = "pc/textures/frontend/loading_bar.png";
+#endif
     static constexpr const char* kSliderOTexturePath = "pc/textures/frontend/slider_o.png";
     static constexpr const char* kSliderFTexturePath = "pc/textures/frontend/slider_f.png";
 
@@ -534,7 +549,7 @@ private:
     void RenderKeyBindingsPage(s32 panelX, s32 panelY, s32 panelW, s32 panelH,
                                const xcColour1555& normalColor,
                                const xcColour1555& selectedColor) const;
-#ifdef MOD_LOADER
+#if MOD_LOADER
     void RenderModsPage(s32 panelX, s32 panelY, s32 panelW, s32 panelH,
                         const xcColour1555& normalColor,
                         const xcColour1555& selectedColor) const;
@@ -631,7 +646,7 @@ private:
     bool m_keyBindCaptureActive = false;
     s32 m_keyBindCaptureBlockFrames = 0;
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     s32 m_modCursor = 0;
     s32 m_modScrollTop = 0;
     f32 m_modScrollVisual = 0.0f;

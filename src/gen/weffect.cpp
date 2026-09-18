@@ -39,6 +39,46 @@
 
 #include "extra/shadowcsm.h"
 
+#if defined(RC_PLATFORM_PSP)
+namespace {
+
+struct PspFastSortedTri {
+    GeoRenderVertex verts[3] = {};
+    f32 depth = 0.0f;
+    bool usesSemiTrans = false;
+    u8 semiTransMode = 0;
+};
+
+struct PspFastSortedQuad {
+    GeoRenderVertex verts[4] = {};
+    f32 depth = 0.0f;
+    bool usesSemiTrans = false;
+    u8 semiTransMode = 0;
+};
+
+struct PspWEffectFrameScratch {
+    std::vector<u32> colorList;
+    std::vector<GeoRenderVertex> baseVertices;
+    std::vector<PspFastSortedTri> sortedTriangles;
+    std::vector<PspFastSortedQuad> sortedQuads;
+    std::vector<Mat4> partJointMatrices;
+    pddiPrimBuffer* sortedTriangleBuffer = nullptr;
+    pddiPrimBuffer* sortedQuadBuffer = nullptr;
+};
+
+PspWEffectFrameScratch g_pspWEffectFrameScratch;
+
+template <typename T>
+void ResizeRetainedWEffectScratch(std::vector<T>& buffer, std::size_t count) {
+    if (buffer.capacity() < count) {
+        buffer.reserve(count);
+    }
+    buffer.resize(count);
+}
+
+} // namespace
+#endif
+
 static ComEffect* g_wEffectComEffects[64] = {};
 static ComEffect* g_wEffectOwnedEffects[64] = {};
 static s32 g_wEffectComEffectCount = 0;
@@ -182,6 +222,14 @@ void ComEffect_ClearLateRenderQueue() {
 }
 
 void ComEffect_BeginLateRenderQueue(s32 blockNum) {
+#if defined(RC_PLATFORM_PSP)
+    // Late effects are queued once per world block. Keep the backing storage
+    // alive across frames so the queue itself does not become a frame-time
+    // allocator on the PSP.
+    if (s_lateComEffectQueue.capacity() < 128u) {
+        s_lateComEffectQueue.reserve(128u);
+    }
+#endif
     s_lateComEffectQueueEnabled = true;
     s_lateComEffectQueueBlock = blockNum;
 }
@@ -201,6 +249,32 @@ void ComEffect_FlushLateRenderQueue(s32 blockNum) {
     s_lateComEffectQueueEnabled = false;
     s_lateComEffectQueueFlushing = true;
 
+#if defined(RC_PLATFORM_PSP)
+    // Rendering a queued effect cannot append another queued effect while the
+    // flushing guard is set. Compact unmatched blocks in the same allocation,
+    // then resize once; this removes the temporary vector and its per-flush
+    // allocation while preserving queue order.
+    const std::size_t queuedCount = s_lateComEffectQueue.size();
+    std::size_t writeIndex = 0;
+    for (std::size_t readIndex = 0; readIndex < queuedCount; ++readIndex) {
+        const LateComEffectRender queued = s_lateComEffectQueue[readIndex];
+        if (queued.blockNum == blockNum && queued.effect) {
+            queued.effect->SetFrame(queued.frame);
+            queued.effect->Render(
+                queued.pos,
+                queued.hasScale ? &queued.scale : nullptr,
+                queued.hasRotation ? &queued.rotation : nullptr,
+                queued.flags);
+        }
+        else {
+            if (writeIndex != readIndex) {
+                s_lateComEffectQueue[writeIndex] = queued;
+            }
+            ++writeIndex;
+        }
+    }
+    s_lateComEffectQueue.resize(writeIndex);
+#else
     std::vector<LateComEffectRender> remaining;
     remaining.reserve(s_lateComEffectQueue.size());
 
@@ -219,6 +293,7 @@ void ComEffect_FlushLateRenderQueue(s32 blockNum) {
     }
 
     s_lateComEffectQueue = std::move(remaining);
+#endif
 
     s_lateComEffectQueueFlushing = false;
     s_lateComEffectQueueEnabled = savedEnabled;
@@ -1013,7 +1088,12 @@ static void ApplyPerPrimWord1(OriginalGeo* geo, const GeoRenderVertex* baseVerts
         return PrimMatchesFastRenderClass(fastPrimCmd, primCmd);
     };
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<u32>& colorList = g_pspWEffectFrameScratch.colorList;
+    ResizeRetainedWEffectScratch(colorList, geo->dynamicColorCount);
+#else
     std::vector<u32> colorList(geo->dynamicColorCount, 0u);
+#endif
     for (u32 i = 0; i < geo->dynamicColorCount; i++) {
         colorList[i] = geo->dynamicColorList[i] & 0x00FFFFFFu;
     }
@@ -3896,6 +3976,18 @@ bool ComEffect::ResolveGeoByIndex(u32 geoIndex, OriginalGeo** outGeo, Mat4* outL
                 : nullptr;
 
             if (skeleton) {
+#if defined(RC_PLATFORM_PSP)
+                std::vector<Mat4>& partJointMatrices = g_pspWEffectFrameScratch.partJointMatrices;
+                ResizeRetainedWEffectScratch(partJointMatrices, skeleton->numJoints);
+                skeleton->ComputeWorldMatricesWithCallbacks(partJointMatrices.data());
+                const Mat4* partMatrix = FindETreeJointWorldMatrixByHash(
+                    skeleton,
+                    partJointMatrices.data(),
+                    original->geoPartJointHashes[partIndex]);
+                if (partMatrix) {
+                    *outLocalMatrix = *partMatrix;
+                }
+#else
                 Mat4* partJointMatrices = new Mat4[skeleton->numJoints];
                 if (partJointMatrices) {
                     skeleton->ComputeWorldMatricesWithCallbacks(partJointMatrices);
@@ -3909,6 +4001,7 @@ bool ComEffect::ResolveGeoByIndex(u32 geoIndex, OriginalGeo** outGeo, Mat4* outL
 
                     delete[] partJointMatrices;
                 }
+#endif
             }
         }
 
@@ -4101,12 +4194,16 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    using FastSortedTri = PspFastSortedTri;
+#else
     struct FastSortedTri {
         GeoRenderVertex verts[3] = {};
         f32 depth = 0.0f;
         bool usesSemiTrans = false;
         u8 semiTransMode = 0;
     };
+#endif
 
     const Mat4 savedWorld = p3d::context->GetWorldMatrix();
     const Mat4& viewMatrix = p3d::context->GetViewMatrix();
@@ -4116,16 +4213,28 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<GeoRenderVertex>& baseVertexStorage = g_pspWEffectFrameScratch.baseVertices;
+    ResizeRetainedWEffectScratch(baseVertexStorage, drawGeo->dynamicVertCount);
+    GeoRenderVertex* baseVerts = baseVertexStorage.data();
+#else
     GeoRenderVertex* baseVerts = new GeoRenderVertex[drawGeo->dynamicVertCount];
     if (!baseVerts) {
         return;
     }
+#endif
 
     std::memcpy(baseVerts,
                 drawGeo->dynamicVerts,
                 sizeof(GeoRenderVertex) * drawGeo->dynamicVertCount);
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<FastSortedTri>& sortedTris = g_pspWEffectFrameScratch.sortedTriangles;
+    ResizeRetainedWEffectScratch(sortedTris,
+                                  static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
+#else
     std::vector<FastSortedTri> sortedTris(static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
+#endif
     u32 sortedTriCount = 0;
 
     for (u32 drawIndex = 0; drawIndex < fastDrawCount; drawIndex++) {
@@ -4206,7 +4315,9 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
                 baseVerts,
                 sizeof(GeoRenderVertex) * drawGeo->dynamicVertCount);
     drawGeo->meshBuffer->SetVertexData(drawGeo->dynamicVerts, drawGeo->dynamicVertCount);
+#if !defined(RC_PLATFORM_PSP)
     delete[] baseVerts;
+#endif
 
     if (sortedTriCount == 0u) {
         return;
@@ -4230,7 +4341,14 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
     for (u32 triIndex = 0; triIndex < sortedTriCount; triIndex++) {
         const FastSortedTri& tri = sortedTris[triIndex];
         pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format, 3u, 3u);
+#if defined(RC_PLATFORM_PSP)
+        if (!g_pspWEffectFrameScratch.sortedTriangleBuffer) {
+            g_pspWEffectFrameScratch.sortedTriangleBuffer = p3d::device->NewPrimBuffer(desc);
+        }
+        pddiPrimBuffer* buffer = g_pspWEffectFrameScratch.sortedTriangleBuffer;
+#else
         pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+#endif
         if (!buffer) {
             continue;
         }
@@ -4255,7 +4373,9 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
             p3d::context->SetBlendMode(PDDI_BLEND_NONE);
         }
 
+#if !defined(RC_PLATFORM_PSP)
         buffer->Release();
+#endif
     }
 
     p3d::context->SetWorldMatrix(savedWorld);
@@ -4268,12 +4388,16 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    using FastSortedQuad = PspFastSortedQuad;
+#else
     struct FastSortedQuad {
         GeoRenderVertex verts[4] = {};
         f32 depth = 0.0f;
         bool usesSemiTrans = false;
         u8 semiTransMode = 0;
     };
+#endif
 
     const Mat4 savedWorld = p3d::context->GetWorldMatrix();
     const Mat4& viewMatrix = p3d::context->GetViewMatrix();
@@ -4283,16 +4407,28 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<GeoRenderVertex>& baseVertexStorage = g_pspWEffectFrameScratch.baseVertices;
+    ResizeRetainedWEffectScratch(baseVertexStorage, drawGeo->dynamicVertCount);
+    GeoRenderVertex* baseVerts = baseVertexStorage.data();
+#else
     GeoRenderVertex* baseVerts = new GeoRenderVertex[drawGeo->dynamicVertCount];
     if (!baseVerts) {
         return;
     }
+#endif
 
     std::memcpy(baseVerts,
                 drawGeo->dynamicVerts,
                 sizeof(GeoRenderVertex) * drawGeo->dynamicVertCount);
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<FastSortedQuad>& sortedQuads = g_pspWEffectFrameScratch.sortedQuads;
+    ResizeRetainedWEffectScratch(sortedQuads,
+                                  static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
+#else
     std::vector<FastSortedQuad> sortedQuads(static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
+#endif
     u32 sortedQuadCount = 0;
 
     for (u32 drawIndex = 0; drawIndex < fastDrawCount; drawIndex++) {
@@ -4373,7 +4509,9 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
                 baseVerts,
                 sizeof(GeoRenderVertex) * drawGeo->dynamicVertCount);
     drawGeo->meshBuffer->SetVertexData(drawGeo->dynamicVerts, drawGeo->dynamicVertCount);
+#if !defined(RC_PLATFORM_PSP)
     delete[] baseVerts;
+#endif
 
     if (sortedQuadCount == 0u) {
         return;
@@ -4397,7 +4535,14 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
     for (u32 quadIndex = 0; quadIndex < sortedQuadCount; quadIndex++) {
         const FastSortedQuad& quad = sortedQuads[quadIndex];
         pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format, 4u, 6u);
+#if defined(RC_PLATFORM_PSP)
+        if (!g_pspWEffectFrameScratch.sortedQuadBuffer) {
+            g_pspWEffectFrameScratch.sortedQuadBuffer = p3d::device->NewPrimBuffer(desc);
+        }
+        pddiPrimBuffer* buffer = g_pspWEffectFrameScratch.sortedQuadBuffer;
+#else
         pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+#endif
         if (!buffer) {
             continue;
         }
@@ -4422,7 +4567,9 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
             p3d::context->SetBlendMode(PDDI_BLEND_NONE);
         }
 
+#if !defined(RC_PLATFORM_PSP)
         buffer->Release();
+#endif
     }
 
     p3d::context->SetWorldMatrix(savedWorld);

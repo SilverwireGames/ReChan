@@ -10,6 +10,7 @@
 #include "pddi/pddi.h"
 #include "pddi/pddidev.h"
 #include "pc/log.h"
+#include "psp/psp_perf.h"
 
 u32 splat_fog_near = 0;
 u32 splat_fog_far = 0;
@@ -363,8 +364,10 @@ bool Block::Draw(const LVector* drawPos) {
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     p3d::context->SetCullMode(PDDI_CULL_NONE);
 
+    PspPerf::Trace("block draw: uv begin");
     UpdateUVPrimData(blockNum, primGeom);
     UpdateCBVPrimData(blockNum, primGeom);
+    PspPerf::Trace("block draw: uv done");
 
     const u16 blockFogNear = fogMinDist;
     const u16 blockFogFar = fogMaxDist;
@@ -397,7 +400,9 @@ bool Block::Draw(const LVector* drawPos) {
         fogFar = globalFogFar;
     }
     else {
+        PspPerf::Trace("block draw: clip begin");
         RP_ZCullGClip(primGeom, drawPos);
+        PspPerf::Trace("block draw: clip done");
         p3d::context->SetWorldMatrix(savedWorld);
         return true;
     }
@@ -416,7 +421,9 @@ bool Block::Draw(const LVector* drawPos) {
             splat_dynamic_light);
         s_seenGMFogCall = 1;
     }
+    PspPerf::Trace("block draw: fog begin");
     const int drew = RP_ZCullGMFog(primGeom, drawPos, fogNear, fogFar, fogCol);
+    PspPerf::Trace("block draw: fog done");
     if (!drew) {
         LOG("[Block] GMFog draw dropped: block=%u primGeom=%p near=%u far=%u col=0x%06X gNear=%u gFar=%u gCol=0x%06X",
             blockNum,
@@ -508,4 +515,3 @@ void Block::LoadPrim(const u8* primData, u32 primSize) {
 
     primGeom = geom;
 }
-

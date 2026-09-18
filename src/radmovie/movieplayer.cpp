@@ -3,7 +3,7 @@
 #include "pc/audio.h"
 #include "pc/textmgr.h"
 #include "pc/tim.h"
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/modloader.h"
 #endif
 #include "p3d/texture.h"
@@ -20,7 +20,9 @@
 #include <sstream>
 #include <unordered_map>
 #include <vector>
+#if MOD_LOADER
 #include <filesystem>
+#endif
 
 // Reference: "The PlayStation 1 Video (STR) Format" v1.20 by Michael Sabin (MIT license)
 
@@ -324,7 +326,7 @@ bool MoviePlayer::LoadSubtitles(const char* moviePath) {
         subtitlePath.replace(extension, std::string::npos, ".srt");
     }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     const std::string movieStem = std::filesystem::path(moviePath).stem().string();
     if (const std::string* modSubtitle = ModLoader::Instance().FindSubtitleOverridePath(movieStem.c_str())) {
         subtitlePath = *modSubtitle;
@@ -1383,9 +1385,9 @@ void MoviePlayer::MacroblockToRGB(const s32 cr[64], const s32 cb[64],
             s32 g = Yshift + ShrRound(-JPSXDEC_0_3437 * Cb - JPSXDEC_0_7143 * Cr, 16);
             s32 b = Yshift + ShrRound(JPSXDEC_1_772 * Cb, 16);
 
-            r = Clamp(r, 0, 255);
-            g = Clamp(g, 0, 255);
-            b = Clamp(b, 0, 255);
+            r = Clamp(r, static_cast<s32>(0), static_cast<s32>(255));
+            g = Clamp(g, static_cast<s32>(0), static_cast<s32>(255));
+            b = Clamp(b, static_cast<s32>(0), static_cast<s32>(255));
 
             rgbaOut[py * stride + px] = (255u << 24) | ((u32)b << 16) | ((u32)g << 8) | (u32)r;
         }
@@ -1464,7 +1466,7 @@ void MoviePlayer::DecodeXAAudio(const u8* sectorData, u8 codingInfo) {
                 // Decode ADPCM
                 s32 sample = (nibble << (12 - range));
                 sample += (k0 * (s32)prevSample[ch][0] + k1 * (s32)prevSample[ch][1]) / 64;
-                sample = Clamp(sample, -32768, 32767);
+                sample = Clamp(sample, static_cast<s32>(-32768), static_cast<s32>(32767));
 
                 prevSample[ch][1] = prevSample[ch][0];
                 prevSample[ch][0] = (f64)sample;

@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 struct ModInfo {
     std::string name;

@@ -1,7 +1,7 @@
 ﻿#include "extra/modloader.h"
 #include "gen/config.h"
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 #include "pc/log.h"
 #include "pc/apppaths.h"

@@ -9,7 +9,9 @@
 #include "p3d/p3dmath.h"
 #include "pc/audio.h"
 #include <vector>
+#if !defined(RC_PLATFORM_PSP)
 #include <mutex>
+#endif
 #include <algorithm>
 
 // These are defined inline by p3d math headers; declare here to keep tooling resolution stable.
@@ -47,12 +49,24 @@ static void UpdateListenerInAudioEngine() {
     }
 }
 
+#if defined(RC_PLATFORM_PSP)
+struct PspAudioMutex {};
+template <typename T> struct PspAudioLockGuard {
+    explicit PspAudioLockGuard(T&) {}
+};
+using PersistentMutex = PspAudioMutex;
+template <typename T> using PersistentLockGuard = PspAudioLockGuard<T>;
+#else
+using PersistentMutex = std::mutex;
+template <typename T> using PersistentLockGuard = std::lock_guard<T>;
+#endif
+
 static std::vector<rsdPersistent*> g_persistentSounds;
-static std::mutex g_persistentMutex;
+static PersistentMutex g_persistentMutex;
 static bool g_persistentMuted = false;
 
 void rsdWorld::StopAllPersistentSounds() {
-    std::lock_guard<std::mutex> lock(g_persistentMutex);
+    PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
     g_persistentMuted = false;
     for (rsdPersistent* snd : g_persistentSounds) {
         if (!snd) {
@@ -73,7 +87,7 @@ void rsdWorld::StopAllPersistentSounds() {
 
 // PSX: rsdPersistent::FadeOutAll (RSDBACH.CPP) - mute all persistent sounds in place.
 void rsdWorld::MuteAllPersistentSounds() {
-    std::lock_guard<std::mutex> lock(g_persistentMutex);
+    PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
     g_persistentMuted = true;
     for (rsdPersistent* snd : g_persistentSounds) {
         if (snd) {
@@ -84,7 +98,7 @@ void rsdWorld::MuteAllPersistentSounds() {
 
 // PSX: rsdPersistent::FadeInAll (RSDBACH.CPP) - restore all persistent sounds from mute.
 void rsdWorld::UnmuteAllPersistentSounds() {
-    std::lock_guard<std::mutex> lock(g_persistentMutex);
+    PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
     g_persistentMuted = false;
     for (rsdPersistent* snd : g_persistentSounds) {
         if (snd) {
@@ -332,7 +346,7 @@ rsdPersistent::rsdPersistent(u32 sampleId_, void* posPtr, u8 reverb, u16 volume_
         }
         voiceHandle = reinterpret_cast<void*>(static_cast<uintptr_t>(v));
 
-        std::lock_guard<std::mutex> lock(g_persistentMutex);
+        PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
         g_persistentSounds.push_back(this);
     }
 }
@@ -350,7 +364,7 @@ void rsdPersistent::End() {
 
     posPtr = nullptr;
 
-    std::lock_guard<std::mutex> lock(g_persistentMutex);
+    PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
     auto it = std::remove(g_persistentSounds.begin(), g_persistentSounds.end(), this);
     g_persistentSounds.erase(it, g_persistentSounds.end());
 }
@@ -362,7 +376,7 @@ bool rsdPersistent::ObjectExists(rsdPersistent* obj) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(g_persistentMutex);
+        PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
         if (std::find(g_persistentSounds.begin(), g_persistentSounds.end(), obj) == g_persistentSounds.end()) {
             return false;
         }
@@ -430,7 +444,7 @@ void rsdPersistent::UpdateSpatial() {
 void rsdWorld::UpdateSpatialAudioState() {
     UpdateListenerInAudioEngine();
 
-    std::lock_guard<std::mutex> lock(g_persistentMutex);
+    PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
     for (rsdPersistent* snd : g_persistentSounds) {
         if (snd != nullptr) {
             snd->UpdateSpatial();

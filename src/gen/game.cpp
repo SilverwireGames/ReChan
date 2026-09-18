@@ -49,7 +49,9 @@
 #include "pc/textmgr.h"
 #include "extra/version.h"
 
+#if !defined(RC_PLATFORM_PSP)
 #include <thread>
+#endif
 
 #if CUSTOM_TEXT
 #include "extra/customtext.h"
@@ -64,6 +66,10 @@
 #endif
 
 #include "extra/shadowcsm.h"
+
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#include "psp/psp_perf.h"
+#endif
 
 // Global game pointer
 Game* g_game = nullptr;
@@ -308,13 +314,31 @@ void Game::InternalReset() {
 // PSX: ProcessHandlers__4Game (GAME.CPP:2756, 0x8002B4F0)
 // Iterates both handler sets and calls each handler's funcPtr
 static void ProcessHandlerList(ccMinList& list) {
+    u32 handlerIndex = 0;
     for (ccMinNode* n = list.head; n; ) {
         ccMinNode* next = n->next;
         Handler* h = static_cast<Handler*>(n);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        if (handlerIndex < 16) {
+            char trace[48];
+            std::snprintf(trace, sizeof(trace), "render: handler %lu begin",
+                          static_cast<unsigned long>(handlerIndex));
+            PspPerf::Trace(trace);
+        }
+#endif
         if (h->funcPtr) {
             h->funcPtr(h);
         }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        if (handlerIndex < 16) {
+            char trace[48];
+            std::snprintf(trace, sizeof(trace), "render: handler %lu done",
+                          static_cast<unsigned long>(handlerIndex));
+            PspPerf::Trace(trace);
+        }
+#endif
         n = next;
+        ++handlerIndex;
     }
 }
 
@@ -352,6 +376,9 @@ World* Game::GetWorld() const {
 // Resets render counter. Frame begin/end is handled by Display handlers.
 void Game::BeginFrameHandler(Handler*) {
     MARKFUNCTION(0x8002B408);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: game begin");
+#endif
     // PSX: gp[3404] = 0 (reset render counter)
 }
 
@@ -450,12 +477,18 @@ static void AdvanceGameplayAnimationOneTick() {
 
 void Game::AnimateEverythingHandler(Handler*) {
     MARKFUNCTION(0x8002B2F0);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: animate begin");
+#endif
 #if HIGH_FPS_PLAY_PRESENTATION
     if (g_game && g_game->GetState() == GameState::Play) {
         return;
     }
 #endif
     animLoopDSTACK();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: animate done");
+#endif
 }
 
 // PSX: DrawEverythingHandler__FP7Handler (GAME.CPP:2211, 0x8002A98C)
@@ -464,6 +497,9 @@ void Game::AnimateEverythingHandler(Handler*) {
 // NOTE: tView::BeginRender/EndRender are handled by Display's handlers (pri 62/-62).
 void Game::DrawEverythingHandlerCB(Handler*) {
     MARKFUNCTION(0x8002A98C);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: world begin");
+#endif
     if (!g_game) return;
     World* world = g_game->GetWorld();
     if (!world) return;
@@ -499,6 +535,9 @@ void Game::DrawEverythingHandlerCB(Handler*) {
     const LVector& playerPos = Player::s_player ? Player::s_player->pos
         : g_display->GetCamera()->GetPosition();
     world->Render(&playerPos);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: world done");
+#endif
 
     // PSX: entities are drawn inside DrawEverythingHandler with VRAM active,
     // per-block via DrawLoop (humanoidList, inactivePickupList, pickupList, moveList).
@@ -578,6 +617,7 @@ static bool PumpMenuFadeFrame(f64 frameStart) {
 // Blocks until dialog playback gate clears, then runs a blocking fade loop.
 void Game::MenuFade() {
     MARKFUNCTION(0x80029E34);
+    LOG("[Game] MenuFade: begin");
 
     // Safety bound: if the dialogue gate never clears (e.g. a stuck load
     // state), don't hang the game forever waiting for it - proceed with
@@ -594,12 +634,24 @@ void Game::MenuFade() {
             return;
         }
     }
+    LOG("[Game] MenuFade: dialog gate complete");
 
     FadeBegin();
+    s32 fadeFrames = 0;
     while (FadeUpdate()) {
+        ++fadeFrames;
+        if ((fadeFrames % 30) == 0) {
+            LOG("[Game] MenuFade: frame=%d", fadeFrames);
+        }
         const f64 frameStart = Time::GetTimeInSeconds();
         g_display->BeginFrame();
+#if defined(RC_PLATFORM_PSP)
+        // The PSP loading fade must not redraw the pre-level world. That
+        // render path can traverse stale FE/world handlers while the level is
+        // being torn down and is unnecessary for a black loading transition.
+#else
         MenuRender(nullptr);
+#endif
         FadeRender();
         g_display->EndFrame();
         if (!PumpMenuFadeFrame(frameStart)) {
@@ -607,6 +659,7 @@ void Game::MenuFade() {
         }
     }
     FadeEnd();
+    LOG("[Game] MenuFade: complete (%d frames)", fadeFrames);
 }
 
 #if CUSTOM_MENU
@@ -696,6 +749,9 @@ static void ApplyLocationMenuCloseSideEffects(feMenuMgr* menuMgr, s32 menuResult
 // Noop on PSX - Display's dispEndFrameHandler does the real work.
 void Game::EndFrameHandler(Handler*) {
     MARKFUNCTION(0x8002B420);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: game end");
+#endif
     // PC platform: flush TransformAnim objects deferred by FreeAnimMemory.
     // Runs after AnimateEverythingHandler (pri=-48), ensuring animations freed
     // during handlerSet1 (Director/Think) remain valid for UpdateJoints this frame.
@@ -744,6 +800,12 @@ void Game::SetState(GameState s) {
     }
 
     LOG("[Game] State: %d -> %d", static_cast<int>(prevState), static_cast<int>(state));
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    char trace[64];
+    std::snprintf(trace, sizeof(trace), "state %d -> %d",
+                  static_cast<int>(prevState), static_cast<int>(state));
+    PspPerf::Trace(trace);
+#endif
 }
 
 bool Game::gsNullState(Game*) {
@@ -1150,7 +1212,13 @@ bool Game::gsTitleLoopState(Game* game) {
         LoadXconFE();
         game->titleAutoStart = false;
         if (!SaveGameHasPendingLoad()) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            // The profile target must reach QueueLevelLoad without waiting for
+            // the optional prolog movie; release keeps the original flow.
+            LOG("[Game] TitleLoop: profile skips prolog movie");
+#else
             game->PlayMovie("prolog.str", 1, 0);
+#endif
         }
         if (g_characterManager) {
             g_characterManager->LoadCharTexture((u32)AITypes::TT_PLAYER);
@@ -1295,6 +1363,7 @@ bool Game::gsInitState(Game* game) {
     DisplayTIM("RUNFIRST.TIM");
 #endif
     StartLogo("RUNFIRST.TIM");
+    LOG("[Game] Init: RUNFIRST logo started");
     FillMeter(100);
 
     // PSX: if firstBoot (gp[80]): LoadPermanent(), clear firstBoot
@@ -1302,21 +1371,26 @@ bool Game::gsInitState(Game* game) {
         // PSX: MEMSTAT(24, 1)
         World* world = game->GetWorld();
         if (world) {
+            LOG("[Game] Init: LoadPermanent begin");
             world->LoadPermanent();
+            LOG("[Game] Init: LoadPermanent complete");
         }
         // PSX: MEMSTAT(24, 2)
         game->firstBoot = 0;
     }
 
     if (g_inputManager) {
+        LOG("[Game] Init: configure input begin");
         const s16* gameMode = GameControlModeArray();
         for (s16 padIndex = 0; padIndex < 2; ++padIndex) {
             g_inputManager->SetControlModeArray(padIndex, gameMode);
         }
+        LOG("[Game] Init: configure input complete");
     }
 
     // PSX: VBlankLogo::StopLogo
     StopLogo();
+    LOG("[Game] Init: logo stopped");
 
     game->SetState(GameState::Title);
     return true;
@@ -1513,6 +1587,9 @@ bool Game::gsPlayState(Game* game) {
     }
 
     if (g_directorActive) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("play step: director begin");
+#endif
         for (s32 i = 0; i < logicSteps; ++i) {
             if (g_inputManager) {
                 g_inputManager->CommitHostPads();
@@ -1528,6 +1605,9 @@ bool Game::gsPlayState(Game* game) {
             if (g_director) {
                 g_director->Process();
             }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            PspPerf::Trace("play step: director done");
+#endif
 
             jcsUpdateDialogCD();
             AdvanceGameplayAnimationOneTick();
@@ -1538,7 +1618,13 @@ bool Game::gsPlayState(Game* game) {
         }
 
         UpdateSpatialAudioListener();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("play step: audio done");
+#endif
         ProcessHandlerList(game->handlerSet2.handlerList);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("play step: handlers done");
+#endif
         return true;
     }
 
@@ -1885,6 +1971,7 @@ bool Game::gsOpenLocationState(Game* game) {
 
 bool Game::gsQueueLevelLoad(Game* game) {
     MARKFUNCTION(0x80029574); // gsQueueLevelLoad
+    LOG("[Game] QueueLevelLoad: begin");
 
     // PSX: 520 bytes, 33 blocks.
 
@@ -1900,7 +1987,9 @@ bool Game::gsQueueLevelLoad(Game* game) {
     }
 
     // PSX: MenuFade() - blocking fade to black
+    PspPerf::Trace("queue level: menu fade begin");
     MenuFade();
+    PspPerf::Trace("queue level: menu fade done");
 
     // PSX: SetHUDVisible(0, 0, 1) - hide HUD during load
     if (g_hud) {
@@ -1918,7 +2007,9 @@ bool Game::gsQueueLevelLoad(Game* game) {
 
     // PSX: UnloadLevel(world), UnloadLevelPart2(world)
     world->Unload();
+    LOG("[Game] QueueLevelLoad: world unload complete");
     world->UnloadLevelPart2();
+    LOG("[Game] QueueLevelLoad: level part2 unload complete");
 
     // PSX: FreeDynamicPrimBuffers(), AllocateDynamicPrimBuffers(0)
     // PSX GPU primitive buffers - not applicable on PC
@@ -1947,10 +2038,13 @@ bool Game::gsQueueLevelLoad(Game* game) {
 
     // PSX: LoadLevel(world, targetLevelIndex) - internally calls Construct
     // which spawns AI entities, resets Director, sets level script
+    PspPerf::Trace("queue level: world load begin");
     if (!world->LoadLevelIndex(world->GetTargetLevelIndex())) {
         game->SetState(GameState::Error);
         return true;
     }
+    LOG("[Game] QueueLevelLoad: level load complete");
+    PspPerf::Trace("queue level: world load done");
 
     // PSX: Camera setup data is prepared during World::LoadLevelIndex
     // via ExecuteLoadCallbacks -> cameraLoadFunc -> SetupPaths.
@@ -1974,6 +2068,7 @@ bool Game::gsQueueLevelLoad(Game* game) {
     }
 
     // PSX: SetState(PrePlay=7)
+    PspPerf::Trace("queue level: preplay");
     game->SetState(GameState::PrePlay);
 
     // PSX: jcsStartDialog() - initialize dialog/subtitle system

@@ -113,3 +113,26 @@ clean Linux rebuild:
 rm -rf build
 sh scripts/build_linux.sh release
 ```
+
+## PSP (PSPSDK)
+
+The PSP target is a separate native build. Install the PSPDEV toolchain and
+export `PSPDEV`, then run from the repository root:
+
+```sh
+PSPDEV=/opt/pspdev sh scripts/build_psp.sh release
+```
+
+The target uses PSPSDK's GU/GUM, controller, audio and `sceIo` APIs, with a
+fixed 480×272 framebuffer at 60 Hz. Place the pre-extracted game data below
+`data/` beside `EBOOT.PBP` before launching on hardware or PPSSPP. The command produces `psp/rechan.elf` and
+`psp/EBOOT.PBP` when PSPSDK is available.
+
+On hosts without a native PSPDEV installation, use the official PSPDev
+container:
+
+```sh
+docker run --platform linux/amd64 --rm \
+  -v "$PWD:/work" -w /work ghcr.io/pspdev/pspdev:latest \
+  sh -lc 'export PSPDEV=/usr/local/pspdev; sh scripts/build_psp.sh release'
+```

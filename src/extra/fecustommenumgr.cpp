@@ -1,6 +1,8 @@
 #include "gen/common.h"
 #include "fecustommenumgr.h"
 #include <cstdlib>
+#include <chrono>
+#include <thread>
 #include "gen/display.h"
 #include "pc/inputaction.h"
 #include "pc/tim.h"
@@ -27,7 +29,7 @@
 #include "extra/cheats.h"
 #endif
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/modloader.h"
 #endif
 
@@ -615,7 +617,7 @@ void feCustomMenuMgr::BuildPages() {
 #if NEW_CHEATS
         Button("FE_CHEATS", EntryEvent_GoPage, MenuPage_Cheats),
 #endif
-#ifdef MOD_LOADER
+#if MOD_LOADER
         Button("FE_MODS", EntryEvent_GoPage, MenuPage_Mods),
 #endif
         Button("FE_BCK", EntryEvent_Back),
@@ -681,7 +683,7 @@ void feCustomMenuMgr::BuildPages() {
                });
 #endif
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     auto& feMods = AddPage(MenuPage_Mods, "FE_MODS", "Menu_GameOption", MenuPage_Options, 0, false,
                            DEF_MODS_WINDOW_W, DEF_MODS_WINDOW_H);
     SetEntries(feMods, {
@@ -990,8 +992,8 @@ bool feCustomMenuMgr::EnsureTitleScreenEffects(f32 drawW, f32 drawH) {
     const f32 targetScale = std::min(1.0f,
                                      std::min(960.0f / std::max(drawW, 1.0f),
                                      540.0f / std::max(drawH, 1.0f)));
-    const s32 targetW = std::max(1, (s32)(drawW * targetScale + 0.5f));
-    const s32 targetH = std::max(1, (s32)(drawH * targetScale + 0.5f));
+    const s32 targetW = std::max<s32>(1, (s32)(drawW * targetScale + 0.5f));
+    const s32 targetH = std::max<s32>(1, (s32)(drawH * targetScale + 0.5f));
 
     if (m_titleScreenLogoSeed && m_titleScreenGlow && m_titleScreenGodRays
         && targetW == m_titleEffectTargetW && targetH == m_titleEffectTargetH) {
@@ -1911,7 +1913,7 @@ s32 feCustomMenuMgr::Invoke() {
         return m_result;
     }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (m_currPage == MenuPage_Mods) {
         if (!m_scrollBarDragging) SmoothScrollToward(m_modScrollVisual, (f32)m_modScrollTop);
         const auto& mods = ModLoader::Instance().GetMods();
@@ -2219,7 +2221,7 @@ void feCustomMenuMgr::SetPage(MenuPage page) {
         }
     }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (m_currPage == MenuPage_Mods && m_prevPage != MenuPage_Mods) {
         ModLoader::Instance().EnsureStorage();
         ModLoader::Instance().Reload();
@@ -4880,7 +4882,7 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
     }
 }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 void feCustomMenuMgr::ClampModsScroll() {
     const s32 count = static_cast<s32>(ModLoader::Instance().GetMods().size());
     if (count <= 0) {
@@ -4915,7 +4917,8 @@ void feCustomMenuMgr::RenderModsPage(s32 panelX, s32 panelY, s32 panelW, s32 pan
     if (!g_textManager) return;
     const auto& mods = ModLoader::Instance().GetMods();
     const s32 count = static_cast<s32>(mods.size());
-    const s32 visibleRows = std::min(DEF_MODS_VISIBLE_ROWS, std::max(0, count - m_modScrollTop));
+    const s32 visibleRows = std::min<s32>(DEF_MODS_VISIBLE_ROWS,
+                                          std::max<s32>(0, count - m_modScrollTop));
     const f32 labelX = static_cast<f32>(panelX + DEF_LABEL_X_PAD + DEF_KEYBIND_X_PAD);
     const f32 valueX = static_cast<f32>(panelX + panelW - DEF_VALUE_X_PAD - DEF_KEYBIND_X_PAD);
     const f32 firstRowY = static_cast<f32>(panelY + DEF_TITLE_BAR_H + DEF_CONTENT_PAD + 8);
@@ -5016,7 +5019,7 @@ void feCustomMenuMgr::RenderCurrentPage() {
     const char* title = Localize(page->titleToken);
     if (!title)
         title = page->titleToken;
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (m_currPage == MenuPage_Mods && (!title || strcmp(title, "FE_MODS") == 0)) {
         title = "Mods";
     }
@@ -5118,7 +5121,7 @@ void feCustomMenuMgr::RenderCurrentPage() {
         case MenuPage_DeleteSlots:
             RenderSaveSlotsPage(panelX, panelY, panelW, panelH, selectedColor);
             break;
-#ifdef MOD_LOADER
+#if MOD_LOADER
         case MenuPage_Mods:
             RenderModsPage(panelX, panelY, panelW, panelH, normalColor, selectedColor);
             break;
@@ -5164,7 +5167,7 @@ void feCustomMenuMgr::RenderCurrentPage() {
 
             const char* label = Localize(item.token);
             if (!label) label = item.token;
-#ifdef MOD_LOADER
+#if MOD_LOADER
             if (strcmp(item.token, "FE_MODS") == 0 && strcmp(label, "FE_MODS") == 0) {
                 label = "Mods";
             }
@@ -5505,7 +5508,7 @@ void feCustomMenuMgr::RenderCurrentPage() {
                 pushPrompt("FE_KBBCK", "<ACT:MENU_BACK> Back");
             }
         }
-#ifdef MOD_LOADER
+#if MOD_LOADER
         else if (m_currPage == MenuPage_Mods) {
             if (static_cast<s32>(ModLoader::Instance().GetMods().size()) > DEF_MODS_VISIBLE_ROWS) {
                 pushPrompt("FE_HPSCR", "<ACT:MENU_UP>/<ACT:MENU_DOWN> Scroll");

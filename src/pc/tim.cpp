@@ -15,7 +15,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/modloader.h"
 #include "p3d/hash.h"
 #include <filesystem>
@@ -35,7 +35,7 @@ struct TimSection {
 };
 
 TimImage* Tim::LoadFromFile(const char* path) {
-#ifdef MOD_LOADER
+#if MOD_LOADER
     {
         std::string stem = std::filesystem::path(path).stem().string();
         for (char& c : stem) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -216,9 +216,23 @@ static constexpr f32 kTwoPi = 6.28318530718f;
 
 static s32 s_overlayBatchDepth = 0;
 static Mat4 s_overlayBatchPrevProj;
+#if defined(RC_PLATFORM_PSP)
+static constexpr size_t kPspOverlayVertexReserve = 8192;
+static std::vector<pddiBatchVertex> s_pendingPrimitiveVerts = [] {
+    std::vector<pddiBatchVertex> vertices;
+    // Allocate the steady-state overlay arena before the first frame.  If a
+    // scene submits more than this bound, QueueBatchedVertex flushes instead
+    // of allowing vector growth inside the GU frame.
+    vertices.reserve(kPspOverlayVertexReserve);
+    return vertices;
+}();
+#else
 static std::vector<pddiBatchVertex> s_pendingPrimitiveVerts;
+#endif
 static tTexture* s_pendingPrimitiveTex = nullptr;
 static bool s_pendingPrimitiveActive = false;
+
+static void FlushPendingPrimitiveBatch();
 
 static s32 ClampCircleSegments(s32 segments) {
     if (segments < kMinCircleSegments)
@@ -233,6 +247,11 @@ static s32 ClampCircleSegments(s32 segments) {
 static void QueueBatchedVertex(f32 x, f32 y,
                                f32 u, f32 v,
                                u8 r, u8 g, u8 b, u8 a) {
+#if defined(RC_PLATFORM_PSP)
+    if (s_pendingPrimitiveVerts.size() >= kPspOverlayVertexReserve) {
+        FlushPendingPrimitiveBatch();
+    }
+#endif
     s_pendingPrimitiveVerts.push_back({ x, y, u, v, r, g, b, a });
 }
 

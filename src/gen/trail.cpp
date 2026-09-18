@@ -11,6 +11,20 @@
 static ccMinList g_trailsPoolList;
 static ccMinNode* g_trailsPoolInsertAfter = nullptr;
 
+#if defined(RC_PLATFORM_PSP)
+static pddiPrimBuffer* GetPspTrailQuadBuffer() {
+    static pddiPrimBuffer* buffer = nullptr;
+    if (!buffer && p3d::device) {
+        buffer = p3d::device->NewPrimBuffer(
+            pddiPrimBufferDesc(PDDI_PRIM_TRIANGLES,
+                               PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO,
+                               4u,
+                               6u));
+    }
+    return buffer;
+}
+#endif
+
 static constexpr s32 SPL_TRAIL_RATIO = 0x4E44;
 static constexpr s32 TRAIL_ZSORT_SCRATCH_BYTES = 136;
 
@@ -610,7 +624,11 @@ void Trails::ChanZSortDisplayNonTexture(s32 count) {
         };
 
         pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format, 4u, 6u);
+#if defined(RC_PLATFORM_PSP)
+        pddiPrimBuffer* buffer = GetPspTrailQuadBuffer();
+#else
         pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+#endif
         if (!buffer) {
             continue;
         }
@@ -618,7 +636,9 @@ void Trails::ChanZSortDisplayNonTexture(s32 count) {
         buffer->SetVertexData(quadVerts, 4u);
         buffer->SetIndices(kQuadIndices, 6u);
         p3d::context->DrawPrimBuffer(buffer);
+#if !defined(RC_PLATFORM_PSP)
         buffer->Release();
+#endif
     }
 
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);
@@ -725,7 +745,11 @@ void Trails::ChanZSortDisplayTexture(s32 count) {
         p3d::context->SetBlendMode(blendMode);
 
         pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format, 4u, 6u);
+#if defined(RC_PLATFORM_PSP)
+        pddiPrimBuffer* buffer = GetPspTrailQuadBuffer();
+#else
         pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+#endif
         if (!buffer) {
             continue;
         }
@@ -733,7 +757,9 @@ void Trails::ChanZSortDisplayTexture(s32 count) {
         buffer->SetVertexData(quadVerts, 4u);
         buffer->SetIndices(kQuadIndices, 6u);
         p3d::context->DrawPrimBuffer(buffer);
+#if !defined(RC_PLATFORM_PSP)
         buffer->Release();
+#endif
     }
 
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);

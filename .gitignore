@@ -3,6 +3,7 @@ bin/
 vendor/devkitpro/
 *.exe
 *.obj
+*.o
 *.pdb
 *.ilk
 *.lib
@@ -25,6 +26,12 @@ switch/**/*.map
 switch/**/*.lst
 switch/**/build_log.txt
 switch/libp3d/lib/
+
+# PSP build outputs (the source-side Makefile intentionally mirrors the
+# PSPSDK sample layout, so its intermediates land beside the sources).
+psp/*.elf
+psp/*.PBP
+psp/*.SFO
 
 # Vision Master workflow / local agent tooling (do not commit)
 .visionmaster/

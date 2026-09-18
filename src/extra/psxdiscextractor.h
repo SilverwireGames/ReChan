@@ -1,8 +1,10 @@
 #pragma once
 #include "core.h"
 #include "pc/apppaths.h"
+#if !defined(RC_PLATFORM_PSP)
 #include <thread>
 #include <atomic>
+#endif
 #include <string>
 #include <vector>
 
@@ -40,12 +42,20 @@ private:
     void ScanThreadFunc();
     void ExtractThreadFunc(std::string imagePath);
 
+#if defined(RC_PLATFORM_PSP)
+    State m_state{ State::Idle };
+    s64 m_bytesDone = 0;
+    s64 m_bytesTotal = 0;
+#else
     std::atomic<State> m_state{ State::Idle };
     std::atomic<s64> m_bytesDone{ 0 };
     std::atomic<s64> m_bytesTotal{ 0 };
+#endif
     std::string m_error;
     std::vector<std::string> m_candidates;
+#if !defined(RC_PLATFORM_PSP)
     std::thread m_workerThread;
+#endif
 };
 
 extern PsxDiscExtractor* g_psxDiscExtractor;

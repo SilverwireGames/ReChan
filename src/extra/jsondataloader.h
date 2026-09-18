@@ -5,7 +5,7 @@
 #include <vector>
 #include <unordered_map>
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 // Lightweight JSON value type for game data loading.
 // Avoids pulling in a full JSON library for simple config/data files.

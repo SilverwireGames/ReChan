@@ -10,6 +10,9 @@
 #include "pddi/pddi.h"
 #include "pddi/pddidev.h"
 #include "pc/controllerlight.h"
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#include "psp/psp_perf.h"
+#endif
 
 Display* g_display = nullptr;
 s32 Display::s_defaultScreenMode = ScreenMode_Windowed;
@@ -339,6 +342,9 @@ void Display::EndFrame() {
 
 // PSX: dispBeginFrameHandler (DISPLAY.CPP:105, 0x800DB43C)
 void Display::dispBeginFrameHandler(Handler*) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: display begin");
+#endif
     if (g_display) {
         g_display->BeginFrame();
     }
@@ -346,6 +352,9 @@ void Display::dispBeginFrameHandler(Handler*) {
 
 // PSX: dispEndFrameHandler (DISPLAY.CPP:112, 0x800DB448)
 void Display::dispEndFrameHandler(Handler*) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("render: display end");
+#endif
     if (g_display) {
         g_display->EndFrame();
     }

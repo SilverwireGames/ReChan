@@ -110,6 +110,16 @@ inline void p3dBuildRotMatrixZYX(s32 ax, s32 ay, s32 az, Mat4& m) {
         m);
 }
 
+// Keep packed PSX angle fields unambiguous with GCC: converting u16/s16 to
+// either the float or integer overload is otherwise equally ranked.
+inline void p3dBuildRotMatrixZYX(u16 ax, u16 ay, u16 az, Mat4& m) {
+    p3dBuildRotMatrixZYX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+inline void p3dBuildRotMatrixZYX(s16 ax, s16 ay, s16 az, Mat4& m) {
+    p3dBuildRotMatrixZYX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
 // p3dBuildRotMatrixXYZ - PSX: 0x800730F8
 // PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
 inline void p3dBuildRotMatrixXYZ(f32 ax, f32 ay, f32 az, Mat4& m) {
@@ -138,6 +148,14 @@ inline void p3dBuildRotMatrixXYZ(s32 ax, s32 ay, s32 az, Mat4& m) {
         ANGLE2RAD(ay & 0xFFFF),
         ANGLE2RAD(az & 0xFFFF),
         m);
+}
+
+inline void p3dBuildRotMatrixXYZ(u16 ax, u16 ay, u16 az, Mat4& m) {
+    p3dBuildRotMatrixXYZ(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+inline void p3dBuildRotMatrixXYZ(s16 ax, s16 ay, s16 az, Mat4& m) {
+    p3dBuildRotMatrixXYZ(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
 }
 
 // p3dBuildRotMatrixYZX - PSX: 0x800737A4
@@ -170,6 +188,14 @@ inline void p3dBuildRotMatrixYZX(s32 ax, s32 ay, s32 az, Mat4& m) {
         ANGLE2RAD(ay & 0xFFFF),
         ANGLE2RAD(az & 0xFFFF),
         m);
+}
+
+inline void p3dBuildRotMatrixYZX(u16 ax, u16 ay, u16 az, Mat4& m) {
+    p3dBuildRotMatrixYZX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+inline void p3dBuildRotMatrixYZX(s16 ax, s16 ay, s16 az, Mat4& m) {
+    p3dBuildRotMatrixYZX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
 }
 
 // p3dVecTimesMatrix - transform vector by matrix (rotation + translation)

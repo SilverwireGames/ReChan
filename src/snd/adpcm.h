@@ -63,7 +63,22 @@ namespace SpuAdpcm {
     inline std::vector<s16> Decode(const u8* adpcmData, u32 adpcmSize, bool stopAtEnd = false) {
         u32 numBlocks = adpcmSize / 16;
         std::vector<s16> pcm;
-        pcm.reserve(numBlocks * 28);
+
+        // WAX descriptors point into a shared ADPCM pool. Reserving the
+        // entire tail for every descriptor can multiply memory use by the
+        // number of samples (RS0000 alone reserves ~17 MB for ~0.5 MB of
+        // decoded PCM). When an END marker is requested, scan the compact
+        // block headers first and reserve only the selected sample.
+        u32 reserveBlocks = numBlocks;
+        if (stopAtEnd) {
+            reserveBlocks = 0;
+            while (reserveBlocks < numBlocks) {
+                const u8 flags = adpcmData[reserveBlocks * 16 + 1];
+                ++reserveBlocks;
+                if (flags & 0x01) break;
+            }
+        }
+        pcm.reserve(static_cast<size_t>(reserveBlocks) * 28u);
 
         s32 prev0 = 0, prev1 = 0;
         for (u32 b = 0; b < numBlocks; b++) {

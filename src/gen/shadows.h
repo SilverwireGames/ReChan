@@ -2,7 +2,9 @@
 
 #include "core.h"
 #include "p3d/p3dmath.h"
+#if !defined(RC_PLATFORM_PSP)
 #include <functional>
+#endif
 
 class Model;
 
@@ -31,7 +33,12 @@ void BeginModelShadowQueue();
 void FlushModelShadowQueue();
 void EndModelShadowQueue();
 
+#if defined(RC_PLATFORM_PSP)
+using LateEntityDrawCallback = void (*)(void* context);
+void QueueLateEntityDraw(LateEntityDrawCallback callback, void* context);
+#else
 void QueueLateEntityDraw(std::function<void()> drawFn);
+#endif
 void FlushLateEntityDrawQueue();
 
 // PSX: ShadowShow (SHADOW.CPP:192, 0x800AED94)

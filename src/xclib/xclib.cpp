@@ -306,7 +306,7 @@ bool xcCellImage::Decode(const u8* cellData) {
         blockPtr += 4 + compSize;
     }
 
-    delete expandBuf;
+    delete[] expandBuf;
 
     return true;
 }

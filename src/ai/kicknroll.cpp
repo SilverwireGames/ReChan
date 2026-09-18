@@ -23,6 +23,18 @@
 #include "snd/sndfact.h"
 #include "p3d/skeleton.h"
 #include <cstdio>
+#include <vector>
+
+#if defined(RC_PLATFORM_PSP)
+namespace {
+
+// The PSP animation path is single-threaded. Retain this working set across
+// fixed-step updates so Stack::Think does not allocate a matrix array each
+// time it refreshes the high-FPS presentation pose.
+std::vector<Mat4> s_pspStackJointMatrices;
+
+} // namespace
+#endif
 
 static constexpr s32 KNOCKDOWN_COLLISION_TAG_IMPACT_REGION = static_cast<s32>(0x80000002u);
 static constexpr s32 KNOCKDOWN_COLLISION_TAG_HIT_TYPE = static_cast<s32>(0x80000003u);
@@ -1129,9 +1141,17 @@ void Stack::Think() {
     renderPrevFrame = frameBeforeTick;
 
     if (flip->tree && flip->tree->numJoints > 0) {
+#if defined(RC_PLATFORM_PSP)
+        if (s_pspStackJointMatrices.capacity() < flip->tree->numJoints) {
+            s_pspStackJointMatrices.reserve(flip->tree->numJoints);
+        }
+        s_pspStackJointMatrices.resize(flip->tree->numJoints);
+        flip->tree->ComputeWorldMatricesWithCallbacks(s_pspStackJointMatrices.data());
+#else
         Mat4* jointMatrices = new Mat4[flip->tree->numJoints];
         flip->tree->ComputeWorldMatricesWithCallbacks(jointMatrices);
         delete[] jointMatrices;
+#endif
     }
 #endif
 

@@ -4,7 +4,8 @@
 #include "snd/rsdformat.h"
 #include "snd/hmndsnd.h"
 #include "xclib/xcfile.h"
-#ifdef MOD_LOADER
+#include <utility>
+#if MOD_LOADER
 #include "extra/modloader.h"
 #include <cctype>
 #include <string>
@@ -28,7 +29,7 @@ static u8* ReadFileBytes(const char* path, u32& outSize) {
     return data;
 }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 static std::string FagPathToOverrideName(const char* fagPath) {
     std::string name = fagPath;
     const size_t slash = name.find_last_of("/\\");
@@ -43,7 +44,9 @@ static std::string FagPathToOverrideName(const char* fagPath) {
 // PSX: __5Sound (SOUND.CPP, 0x80059794)
 Sound::Sound() {
     MARKFUNCTION(0x80059794);
-    memset(banks, 0, sizeof(banks));
+    for (BankInfo& bank : banks) {
+        bank = {};
+    }
 }
 
 // PSX: _._5Sound (SOUND.CPP, 0x800597E8)
@@ -85,7 +88,7 @@ void Sound::SetupSound() {
     u32 totalSamples = 0;
     char path[256];
     for (u32 i = 0; i <= 0x15; i++) {
-        snprintf(path, sizeof(path), "SOUND/FX/RS%04X.WAX", i);
+        snprintf(path, sizeof(path), "SOUND/FX/RS%04X.WAX", static_cast<unsigned int>(i));
         u32 fileSize = 0;
         u8* fileData = ReadFileBytes(path, fileSize);
         if (!fileData) continue;
@@ -102,7 +105,7 @@ void Sound::SetupSound() {
                 banks[i].descriptorWord2[j] = bank.sampleDescs[j].flags;
             }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
             // Mod override layout matches the asset exporter's own output:
             // sounds/rs0000/sample00.wav -> scope "rs0000", name "sample00".
             // Checked before the empty-sample skip below so a mod can also
@@ -170,7 +173,9 @@ void Sound::CleanupSound() {
     AudioEngine::StopAllVoices();
     AudioEngine::UnloadAllSamples();
 
-    memset(banks, 0, sizeof(banks));
+    for (BankInfo& bank : banks) {
+        bank = {};
+    }
     musicSample = AUDIO_SAMPLE_INVALID;
     musicVoice = AUDIO_VOICE_INVALID;
     numWaxBanks = 0;
@@ -196,7 +201,7 @@ AudioSample Sound::GetBankSample(u32 bankIndex, u32 sampleIndex) const {
     return banks[bankIndex].samples[sampleIndex];
 }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 // Shared by both PlayMusicTrack variants: looks up a mod override WAV named
 // after the FAG's filename stem (matches the asset exporter's own output,
 // e.g. "title.wav" for SOUND/MUSIC/TITLE.FAG) and, if found, loads and plays
@@ -224,10 +229,18 @@ bool Sound::TryPlayMusicOverride(const char* fagPath, f32 volume) {
 }
 #endif
 
-// PC: music - decode FAG to PCM, load as AudioSample, play through the dedicated music mix
+// PC/PSP: decode FAG to PCM, load as AudioSample, play through the dedicated music mix.
 bool Sound::PlayMusicTrackSong(const char* fagPath, u32 songIndex, f32 volume) {
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (TryPlayMusicOverride(fagPath, volume)) return true;
+#endif
+
+#if defined(RC_PLATFORM_PSP)
+    StopMusic();
+    musicVolume = volume;
+    musicPlaying = AudioEngine::PlayMusicSong(
+        fagPath, songIndex, musicMuted ? 0.0f : volume, true);
+    return musicPlaying;
 #endif
 
     u32 fileSize = 0;
@@ -239,8 +252,13 @@ bool Sound::PlayMusicTrackSong(const char* fagPath, u32 songIndex, f32 volume) {
     if (track.pcmData.empty()) return false;
 
     StopMusic();
+#if defined(RC_PLATFORM_PSP)
+    musicSample = AudioEngine::LoadSampleOwned(
+        std::move(track.pcmData), track.numFrames, track.sampleRate, track.channels);
+#else
     musicSample = AudioEngine::LoadSample(
-        track.pcmData.data(), track.numFrames, PSX_MUSIC_RATE, track.channels);
+        track.pcmData.data(), track.numFrames, track.sampleRate, track.channels);
+#endif
     if (musicSample == AUDIO_SAMPLE_INVALID) return false;
 
     musicVolume = volume;
@@ -252,8 +270,15 @@ bool Sound::PlayMusicTrackSong(const char* fagPath, u32 songIndex, f32 volume) {
 }
 
 bool Sound::PlayMusicTrack(const char* fagPath, f32 volume) {
-#ifdef MOD_LOADER
+#if MOD_LOADER
     if (TryPlayMusicOverride(fagPath, volume)) return true;
+#endif
+
+#if defined(RC_PLATFORM_PSP)
+    StopMusic();
+    musicVolume = volume;
+    musicPlaying = AudioEngine::PlayMusic(fagPath, musicMuted ? 0.0f : volume, true);
+    return musicPlaying;
 #endif
 
     u32 fileSize = 0;
@@ -275,8 +300,13 @@ bool Sound::PlayMusicTrack(const char* fagPath, f32 volume) {
     StopMusic();
 
     // Load decoded PCM as an AudioSample (stereo for FAG)
+#if defined(RC_PLATFORM_PSP)
+    musicSample = AudioEngine::LoadSampleOwned(
+        std::move(track.pcmData), track.numFrames, track.sampleRate, track.channels);
+#else
     musicSample = AudioEngine::LoadSample(
-        track.pcmData.data(), track.numFrames, PSX_MUSIC_RATE, track.channels);
+        track.pcmData.data(), track.numFrames, track.sampleRate, track.channels);
+#endif
     if (musicSample == AUDIO_SAMPLE_INVALID) {
         LOG("Sound: failed to load music sample");
         return false;
@@ -296,6 +326,12 @@ bool Sound::PlayMusicTrack(const char* fagPath, f32 volume) {
 // PC: same decode work as PlayMusicTrack, but stops at LoadSample - playback
 // is kicked off later (and cheaply) via StartPreloadedMusic().
 bool Sound::PreloadMusicTrack(const char* fagPath, f32 volume) {
+#if defined(RC_PLATFORM_PSP)
+    // Streaming starts immediately; the compressed FAG stays resident and no
+    // decoded preload buffer is allocated during the loading-screen phase.
+    return PlayMusicTrack(fagPath, volume);
+#endif
+
     if (pendingMusicSample != AUDIO_SAMPLE_INVALID) {
         AudioEngine::UnloadSample(pendingMusicSample);
         pendingMusicSample = AUDIO_SAMPLE_INVALID;
@@ -316,8 +352,13 @@ bool Sound::PreloadMusicTrack(const char* fagPath, f32 volume) {
         return false;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    pendingMusicSample = AudioEngine::LoadSampleOwned(
+        std::move(track.pcmData), track.numFrames, track.sampleRate, track.channels);
+#else
     pendingMusicSample = AudioEngine::LoadSample(
-        track.pcmData.data(), track.numFrames, PSX_MUSIC_RATE, track.channels);
+        track.pcmData.data(), track.numFrames, track.sampleRate, track.channels);
+#endif
     if (pendingMusicSample == AUDIO_SAMPLE_INVALID) {
         LOG("Sound: failed to load music sample (preload)");
         return false;
@@ -332,6 +373,10 @@ bool Sound::PreloadMusicTrack(const char* fagPath, f32 volume) {
 // PC: start music that was already decoded by PreloadMusicTrack - no file
 // IO or decode here, so it's safe to call from inside a fade-in.
 bool Sound::StartPreloadedMusic() {
+#if defined(RC_PLATFORM_PSP)
+    return musicPlaying;
+#endif
+
     if (pendingMusicSample == AUDIO_SAMPLE_INVALID) {
         return false;
     }
@@ -386,4 +431,3 @@ void Sound::UnmuteMusic() {
     musicMuted = false;
     AudioEngine::FadeMusicVolume(musicVolume, PSX_MUSIC_FADE_MS);
 }
-

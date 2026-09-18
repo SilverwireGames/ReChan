@@ -111,7 +111,7 @@ void DrawModsWindow(bool* pOpen) {
         return;
     }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     ModLoader& loader = ModLoader::Instance();
 
     if (ImGui::Button("Reload Mods")) {

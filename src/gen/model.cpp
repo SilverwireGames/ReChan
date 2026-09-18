@@ -22,7 +22,7 @@
 #include "pddi/pddidev.h"
 #include "snd/hmndsnd.h"
 #include "pc/log.h"
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #endif
 #include <cstdlib>
@@ -32,18 +32,52 @@
 
 #include "extra/shadowcsm.h"
 
+namespace {
+
+template <typename T>
+void ResizeRetainedScratch(std::vector<T>& buffer, std::size_t count) {
+    if (buffer.capacity() < count) {
+        buffer.reserve(count);
+    }
+    buffer.resize(count);
+}
+
+} // namespace
+
+#if defined(RC_PLATFORM_PSP)
+namespace {
+
+// The PSP renderer is single-threaded. Keep the largest working set reached
+// by the current scene instead of allocating and freeing skinning buffers on
+// every draw. This is intentionally split by use so nested mesh draws cannot
+// invalidate another scratch buffer.
+struct PspModelFrameScratch {
+    std::vector<Mat4> jointMatrices;
+    std::vector<Mat4> attackJointMatrices;
+    std::vector<Mat4> partJointMatrices;
+    std::vector<u16> litScratch;
+    std::vector<u8> litWritten;
+    std::vector<f32> skinVertexData;
+    std::vector<GeoRenderVertex> litGeoVertices;
+};
+
+PspModelFrameScratch g_pspModelFrameScratch;
+
+} // namespace
+#endif
+
 // Draws a mesh buffer, using the real-texture rendering path (one bound real
 // 2D texture per material, sub-range draws) when it's enabled and the mesh
 // has grouped index ranges; otherwise falls back to the single legacy draw
 // that samples the shared PSX VRAM atlas, unchanged from before this feature.
 static void DrawTexturedMesh(pddiPrimBuffer* buffer
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                               , const std::vector<RealTextureGroup>* groups
 #endif
                               ) {
     if (!buffer) return;
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     // realTextureModeEnabled is the persistent user toggle (set only by the
     // debug UI) -- never flip it here, just gate on it and manage the
     // per-draw texture binding, clearing it afterward so unrelated draws
@@ -826,13 +860,18 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         p3d::context->SetBlendMode(blendMode);
     }
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<GeoRenderVertex>& litVerts = g_pspModelFrameScratch.litGeoVertices;
+    litVerts.clear();
+#else
     std::vector<GeoRenderVertex> litVerts;
+#endif
     if (applyLighting && BuildLitGeoVerts(geo, litVerts)) {
         geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
     }
 
     DrawTexturedMesh(geo->meshBuffer
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                       , &geo->realTexGroups
 #endif
                       );
@@ -1020,6 +1059,32 @@ void DrawableSTree::Display(u32 /*flags*/) {
         ? renderSkeleton->joints[0].meshBuffer
         : nullptr;
 
+    static std::set<const void*> sDbgDisp;
+    if (sDbgDisp.size() < 64 && sDbgDisp.insert(this).second) {
+        u32 distinctJoints = 0;
+        s32 maxJoint = -1;
+        s32 minJoint = 0x7FFFFFFF;
+        bool seen[256] = {};
+        u32 numJoints = skel ? skel->numJoints : 0u;
+        if (skin && skin->verts) {
+            for (u32 vi = 0; vi < skin->numVerts; vi++) {
+                const s32 j = skin->verts[vi].jointIdx;
+                if (j >= 0 && j < 256 && !seen[j]) {
+                    seen[j] = true;
+                    distinctJoints++;
+                }
+                if (j > maxJoint) maxJoint = j;
+                if (j < minJoint) minJoint = j;
+            }
+        }
+        LOG("[Disp] dtree=%p active=%p orig=%p skel=%p skin=%p nv=%u rskel=%p skinnedBuf=%p numJoints=%u distinctJoints=%u jmin=%d jmax=%d",
+            static_cast<const void*>(this), static_cast<const void*>(active),
+            static_cast<const void*>(original), static_cast<const void*>(skel),
+            static_cast<const void*>(skin), skin ? skin->numVerts : 0u,
+            static_cast<const void*>(renderSkeleton), static_cast<const void*>(skinnedBuffer),
+            numJoints, distinctJoints, minJoint, maxJoint);
+    }
+
     auto resolveSemiTransBlendMode = [](u8 semiTransMode) -> pddiBlendMode {
         switch (semiTransMode & 3u) {
             case 1: return PDDI_BLEND_ADD;
@@ -1040,8 +1105,14 @@ void DrawableSTree::Display(u32 /*flags*/) {
 
     // Per-frame CPU skinning
     if (skel && skin && skin->numVerts > 0 && skel->joints && skinnedBuffer) {
+#if defined(RC_PLATFORM_PSP)
+        std::vector<Mat4>& jointMatrices = g_pspModelFrameScratch.jointMatrices;
+        ResizeRetainedScratch(jointMatrices, skel->numJoints);
+        skel->ComputeWorldMatricesWithCallbacks(jointMatrices.data());
+#else
         Mat4* jointMatrices = new Mat4[skel->numJoints];
         skel->ComputeWorldMatricesWithCallbacks(jointMatrices);
+#endif
         const Mat4 modelWorld = p3d::context->GetWorldMatrix();
         Mat4 lightingWorld = modelWorld;
         {
@@ -1064,8 +1135,15 @@ void DrawableSTree::Display(u32 /*flags*/) {
             }
         }
 
+#if defined(RC_PLATFORM_PSP)
+        std::vector<u16>& litScratch = g_pspModelFrameScratch.litScratch;
+        std::vector<u8>& litWritten = g_pspModelFrameScratch.litWritten;
+        litScratch.clear();
+        litWritten.clear();
+#else
         std::vector<u16> litScratch;
         std::vector<u8> litWritten;
+#endif
         bool hasLitScratch = false;
         u8 scratchMinR = 255;
         u8 scratchMinG = 255;
@@ -1080,8 +1158,10 @@ void DrawableSTree::Display(u32 /*flags*/) {
         if (renderSource->xformVertsCallback && renderSource->primGeom && renderSource->primGeom->numVerts > 0) {
             const u32 sourceVertCount = renderSource->primGeom->numVerts;
             const u8* sourceVertexList = renderSource->primGeom->GetVertexList();
-            litScratch.resize(sourceVertCount * 2u, 0u);
-            litWritten.resize(sourceVertCount, 0u);
+            ResizeRetainedScratch(litScratch, sourceVertCount * 2u);
+            ResizeRetainedScratch(litWritten, sourceVertCount);
+            std::fill(litScratch.begin(), litScratch.end(), 0u);
+            std::fill(litWritten.begin(), litWritten.end(), 0u);
 
             for (u32 jointIndex = 0; jointIndex < skel->numJoints; jointIndex++) {
                 STreeJoint* joint = &skel->joints[jointIndex];
@@ -1156,7 +1236,12 @@ void DrawableSTree::Display(u32 /*flags*/) {
             }
         }
 
+#if defined(RC_PLATFORM_PSP)
+        std::vector<f32>& vertData = g_pspModelFrameScratch.skinVertexData;
+        ResizeRetainedScratch(vertData, skin->numVerts * 10u);
+#else
         std::vector<f32> vertData(skin->numVerts * 10);
+#endif
         for (u32 i = 0; i < skin->numVerts; i++) {
             const SkinVertex& sv = skin->verts[i];
             const Mat4& m = jointMatrices[sv.jointIdx];
@@ -1214,14 +1299,16 @@ void DrawableSTree::Display(u32 /*flags*/) {
         skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
         const bool skinBlendApplied = applySkinBlendState(skin);
         DrawTexturedMesh(skinnedBuffer
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                           , &renderSource->realTexGroups
 #endif
                           );
         if (skinBlendApplied) {
             p3d::context->SetBlendMode(PDDI_BLEND_NONE);
         }
+#if !defined(RC_PLATFORM_PSP)
         delete[] jointMatrices;
+#endif
         return;
     }
 
@@ -1237,7 +1324,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
     else if (renderSource->meshBuffer) {
         const bool skinBlendApplied = applySkinBlendState(renderSource->skinData);
         DrawTexturedMesh(renderSource->meshBuffer
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                           , &renderSource->realTexGroups
 #endif
                           );
@@ -1367,7 +1454,12 @@ void DrawableETree::Display(u32 flags) {
 
         STreeData* skeleton = nullptr;
         bool invokeCallbacks = false;
+#if defined(RC_PLATFORM_PSP)
+        std::vector<Mat4>& partJointMatrices = g_pspModelFrameScratch.partJointMatrices;
+        partJointMatrices.clear();
+#else
         std::vector<Mat4> partJointMatrices;
+#endif
         if (ownerModel && ownerModel->animStructure && original->geoPartJointHashes) {
             AnimStructure* anim = static_cast<AnimStructure*>(ownerModel->animStructure);
             TransformFlip* flip = anim ? anim->GetFlip() : nullptr;
@@ -1382,7 +1474,7 @@ void DrawableETree::Display(u32 flags) {
         }
 
         if (skeleton) {
-            partJointMatrices.resize(skeleton->numJoints);
+            ResizeRetainedScratch(partJointMatrices, skeleton->numJoints);
             if (invokeCallbacks) {
                 skeleton->ComputeWorldMatricesWithCallbacks(partJointMatrices.data());
             }
@@ -1902,6 +1994,9 @@ void SModel::ApplyAnimToModel(s32 thingType, s32 animEnum, s32 loopType, s32 p4,
             LOG("[ApplyAnim] missing anim type=%d animEnum=%d", thingType, animEnum);
             return;
         }
+        if (thingType != 0) {
+            LOG("[AnimFallback] type=%d animEnum=%d -> using PLAYER anim", thingType, animEnum);
+        }
     }
 
     TransformAnim* animation = GetTransformAnimForModel(rawAnimation);
@@ -2393,6 +2488,11 @@ void HumanoidModel::SetAnim(s32 animEnum, s32 a3, s32 force, s32 extra) {
         }
     }
 
+    if (backPtr && backPtr->thingType != 0) {
+        LOG("[SetAnim] id=%p type=%u anim=%d a3=%d force=%d extra=%d",
+            static_cast<void*>(backPtr), static_cast<u32>(backPtr->thingType), animEnum, a3, force, extra);
+    }
+
     // PSX: reads thingType from backPtr + 24 (Thing::thingType)
     s32 thingType = backPtr->thingType;
 
@@ -2453,11 +2553,34 @@ HumanoidModel::~HumanoidModel() {
 }
 
 // PSX: Animate__13HumanoidModel (MHUMAN.CPP:207, 0x8006E418)
+static u32 sDbgAnimTick = 0;
+
 void HumanoidModel::Animate() {
     MARKFUNCTION(0x8006E418);
+    ++sDbgAnimTick;
     SModel::Animate();
 
     Humanoid* owner = static_cast<Humanoid*>(backPtr);
+    if (owner && owner->thingType != 0 && animStructure) {
+        AnimStructure* dbgAnim = static_cast<AnimStructure*>(animStructure);
+        if (dbgAnim->loopTypeField == ANIM_RUN_TO_LAST) {
+            u32 poseHash = 0;
+            OriginalSTree* dbgActive = GetActiveSTree(drawable);
+            STreeData* dbgSkel = dbgActive ? dbgActive->skeleton : nullptr;
+            if (dbgSkel && dbgSkel->joints) {
+                for (u32 ji = 0; ji < dbgSkel->numJoints; ji++) {
+                    poseHash = poseHash * 31u + static_cast<u32>(static_cast<u16>(dbgSkel->joints[ji].rotationX));
+                    poseHash = poseHash * 31u + static_cast<u32>(static_cast<u16>(dbgSkel->joints[ji].rotationY));
+                    poseHash = poseHash * 31u + static_cast<u32>(static_cast<u16>(dbgSkel->joints[ji].rotationZ));
+                }
+            }
+            LOG("[Act] id=%p drw=%p t=%u type=%u anim=%d frame=%d end=%d lc=%d pose=%08X",
+                static_cast<void*>(owner), static_cast<void*>(drawable), sDbgAnimTick,
+                static_cast<u32>(owner->thingType),
+                dbgAnim->animEnum, static_cast<s32>(dbgAnim->currentFrame >> 16),
+                static_cast<s32>(dbgAnim->endFrame >> 16), dbgAnim->loopCount, poseHash);
+        }
+    }
     if (owner && owner->humanoidSound && animStructure) {
         AnimStructure* anim = static_cast<AnimStructure*>(animStructure);
         owner->humanoidSound->ProcessSoundScript(
@@ -2489,8 +2612,14 @@ void HumanoidModel::CaptureAttackJointMatrices() {
     const s32 savedCapture = animMatrices->CaptureEnabled();
     animMatrices->SetCaptureEnabled(1);
 
+#if defined(RC_PLATFORM_PSP)
+    std::vector<Mat4>& jointWorld = g_pspModelFrameScratch.attackJointMatrices;
+    ResizeRetainedScratch(jointWorld, skel->numJoints);
+    skel->ComputeWorldMatricesWithCallbacks(jointWorld.data());
+#else
     std::vector<Mat4> jointWorld(skel->numJoints);
     skel->ComputeWorldMatricesWithCallbacks(jointWorld.data());
+#endif
 
     animMatrices->SetCaptureEnabled(savedCapture);
 }

@@ -208,6 +208,23 @@ void StopLogo() {
     if (!s_logo.active)
         return;
 
+#if defined(RC_PLATFORM_PSP)
+    // The PSP has no reason to spend several vblanks on the desktop-style
+    // fade/hold animation. Present the final meter state once, release the
+    // loading texture, and return immediately so level transition cannot
+    // stall before PrePlay on a slow Memory Stick/renderer path.
+    if (s_logo.currentFill != s_logo.targetFill) {
+        s_logo.currentFill = s_logo.targetFill;
+        PresentLoadingFrame(s_logo.targetFill);
+    }
+    if (s_logo.bgTexture) {
+        s_logo.bgTexture->Release();
+        s_logo.bgTexture = nullptr;
+    }
+    s_logo.active = false;
+    return;
+#endif
+
     // Snap to the final value (no-op if FillMeter already got there).
     if (s_logo.currentFill != s_logo.targetFill) {
         FillMeter(s_logo.targetFill);

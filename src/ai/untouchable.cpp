@@ -116,15 +116,25 @@ void Untouchable::Draw() {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    QueueLateEntityDraw([](void* context) {
+        static_cast<Untouchable*>(context)->DrawLate();
+    }, this);
+#else
     QueueLateEntityDraw([this]() {
-        const Mat4 savedWorld = p3d::context->GetWorldMatrix();
-        Mat4 effectWorld;
-        LVector effectPos = { effectPosX, effectPosY, effectPosZ };
-        p3dBuildTransMatrix((f32)effectPos.x, (f32)effectPos.y, (f32)effectPos.z, effectWorld);
-        p3d::context->SetWorldMatrix(effectWorld);
-        particleMgr->Display();
-        p3d::context->SetWorldMatrix(savedWorld);
+        DrawLate();
     });
+#endif
+}
+
+void Untouchable::DrawLate() {
+    const Mat4 savedWorld = p3d::context->GetWorldMatrix();
+    Mat4 effectWorld;
+    LVector effectPos = { effectPosX, effectPosY, effectPosZ };
+    p3dBuildTransMatrix((f32)effectPos.x, (f32)effectPos.y, (f32)effectPos.z, effectWorld);
+    p3d::context->SetWorldMatrix(effectWorld);
+    particleMgr->Display();
+    p3d::context->SetWorldMatrix(savedWorld);
 }
 
 void Untouchable::UpdatePosition() {

@@ -12,8 +12,9 @@
 #include "xclib/xcfile.h"
 #include "gen/blockmgr.h"
 #include "ai/player.h"
+#include "p3d/fileio.h"
 #include <cstdlib>
-#ifdef MOD_LOADER
+#if MOD_LOADER
 #include "extra/modloader.h"
 #endif
 
@@ -23,6 +24,7 @@ static constexpr u32 DIALOG_RATE = 11025;
 static std::vector<u8> g_dialogFileData;
 static std::vector<u8> g_dialogHeader;
 static u32 g_dialogHeaderSize = 0;
+static u32 g_dialogFileSize = 0;
 static u32 g_dialogDataBaseOffset = 0;
 static u16 g_lastDialogChoiceOffset = 0;
 static s32 g_forcedDialogVariant = -1;
@@ -137,6 +139,53 @@ static bool EnsureDialogDataLoaded() {
         return true;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // RSDIALOG.DLG is a 33 MB container, far larger than the PSP's available
+    // user heap once the renderer, fonts and WAX samples are resident. Its
+    // header is only a few KB; keep that metadata resident and stream the
+    // selected ADPCM clip on demand from the Memory Stick.
+    p3d::io::FileHandle file;
+    if (!file.Open("SOUND/DIALOG/RSDIALOG.DLG", p3d::io::FileHandle::Mode::Read)
+        || file.Size() < 6 || file.Size() > 0xFFFFFFFFll) {
+        return false;
+    }
+
+    g_dialogFileSize = static_cast<u32>(file.Size());
+    u8 sizeBytes[2] = {};
+    if (file.Read(sizeBytes, sizeof(sizeBytes)) != sizeof(sizeBytes)) {
+        g_dialogFileSize = 0;
+        return false;
+    }
+
+    g_dialogHeaderSize = (u32)((u16)sizeBytes[0] | ((u16)sizeBytes[1] << 8));
+    if (g_dialogHeaderSize == 0 || g_dialogHeaderSize > g_dialogFileSize) {
+        g_dialogHeaderSize = 0;
+        g_dialogFileSize = 0;
+        return false;
+    }
+
+    g_dialogFileData.resize(g_dialogHeaderSize);
+    if (!file.Seek(0, SEEK_SET)
+        || file.Read(g_dialogFileData.data(), g_dialogFileData.size()) != g_dialogFileData.size()) {
+        g_dialogFileData.clear();
+        g_dialogHeaderSize = 0;
+        g_dialogFileSize = 0;
+        return false;
+    }
+
+    g_dialogDataBaseOffset = (g_dialogHeaderSize + (DIALOG_SECTOR_SIZE - 1))
+        & ~(DIALOG_SECTOR_SIZE - 1);
+    if (g_dialogDataBaseOffset >= g_dialogFileSize) {
+        g_dialogFileData.clear();
+        g_dialogHeaderSize = 0;
+        g_dialogFileSize = 0;
+        g_dialogDataBaseOffset = 0;
+        return false;
+    }
+
+    ResetDialogHeaderState();
+    return !g_dialogHeader.empty();
+#else
     u8* raw = nullptr;
     u32 size = 0;
     if (!xcReadFileLow("SOUND/DIALOG/RSDIALOG.DLG", &raw, &size) || !raw || size < 6) {
@@ -148,12 +197,14 @@ static bool EnsureDialogDataLoaded() {
 
     g_dialogFileData.assign(raw, raw + size);
     delete[] raw;
+    g_dialogFileSize = size;
 
     g_dialogHeaderSize = (u32)((u16)g_dialogFileData[0] | ((u16)g_dialogFileData[1] << 8));
     if (g_dialogHeaderSize == 0 || g_dialogHeaderSize > g_dialogFileData.size()) {
         g_dialogFileData.clear();
         g_dialogHeader.clear();
         g_dialogHeaderSize = 0;
+        g_dialogFileSize = 0;
         return false;
     }
 
@@ -162,12 +213,14 @@ static bool EnsureDialogDataLoaded() {
         g_dialogFileData.clear();
         g_dialogHeader.clear();
         g_dialogHeaderSize = 0;
+        g_dialogFileSize = 0;
         g_dialogDataBaseOffset = 0;
         return false;
     }
 
     ResetDialogHeaderState();
     return !g_dialogHeader.empty();
+#endif
 }
 
 static bool SelectDialogClipOffset(s32 character, s32 dialogID, u32* outStart, u32* outEnd,
@@ -316,7 +369,7 @@ static bool SelectDialogClipOffset(s32 character, s32 dialogID, u32* outStart, u
         }
 
         const u32 clipEnd = streamStart + clipSize;
-        if (streamStart >= g_dialogFileData.size() || clipEnd > g_dialogFileData.size()) {
+        if (streamStart >= g_dialogFileSize || clipEnd > g_dialogFileSize || clipEnd < streamStart) {
             return false;
         }
 
@@ -346,13 +399,13 @@ static bool SelectDialogClip(s32 character, s32 dialogID, DialogClipSelection* o
 
 static AudioSample LoadDialogSampleFromSelection(s32 character, s32 dialogID,
                                                  const DialogClipSelection& selection) {
-    if (selection.start >= g_dialogFileData.size()
-        || selection.end > g_dialogFileData.size()
+    if (selection.start >= g_dialogFileSize
+        || selection.end > g_dialogFileSize
         || selection.start >= selection.end) {
         return AUDIO_SAMPLE_INVALID;
     }
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
     char overrideName[64];
     std::snprintf(overrideName, sizeof(overrideName), "c%02d_d%03d_v%02u",
                   character, dialogID, selection.variant);
@@ -370,9 +423,20 @@ static AudioSample LoadDialogSampleFromSelection(s32 character, s32 dialogID,
     }
 #endif
 
-    const u8* clipData = &g_dialogFileData[selection.start];
     const u32 clipSize = selection.ByteSize();
+#if defined(RC_PLATFORM_PSP)
+    std::vector<u8> clipData(clipSize);
+    p3d::io::FileHandle file;
+    if (!file.Open("SOUND/DIALOG/RSDIALOG.DLG", p3d::io::FileHandle::Mode::Read)
+        || !file.Seek(selection.start, SEEK_SET)
+        || file.Read(clipData.data(), clipData.size()) != clipData.size()) {
+        return AUDIO_SAMPLE_INVALID;
+    }
+    std::vector<s16> pcm = SpuAdpcm::Decode(clipData.data(), clipSize, true);
+#else
+    const u8* clipData = &g_dialogFileData[selection.start];
     std::vector<s16> pcm = SpuAdpcm::Decode(clipData, clipSize, true);
+#endif
     if (DialogTraceEnabled()) {
         LOG("[DialogTrace] decode char=%d dialog=%d variant=%u sectors=%u adpcmBytes=%u "
             "start=0x%X pcmFrames=%u dur=%.3fs",

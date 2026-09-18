@@ -8,7 +8,8 @@
 #include "pddi/pddi.h"
 #include "pddi/pddidev.h"
 #include "pc/log.h"
-#ifdef REAL_TEXTURE_RENDERING
+#include "psp/psp_perf.h"
+#if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #endif
 #include <algorithm>
@@ -518,12 +519,48 @@ struct GMFogState {
     u32 colour = 0;
 };
 
+struct PrimGeomBuildLoopInfo {
+    u16 vertBase;
+    u16 vertCount;
+    u16 primCounts[4];
+};
+
+struct PrimGeomBuildVert {
+    f32 x, y, z, r, g, b, u, v, tpage, cba;
+};
+
+#if defined(RC_PLATFORM_PSP)
+// RP_ZCull* is called for each visible world block. Keep all transient decode
+// storage and the submitted primitive buffer alive across calls so the hot
+// path does not create/destroy heap objects once the first frame is warm.
+struct PspPrimGeomFrameScratch {
+    std::vector<PrimGeomBuildLoopInfo> loops;
+    std::vector<PrimGeomBuildVert> verts;
+    std::vector<u16> indices;
+    std::vector<u8> gmFogPrimitives;
+    pddiPrimBuffer* buffer = nullptr;
+};
+
+static PspPrimGeomFrameScratch s_pspPrimGeomFrameScratch;
+
+static void ReservePspPrimGeomScratch(PspPrimGeomFrameScratch* scratch, const tPrimGeom* geom) {
+    const u32 loopCapacity = std::max<u32>(128u, geom->numLoops);
+    const u32 vertexCapacity = std::max<u32>(8192u, static_cast<u32>(geom->numPolys) * 4u);
+    const u32 indexCapacity = std::max<u32>(24576u, static_cast<u32>(geom->numPolys) * 6u);
+
+    if (scratch->loops.capacity() < loopCapacity) scratch->loops.reserve(loopCapacity);
+    if (scratch->verts.capacity() < vertexCapacity) scratch->verts.reserve(vertexCapacity);
+    if (scratch->indices.capacity() < indexCapacity) scratch->indices.reserve(indexCapacity);
+}
+#endif
+
 static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                                                    const LVector* drawPos,
                                                    const GMFogState* gmFogState,
                                                    bool* outUsesSemiTrans,
-                                                   u8* outSemiTransMode
-#ifdef REAL_TEXTURE_RENDERING
+                                                   u8* outSemiTransMode,
+                                                   bool reusePspFrameBuffer
+#if REAL_TEXTURE_RENDERING
                                                    , std::vector<RealTextureGroup>* outRealTexGroups = nullptr
 #endif
                                                    ) {
@@ -553,14 +590,21 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     // - RP_ZCullGMFog only gates on NCLIP sign (no clip-bit overlap reject).
     const bool useClipOverlapReject = !(gmFogState && gmFogState->enabled);
 
-    struct LoopInfo {
-        u16 vertBase;
-        u16 vertCount;
-        u16 primCounts[4];
-    };
+#if defined(RC_PLATFORM_PSP)
+    PspPrimGeomFrameScratch* frameScratch = reusePspFrameBuffer ? &s_pspPrimGeomFrameScratch : nullptr;
+    if (frameScratch) {
+        ReservePspPrimGeomScratch(frameScratch, geom);
+    }
+#endif
 
-    std::vector<LoopInfo> loops;
-    loops.reserve(geom->numLoops);
+    std::vector<PrimGeomBuildLoopInfo> localLoops;
+    std::vector<PrimGeomBuildLoopInfo>& loops =
+#if defined(RC_PLATFORM_PSP)
+        frameScratch ? frameScratch->loops : localLoops;
+#else
+        localLoops;
+#endif
+    loops.clear();
 
     u16 vertAccum = 0;
     u32 expectedPolyCount = 0;
@@ -568,7 +612,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         const u8* loopVert = geom->loopVertData + i * 4;
         const u8* loopPrim = geom->loopPrimData + i * 8;
 
-        LoopInfo info;
+        PrimGeomBuildLoopInfo info;
         info.vertBase = vertAccum;
         info.vertCount = p3dReadU16LE(loopVert + 0);
         info.primCounts[0] = p3dReadU16LE(loopPrim + 0);
@@ -596,9 +640,22 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         return nullptr;
     }
 
-    struct Vert { f32 x, y, z, r, g, b, u, v, tpage, cba; };
-    std::vector<Vert> vertBuf;
-    std::vector<u16> idxBuf;
+    std::vector<PrimGeomBuildVert> localVertBuf;
+    std::vector<u16> localIdxBuf;
+    std::vector<PrimGeomBuildVert>& vertBuf =
+#if defined(RC_PLATFORM_PSP)
+        frameScratch ? frameScratch->verts : localVertBuf;
+#else
+        localVertBuf;
+#endif
+    std::vector<u16>& idxBuf =
+#if defined(RC_PLATFORM_PSP)
+        frameScratch ? frameScratch->indices : localIdxBuf;
+#else
+        localIdxBuf;
+#endif
+    vertBuf.clear();
+    idxBuf.clear();
     u32 culledBackfaceCount = 0;
     u32 culledClipCount = 0;
     bool usesSemiTrans = false;
@@ -629,7 +686,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         u32 clipCode;
     };
 
-    auto transformToPort = [&](const Vert& v, s32* outX, s32* outY, s32* outZ) {
+    auto transformToPort = [&](const PrimGeomBuildVert& v, s32* outX, s32* outY, s32* outZ) {
         f32 ox, oy, oz;
         Mat4TransformPoint(viewMatrix,
                            v.x + static_cast<f32>(worldTx),
@@ -663,7 +720,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
              | ((0x01000200u - packedSxy) & 0x80008000u & 0xC000C000u);
     };
 
-    auto projectToPortScreen = [&](const Vert& v, PortProjectedVert* out) {
+    auto projectToPortScreen = [&](const PrimGeomBuildVert& v, PortProjectedVert* out) {
         s32 vx, vy, vz;
         transformToPort(v, &vx, &vy, &vz);
 
@@ -692,7 +749,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         Clip = 2,
     };
 
-    auto evaluatePsxCull = [&](const Vert& v0, const Vert& v1, const Vert& v2, const Vert* v3) -> PsxCullResult {
+    auto evaluatePsxCull = [&](const PrimGeomBuildVert& v0, const PrimGeomBuildVert& v1, const PrimGeomBuildVert& v2, const PrimGeomBuildVert* v3) -> PsxCullResult {
         if (!doPsxFaceCull) {
             return PsxCullResult::Keep;
         }
@@ -732,7 +789,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
              - static_cast<s64>(by - ay) * static_cast<s64>(cx - ax);
     };
 
-    auto chooseQuadDiag02 = [&](const Vert& v0, const Vert& v1, const Vert& v2, const Vert& v3) -> bool {
+    auto chooseQuadDiag02 = [&](const PrimGeomBuildVert& v0, const PrimGeomBuildVert& v1, const PrimGeomBuildVert& v2, const PrimGeomBuildVert& v3) -> bool {
         if (!doPsxFaceCull) {
             return false;
         }
@@ -766,14 +823,14 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         return abs023 > abs132;
     };
 
-    auto readVert = [&](u16 vertBase, u8 vi) -> Vert {
+    auto readVert = [&](u16 vertBase, u8 vi) -> PrimGeomBuildVert {
         u32 idx = vertBase + vi;
         ASSERT(idx < geom->numVerts);
         if (idx >= geom->numVerts)
             idx = 0;
 
         const u8* v = verts + idx * 8;
-        Vert vert;
+        PrimGeomBuildVert vert;
         vert.x = static_cast<f32>(p3dReadS16LE(v + 0));
         vert.y = static_cast<f32>(p3dReadS16LE(v + 2));
         vert.z = static_cast<f32>(p3dReadS16LE(v + 4));
@@ -783,12 +840,20 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         return vert;
     };
 
-    std::vector<u8> gmFogPrimScratch;
+    std::vector<u8> localGmFogPrimScratch;
+    std::vector<u8>& gmFogPrimScratch =
+#if defined(RC_PLATFORM_PSP)
+        frameScratch ? frameScratch->gmFogPrimitives : localGmFogPrimScratch;
+#else
+        localGmFogPrimScratch;
+#endif
+    gmFogPrimScratch.clear();
     if (gmFogState && gmFogState->enabled && geom->gmFogWriteList && geom->gmFogColourList) {
         const u32 primRegionOff = static_cast<u32>(primStart - geom->ownedRawData);
         if (primRegionOff < geom->ownedRawSize) {
             const u32 primRegionSize = geom->ownedRawSize - primRegionOff;
-            gmFogPrimScratch.assign(primStart, primStart + primRegionSize);
+            gmFogPrimScratch.resize(primRegionSize);
+            std::memcpy(gmFogPrimScratch.data(), primStart, primRegionSize);
 
             auto writeFogRGB = [&](u32 linkOffset, u8 r, u8 g, u8 b) {
                 if (linkOffset < 4)
@@ -938,8 +1003,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                 return true;
             }
 
-            Vert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1);
-            Vert v2 = readVert(vertBase, vi2), v3 = readVert(vertBase, vi3);
+            PrimGeomBuildVert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1);
+            PrimGeomBuildVert v2 = readVert(vertBase, vi2), v3 = readVert(vertBase, vi3);
             const u16 tpage = p3dReadU16LE(pkt + 26);
             f32 tp = static_cast<f32>(tpage);
             f32 cb = static_cast<f32>(p3dReadU16LE(pkt + 14));
@@ -989,8 +1054,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                 return true;
             }
 
-            Vert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1);
-            Vert v2 = readVert(vertBase, vi2), v3 = readVert(vertBase, vi3);
+            PrimGeomBuildVert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1);
+            PrimGeomBuildVert v2 = readVert(vertBase, vi2), v3 = readVert(vertBase, vi3);
             const u16 tpage = p3dReadU16LE(pkt + 22);
             f32 tp = static_cast<f32>(tpage);
             f32 cb = static_cast<f32>(p3dReadU16LE(pkt + 14));
@@ -1031,8 +1096,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
         }
         else if (cmdBase == 0x38 || cmdBase == 0x28) {
-            Vert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1);
-            Vert v2 = readVert(vertBase, vi2), v3 = readVert(vertBase, vi3);
+            PrimGeomBuildVert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1);
+            PrimGeomBuildVert v2 = readVert(vertBase, vi2), v3 = readVert(vertBase, vi3);
 
             if (cmdBase == 0x38) {
                 auto [r0, g0, b0] = readRGB(4);
@@ -1079,7 +1144,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                 return true;
             }
 
-            Vert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1), v2 = readVert(vertBase, vi2);
+            PrimGeomBuildVert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1), v2 = readVert(vertBase, vi2);
             const u16 tpage = p3dReadU16LE(pkt + 26);
             f32 tp = static_cast<f32>(tpage);
             f32 cb = static_cast<f32>(p3dReadU16LE(pkt + 14));
@@ -1119,7 +1184,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                 return true;
             }
 
-            Vert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1), v2 = readVert(vertBase, vi2);
+            PrimGeomBuildVert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1), v2 = readVert(vertBase, vi2);
             const u16 tpage = p3dReadU16LE(pkt + 22);
             f32 tp = static_cast<f32>(tpage);
             f32 cb = static_cast<f32>(p3dReadU16LE(pkt + 14));
@@ -1151,7 +1216,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
         }
         else if (cmdBase == 0x30 || cmdBase == 0x20) {
-            Vert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1), v2 = readVert(vertBase, vi2);
+            PrimGeomBuildVert v0 = readVert(vertBase, vi0), v1 = readVert(vertBase, vi1), v2 = readVert(vertBase, vi2);
 
             if (cmdBase == 0x30) {
                 auto [r0, g0, b0] = readRGB(4);
@@ -1198,7 +1263,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     };
 
     for (int loop = 0; loop < (int)loops.size(); loop++) {
-        const LoopInfo& loopInfo = loops[loop];
+        const PrimGeomBuildLoopInfo& loopInfo = loops[loop];
 
         for (int bucket = 0; bucket < 4; bucket++) {
             for (u16 count = 0; count < loopInfo.primCounts[bucket]; count++) {
@@ -1223,7 +1288,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         return nullptr;
     }
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     // Re-sort the (already complete, triangle-list) index buffer by each
     // triangle's (tpage, cba) so the real-texture path can sub-range-draw
     // one material at a time. Vertex data/order is untouched -- only the
@@ -1234,7 +1299,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         for (u32 t = 0; t < numTris; t++) order[t] = t;
 
         auto keyOf = [&](u32 tri) -> u32 {
-            const Vert& v = vertBuf[idxBuf[tri * 3]];
+            const PrimGeomBuildVert& v = vertBuf[idxBuf[tri * 3]];
             return (static_cast<u32>(static_cast<u16>(v.tpage)) << 16) | static_cast<u16>(v.cba);
         };
         std::stable_sort(order.begin(), order.end(), [&](u32 a, u32 b) { return keyOf(a) < keyOf(b); });
@@ -1273,7 +1338,28 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                             static_cast<u32>(vertBuf.size()),
                             static_cast<u32>(idxBuf.size()));
 
-    pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+    pddiPrimBuffer* buffer = nullptr;
+#if defined(RC_PLATFORM_PSP)
+    if (frameScratch) {
+        if (!frameScratch->buffer) {
+            const u32 retainedVertexCapacity = static_cast<u32>(vertBuf.capacity());
+            const u32 retainedIndexCapacity = static_cast<u32>(idxBuf.capacity());
+            pddiPrimBufferDesc retainedDesc(PDDI_PRIM_TRIANGLES, format,
+                                             std::max(retainedVertexCapacity, static_cast<u32>(vertBuf.size())),
+                                             std::max(retainedIndexCapacity, static_cast<u32>(idxBuf.size())));
+            frameScratch->buffer = p3d::device->NewPrimBuffer(retainedDesc);
+        }
+        buffer = frameScratch->buffer;
+    }
+    else {
+        buffer = p3d::device->NewPrimBuffer(desc);
+    }
+#else
+    buffer = p3d::device->NewPrimBuffer(desc);
+#endif
+    if (!buffer) {
+        return nullptr;
+    }
     buffer->SetVertexData(vertBuf.data(), static_cast<u32>(vertBuf.size()));
     buffer->SetIndices(idxBuf.data(), static_cast<u32>(idxBuf.size()));
 
@@ -1340,7 +1426,7 @@ tPrimGeom* CloneRawPrimGeom(const u8* primData, u32 primSize) {
 }
 
 pddiPrimBuffer* BuildPrimBufferFromRawPrimGeom(const u8* primData, u32 primSize
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                                , std::vector<RealTextureGroup>* outRealTexGroups
 #endif
                                                ) {
@@ -1349,8 +1435,8 @@ pddiPrimBuffer* BuildPrimBufferFromRawPrimGeom(const u8* primData, u32 primSize
         return nullptr;
     }
 
-    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, nullptr, nullptr
-#ifdef REAL_TEXTURE_RENDERING
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, nullptr, nullptr, false
+#if REAL_TEXTURE_RENDERING
                                                           , outRealTexGroups
 #endif
                                                           );
@@ -1647,7 +1733,7 @@ u8* RP_FixUpPolysCBF_CL(tPrimGeom* geometry, void* view, u32 loopIndex, u32 poly
 pddiPrimBuffer* BuildUnculledPrimBufferFromPrimGeom(const tPrimGeom* geom) {
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
-    return BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, &usesSemiTrans, &semiTransMode);
+    return BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, &usesSemiTrans, &semiTransMode, false);
 }
 
 bool ExtractPrimGeomVerts(const u8* raw, u32 size,
@@ -1816,13 +1902,18 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
     tPrimGeom* primGeom = static_cast<tPrimGeom*>(geometry);
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
-    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode);
+    PspPerf::Trace("geometry clip: build begin");
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode, true);
+    PspPerf::Trace("geometry clip: build done");
     if (!buffer)
         return 0;
 
+    PspPerf::Trace("geometry clip: state begin");
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);
+    PspPerf::Trace("geometry clip: state done");
 
     if (usesSemiTrans) {
+        PspPerf::Trace("geometry clip: semi begin");
         pddiBlendMode blendMode = PDDI_BLEND_ALPHA;
         switch (semiTransMode & 3u) {
             case 1: blendMode = PDDI_BLEND_ADD; break;
@@ -1831,15 +1922,20 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
             default: break;
         }
         p3d::context->SetBlendMode(blendMode);
+        PspPerf::Trace("geometry clip: semi done");
     }
 
+    PspPerf::Trace("geometry clip: draw begin");
     p3d::context->DrawPrimBuffer(buffer);
+    PspPerf::Trace("geometry clip: draw done");
 
     if (usesSemiTrans) {
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
 
+#if !defined(RC_PLATFORM_PSP)
     buffer->Release();
+#endif
     return 1;
 }
 
@@ -1855,7 +1951,9 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
     tPrimGeom* primGeom = static_cast<tPrimGeom*>(geometry);
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
-    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode);
+    PspPerf::Trace("geometry fog: build begin");
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode, true);
+    PspPerf::Trace("geometry fog: build done");
     if (!buffer)
         return 0;
 
@@ -1872,13 +1970,29 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
         p3d::context->SetBlendMode(blendMode);
     }
 
+    PspPerf::Trace("geometry fog: draw begin");
     p3d::context->DrawPrimBuffer(buffer);
+    PspPerf::Trace("geometry fog: draw done");
 
     if (usesSemiTrans) {
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
 
+#if !defined(RC_PLATFORM_PSP)
     buffer->Release();
+#endif
     return 1;
 }
 
+void ShutdownPspGeometryFrameScratch() {
+#if defined(RC_PLATFORM_PSP)
+    if (s_pspPrimGeomFrameScratch.buffer) {
+        s_pspPrimGeomFrameScratch.buffer->Release();
+        s_pspPrimGeomFrameScratch.buffer = nullptr;
+    }
+    s_pspPrimGeomFrameScratch.loops.clear();
+    s_pspPrimGeomFrameScratch.verts.clear();
+    s_pspPrimGeomFrameScratch.indices.clear();
+    s_pspPrimGeomFrameScratch.gmFogPrimitives.clear();
+#endif
+}

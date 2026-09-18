@@ -262,6 +262,13 @@ void BlockManager::LoadBlocks(u32 blockNum,
     LOG("[BlockManager] Parsed %u BLK entries, %u in active list", blkCount, alreadyLoadedCount);
 }
 
+void BlockManager::LoadBlockAt(u32 index, const u8* blkData, u32 blkSize) {
+    if (!blkData || blkSize == 0 || index >= totalBlocks) {
+        return;
+    }
+    blocks[index].Parse(blkSize, blkData);
+}
+
 // UpdateAlreadyLoadedList__12BlockManager (BLKMGR.CPP)
 // PSX: copies block numbers from the loaded block list into alreadyLoadedList.
 // PC parses BLKs synchronously, so the logical resident list mirrors toBeLoadedList.

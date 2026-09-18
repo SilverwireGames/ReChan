@@ -36,6 +36,9 @@
 #include "pc/inputaction.h"
 #include "ai/door.h"
 #include "ai/ladder.h"
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#include "psp/psp_perf.h"
+#endif
 #include "gen/director_scripts_800d6f14.inc"
 #include "gen/director_scripts_overlay7_8001fa3c.inc"
 
@@ -1339,6 +1342,9 @@ void Director::Process() {
 
     // PSX iterates the two internal handler chains BEFORE the scriptPtr null check.
     // Each node: lw $v0, 0x18($a0) = funcPtr; lw $s0, 0($a0) = next; jalr $v0 (no args).
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("director: handler A begin");
+#endif
     for (ccMinNode* node = handlerSetA.handlerList.head; node; ) {
         Handler* handler = static_cast<Handler*>(node);
         node = node->next;
@@ -1347,6 +1353,11 @@ void Director::Process() {
         }
     }
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("director: handler A done");
+    PspPerf::Trace("director: handler B begin");
+#endif
+
     for (ccMinNode* node = handlerSetB.handlerList.head; node; ) {
         Handler* handler = static_cast<Handler*>(node);
         node = node->next;
@@ -1354,6 +1365,10 @@ void Director::Process() {
             handler->funcPtr(handler);
         }
     }
+
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("director: handler B done");
+#endif
 
     // PSX: if scriptPtr (a1+0x1C) is null, return 1 with no further work.
     if (!scriptPtr) {

@@ -17,8 +17,13 @@ static inline int rcStricmp(const char* lhs, const char* rhs) {
     return static_cast<unsigned char>(*lhs) - static_cast<unsigned char>(*rhs);
 }
 
+#if defined(RC_PLATFORM_PSP)
+#define JCS_TARGET_WIDTH 480
+#define JCS_TARGET_HEIGHT 272
+#else
 #define JCS_TARGET_WIDTH 1280
 #define JCS_TARGET_HEIGHT 720
+#endif
 
 // Native resolution (overlay coordinate space)
 #define DEFAULT_SCREEN_WIDTH ((f32)512)
@@ -79,19 +84,19 @@ static f32 HudSafeOffsetX() {
     return 0.0f;
 }
 
-static f32 HudX(f32 x) {
+[[maybe_unused]] static f32 HudX(f32 x) {
     return HudSafeOffsetX() + (x / DEFAULT_SCREEN_WIDTH) * HudSafeWidth();
 }
 
-static f32 HudY(f32 y) {
+[[maybe_unused]] static f32 HudY(f32 y) {
     return SCREEN_SCALE_Y(y);
 }
 
-static f32 HudW(f32 w) {
+[[maybe_unused]] static f32 HudW(f32 w) {
     return (w / DEFAULT_SCREEN_WIDTH) * HudSafeWidth();
 }
 
-static f32 HudH(f32 h) {
+[[maybe_unused]] static f32 HudH(f32 h) {
     return SCREEN_SCALE_Y(h);
 }
 

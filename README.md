@@ -73,7 +73,9 @@ Once assets are extracted the disc image folder can be deleted.
 
 ReChan currently supports 64-bit x86 (`x86_64`) Windows and Linux, and Apple
 Silicon (`arm64`) macOS. On macOS the renderer uses a native Metal backend. To
-compile it yourself, see the [build guide](docs/BUILDING.md).
+compile it yourself, see the [build guide](docs/BUILDING.md). A native PSP
+target is also available through PSPSDK; it uses the fixed 480×272 display and
+requires the user's locally extracted assets in the EBOOT data directory.
 
 ## Legal and Asset Notice
 

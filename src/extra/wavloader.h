@@ -1,7 +1,8 @@
 ﻿#pragma once
 #include "core.h"
+#include "gen/config.h"
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 // Simple PCM audio buffer from a loaded WAV file.
 struct WAVAudioBuffer {

@@ -46,6 +46,8 @@ project "libp3d"
         libp3d_root .. "/pddi/metal/**.h",
         libp3d_root .. "/pddi/metal/**.cpp",
         libp3d_root .. "/pddi/metal/**.mm",
+        libp3d_root .. "/pddi/psp/**.h",
+        libp3d_root .. "/pddi/psp/**.cpp",
     }
 
     includedirs {

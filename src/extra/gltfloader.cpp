@@ -1,6 +1,6 @@
 ﻿#include "extra/gltfloader.h"
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 #include "gen/common.h"
 #include "gen/model.h"
@@ -11,7 +11,7 @@
 #include "pddi/pddidev.h"
 #include "p3d/texture.h"
 #include "p3d/fileio.h"
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #include "vendor/stb/stb_image.h"
 #endif
@@ -71,7 +71,7 @@ static bool IsUnmodifiedRechanDump(const cgltf_data* data, const cgltf_mesh& mes
         static_cast<const u8*>(data->buffers[0].data), data->buffers[0].size);
 }
 
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
 static bool RegisterMaterialTexture(const cgltf_material* material, const char* glbPath, u16 tpage, u16 cba) {
     if (!material || !glbPath) return false;
     const cgltf_texture_view& view = material->pbr_metallic_roughness.base_color_texture;
@@ -124,7 +124,7 @@ static pddiPrimBuffer* BuildMeshBuffer(
     s32* outMax,
     const cgltf_skin* skin,
     SkinData** outSkinData
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     , std::vector<RealTextureGroup>* outGroups
 #endif
 ) {
@@ -134,7 +134,7 @@ static pddiPrimBuffer* BuildMeshBuffer(
     std::vector<SkinVertex> skinVertices;
     bool skinComplete = skin && outSkinData && skin->joints_count > 0
         && skin->inverse_bind_matrices;
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
     if (outGroups) outGroups->clear();
 #endif
     bool haveBounds = false;
@@ -158,7 +158,7 @@ static pddiPrimBuffer* BuildMeshBuffer(
 
         float tpage = -1.0f;
         float cba = 0.0f;
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
         const u32 materialKey = p3dHash((std::string(glbPath) + "#" + std::to_string(primitiveIndex)).c_str());
         const u16 materialTpage = static_cast<u16>(0xF000u | (materialKey & 0x0FFFu));
         const u16 materialCba = static_cast<u16>((materialKey >> 12) & 0xFFFFu);
@@ -249,7 +249,7 @@ static pddiPrimBuffer* BuildMeshBuffer(
                 haveBounds = true;
             }
         }
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
         if (outGroups && materialRegistered) {
             outGroups->push_back(RealTextureGroup{ groupStart,
                 static_cast<u32>(indices.size()) - groupStart,
@@ -456,7 +456,7 @@ OriginalSTree* GLTFLoader::LoadSTree(const char* path) {
             pddiPrimBuffer* importedBuffer = BuildMeshBuffer(mesh, nodeMatrix, path, nullptr, nullptr,
                                                              original->skeleton ? &data->skins[0] : nullptr,
                                                              original->skeleton ? &original->skinData : nullptr
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                                              , &original->realTexGroups
 #endif
             );
@@ -537,7 +537,7 @@ OriginalGeo* GLTFLoader::LoadGeo(const char* path) {
             original->meshBuffer = BuildMeshBuffer(mesh, matrix, path,
                                                    original->bboxMin, original->bboxMax,
                                                    nullptr, nullptr
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                                    , &original->realTexGroups
 #endif
             );
@@ -595,7 +595,7 @@ OriginalETree* GLTFLoader::LoadETree(const char* path) {
         if (mesh.primitives_count > 0) {
             original->meshBuffer = BuildMeshBuffer(mesh, nullptr, path, nullptr, nullptr,
                                                    nullptr, nullptr
-#ifdef REAL_TEXTURE_RENDERING
+#if REAL_TEXTURE_RENDERING
                                                    , nullptr
 #endif
             );

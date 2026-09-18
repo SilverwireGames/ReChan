@@ -1,6 +1,6 @@
 ﻿#include "extra/jsondataloader.h"
 
-#ifdef MOD_LOADER
+#if MOD_LOADER
 
 #include "pc/log.h"
 #include "p3d/fileio.h"
