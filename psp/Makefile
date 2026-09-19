@@ -86,7 +86,7 @@ endif
 # build.mak supplies the user-mode PSP runtime and core exports. Keep only
 # libraries used directly by this title; adding kernel/legacy SDK libraries
 # here causes duplicate newlib symbols with current PSPDev releases.
-LIBS = -lstdc++ -lpspgum -lpspgu -lpspaudiolib -lpspaudio -lpsppower -lm
+LIBS = -lstdc++ -lpspgum -lpspgu -lpspaudiolib -lpspaudio -lpspaudio_driver -lpsppower -lm
 
 EXTRA_CLEAN = $(OBJS)
 

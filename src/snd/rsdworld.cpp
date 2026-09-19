@@ -444,10 +444,19 @@ void rsdPersistent::UpdateSpatial() {
 void rsdWorld::UpdateSpatialAudioState() {
     UpdateListenerInAudioEngine();
 
+#if defined(RC_PLATFORM_PSP)
+    // The PSP mixer reads the fixed voice table asynchronously. Updating the
+    // persistent-sound vector here every render frame is both unnecessary for
+    // listener tracking and unsafe with the lightweight PSP lock shim. Keep
+    // the listener update on the frame thread; persistent voice parameters are
+    // refreshed when the sound is started or explicitly changed.
+    return;
+#else
     PersistentLockGuard<PersistentMutex> lock(g_persistentMutex);
     for (rsdPersistent* snd : g_persistentSounds) {
         if (snd != nullptr) {
             snd->UpdateSpatial();
         }
     }
+#endif
 }

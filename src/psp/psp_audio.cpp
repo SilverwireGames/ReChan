@@ -1,8 +1,11 @@
 #include "pc/audio.h"
+#include "pc/log.h"
 #include "p3d/fileio.h"
+#include "psp/psp_perf.h"
 #include "snd/adpcm.h"
 
 #include <pspaudiolib.h>
+#include <pspaudio_kernel.h>
 #include <pspkernel.h>
 
 #include <algorithm>
@@ -22,6 +25,21 @@ constexpr u32 kOutputFrames = 1024;
 constexpr u32 kMusicChunkBlocks = 2048;
 constexpr u32 kMusicChunkBytes = kMusicChunkBlocks * 16;
 constexpr u32 kMusicChunkSamples = kMusicChunkBlocks * 28;
+constexpr u32 kInvalidPair = 0xFFFFFFFFu;
+constexpr u32 kInvalidBuffer = 0xFFFFFFFFu;
+// Allegrex has no hardware double precision. Software double operations in
+// every output sample can exceed the 23.22 ms audio period and starve the
+// lower-priority game/decoder threads. A 34.30 cursor retains sub-sample
+// precision without losing accuracy on long tracks or calling libgcc per PCM
+// sample. The spare high bits also keep cursor + step safely below u64 overflow.
+constexpr u32 kCursorFractionBits = 30;
+constexpr u64 kCursorOne = 1ull << kCursorFractionBits;
+constexpr u32 kCursorFractionMask = static_cast<u32>(kCursorOne - 1u);
+// The callback thread created by pspaudiolib runs at a higher priority. Keep
+// the decoder below it, but above the normal game thread so the next pair is
+// prepared during the current pair instead of arriving late at a boundary.
+constexpr int kMusicWorkerPriority = 0x24;
+constexpr int kMusicWorkerStackSize = 0x4000;
 
 struct Sample {
     std::vector<s16> pcm;
@@ -33,7 +51,7 @@ struct Sample {
 
 struct Voice {
     AudioSample sample = AUDIO_SAMPLE_INVALID;
-    double cursor = 0.0;
+    u64 cursor = 0;
     float volume = 1.0f;
     float targetVolume = 1.0f;
     float pan = 0.0f;
@@ -48,9 +66,17 @@ struct Voice {
     bool active = false;
 };
 
-// FAG stores alternating 32 KB mono ADPCM chunks (left, right). Keep the file
-// open and decode only the current stereo pair. This avoids allocating the
-// complete compressed or decoded music track on the PSP heap.
+struct MusicChunk {
+    u32 pair = kInvalidPair;
+    std::array<s16, kMusicChunkSamples> left = {};
+    std::array<s16, kMusicChunkSamples> right = {};
+};
+
+// FAG stores alternating 32 KB mono ADPCM chunks (left, right). The audio
+// callback must never touch the Memory Stick or decode ADPCM: either operation
+// can exceed the PSP audio period and cause an audible underrun. A kernel
+// worker keeps one decoded pair playing while it fills the other pair ahead of
+// the cursor.
 struct MusicStream {
     std::unique_ptr<p3d::io::FileHandle> file;
     u32 dataOffset = 0;
@@ -58,16 +84,28 @@ struct MusicStream {
     u32 pairCount = 0;
     u32 framesPerPair = kMusicChunkSamples;
     u32 totalFrames = 0;
-    u32 currentPair = 0xFFFFFFFFu;
-    double cursor = 0.0;
+    u32 currentPair = kInvalidPair;
+    std::atomic_uint currentBuffer{kInvalidBuffer};
+    std::atomic_uint readyBuffer{kInvalidBuffer};
+    std::atomic_uint readyPair{kInvalidPair};
+    std::atomic_uint requestedPair{kInvalidPair};
+    std::atomic_bool stopWorker{false};
+    std::atomic_bool workerError{false};
+    SceUID workerThread = -1;
+    SceUID requestSema = -1;
+    u64 cursor = 0;
     float volume = 1.0f;
     float targetVolume = 1.0f;
     u32 fadeFrames = 0;
+    // Last mixed music sample is used as a bounded fallback if the worker
+    // misses a pair boundary. Holding the tail is less destructive than
+    // inserting a full 1024-frame hole in the output.
+    float holdLeft = 0.0f;
+    float holdRight = 0.0f;
     bool loop = true;
     std::atomic_bool active{false};
     std::array<u8, kMusicChunkBytes * 2> compressedPair = {};
-    std::array<s16, kMusicChunkSamples> left = {};
-    std::array<s16, kMusicChunkSamples> right = {};
+    std::array<MusicChunk, 2> chunks = {};
 };
 
 std::array<Sample, kMaxSamples> g_samples;
@@ -100,6 +138,19 @@ static u32 ReadU32(const u8* data) {
     return value;
 }
 
+static u64 VoiceCursorStep(u32 rate, float pitch) {
+    const float finitePitch = std::isfinite(pitch) ? std::max(pitch, 0.05f) : 1.0f;
+    // One conversion per voice/buffer, never per sample. Bound pathological
+    // input before converting to an integer; normal playback keeps its pitch.
+    const double frames = static_cast<double>(rate) / kOutputRate * finitePitch;
+    return static_cast<u64>(std::min(frames, static_cast<double>(UINT32_MAX)) * kCursorOne);
+}
+
+static float CursorFraction(u64 cursor) {
+    return static_cast<float>(static_cast<u32>(cursor) & kCursorFractionMask)
+        * (1.0f / static_cast<float>(kCursorOne));
+}
+
 static void DecodeMusicChunk(const u8* chunkData, std::array<s16, kMusicChunkSamples>& output) {
     s32 prev0 = 0;
     s32 prev1 = 0;
@@ -110,14 +161,10 @@ static void DecodeMusicChunk(const u8* chunkData, std::array<s16, kMusicChunkSam
     }
 }
 
-static bool PrepareMusicPair(u32 pair) {
+static bool PrepareMusicPair(u32 pair, MusicChunk& destination) {
     if (pair >= g_musicStream.pairCount) {
         return false;
     }
-    if (g_musicStream.currentPair == pair) {
-        return true;
-    }
-
     const u32 chunk = pair * 2;
     const u32 leftOffset = g_musicStream.dataOffset + chunk * kMusicChunkBytes;
     if (leftOffset > g_musicStream.dataEnd
@@ -130,9 +177,119 @@ static bool PrepareMusicPair(u32 pair) {
         return false;
     }
 
-    DecodeMusicChunk(g_musicStream.compressedPair.data(), g_musicStream.left);
-    DecodeMusicChunk(g_musicStream.compressedPair.data() + kMusicChunkBytes, g_musicStream.right);
+    DecodeMusicChunk(g_musicStream.compressedPair.data(), destination.left);
+    DecodeMusicChunk(g_musicStream.compressedPair.data() + kMusicChunkBytes, destination.right);
+    destination.pair = pair;
+    return true;
+}
+
+static int MusicWorkerEntry(SceSize, void*) {
+    while (!g_musicStream.stopWorker.load(std::memory_order_acquire)) {
+        if (g_musicStream.requestSema < 0
+            || sceKernelWaitSema(g_musicStream.requestSema, 1, nullptr) < 0) {
+            break;
+        }
+        if (g_musicStream.stopWorker.load(std::memory_order_acquire)) break;
+
+        const u32 pair = g_musicStream.requestedPair.load(std::memory_order_acquire);
+        if (pair == kInvalidPair || pair >= g_musicStream.pairCount) continue;
+        if (g_musicStream.readyPair.load(std::memory_order_acquire) == pair) continue;
+
+        // With two buffers, one is being consumed and the other is either free
+        // or already queued for the callback. Never overwrite either one.
+        const u32 current = g_musicStream.currentBuffer.load(std::memory_order_acquire);
+        const u32 queued = g_musicStream.readyBuffer.load(std::memory_order_acquire);
+        if (queued != kInvalidBuffer) {
+            // The callback signals the semaphore again as soon as it promotes
+            // the queued pair and releases this buffer.
+            continue;
+        }
+        const u32 target = current == 0u ? 1u : 0u;
+        if (target >= g_musicStream.chunks.size()) continue;
+        if (!PrepareMusicPair(pair, g_musicStream.chunks[target])) {
+            g_musicStream.workerError.store(true, std::memory_order_release);
+            PspPerf::RecordAudioWorkerError();
+            g_musicStream.active.store(false, std::memory_order_release);
+            continue;
+        }
+
+        // Publish the buffer only after both channel arrays are complete.
+        g_musicStream.readyBuffer.store(target, std::memory_order_release);
+        g_musicStream.readyPair.store(pair, std::memory_order_release);
+    }
+    return sceKernelExitThread(0);
+}
+
+static void RequestMusicPair(u32 pair) {
+    if (pair == kInvalidPair || g_musicStream.requestSema < 0) return;
+    g_musicStream.requestedPair.store(pair, std::memory_order_release);
+    // The request value is atomic, so a failed signal merely means the worker
+    // is already awake and will observe the newest requested pair.
+    sceKernelSignalSema(g_musicStream.requestSema, 1);
+}
+
+static bool StartMusicWorker() {
+    g_musicStream.stopWorker.store(false, std::memory_order_release);
+    g_musicStream.workerError.store(false, std::memory_order_release);
+    g_musicStream.requestSema = sceKernelCreateSema(
+        "ReChainMusic", 0, 0, 1, nullptr);
+    if (g_musicStream.requestSema < 0) return false;
+
+    g_musicStream.workerThread = sceKernelCreateThread(
+        "ReChainMusic", MusicWorkerEntry, kMusicWorkerPriority,
+        kMusicWorkerStackSize, 0, nullptr);
+    if (g_musicStream.workerThread < 0) {
+        sceKernelDeleteSema(g_musicStream.requestSema);
+        g_musicStream.requestSema = -1;
+        return false;
+    }
+    if (sceKernelStartThread(g_musicStream.workerThread, 0, nullptr) < 0) {
+        sceKernelDeleteThread(g_musicStream.workerThread);
+        g_musicStream.workerThread = -1;
+        sceKernelDeleteSema(g_musicStream.requestSema);
+        g_musicStream.requestSema = -1;
+        return false;
+    }
+    return true;
+}
+
+static void StopMusicWorker() {
+    g_musicStream.stopWorker.store(true, std::memory_order_release);
+    if (g_musicStream.requestSema >= 0) {
+        sceKernelSignalSema(g_musicStream.requestSema, 1);
+    }
+    if (g_musicStream.workerThread >= 0) {
+        SceUInt timeout = 5000000;
+        if (sceKernelWaitThreadEnd(g_musicStream.workerThread, &timeout) < 0) {
+            sceKernelTerminateThread(g_musicStream.workerThread);
+            sceKernelWaitThreadEnd(g_musicStream.workerThread, nullptr);
+        }
+        sceKernelDeleteThread(g_musicStream.workerThread);
+        g_musicStream.workerThread = -1;
+    }
+    if (g_musicStream.requestSema >= 0) {
+        sceKernelDeleteSema(g_musicStream.requestSema);
+        g_musicStream.requestSema = -1;
+    }
+}
+
+static bool WaitForMusicPair(u32 pair) {
+    for (u32 attempt = 0; attempt < 5000; ++attempt) {
+        if (g_musicStream.readyPair.load(std::memory_order_acquire) == pair) return true;
+        if (g_musicStream.workerError.load(std::memory_order_acquire)) return false;
+        sceKernelDelayThread(1000);
+    }
+    return false;
+}
+
+static bool PromoteMusicPair(u32 pair) {
+    if (g_musicStream.readyPair.load(std::memory_order_acquire) != pair) return false;
+    const u32 buffer = g_musicStream.readyBuffer.load(std::memory_order_acquire);
+    if (buffer >= g_musicStream.chunks.size()) return false;
+    g_musicStream.currentBuffer.store(buffer, std::memory_order_release);
     g_musicStream.currentPair = pair;
+    g_musicStream.readyPair.store(kInvalidPair, std::memory_order_release);
+    g_musicStream.readyBuffer.store(kInvalidBuffer, std::memory_order_release);
     return true;
 }
 
@@ -144,32 +301,57 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
         return;
     }
 
+    bool underrun = false;
+    u32 underrunFrame = requestedFrames;
+    u32 mixedFrames = 0;
+    const u64 streamEnd = static_cast<u64>(g_musicStream.totalFrames) * kCursorOne;
     for (u32 frame = 0; frame < requestedFrames; ++frame) {
-        if (g_musicStream.cursor >= g_musicStream.totalFrames) {
+        if (g_musicStream.cursor >= streamEnd) {
             if (!g_musicStream.loop) {
                 g_musicStream.active.store(false, std::memory_order_release);
                 break;
             }
-            g_musicStream.cursor = 0.0;
-            g_musicStream.currentPair = 0xFFFFFFFFu;
+            g_musicStream.cursor = 0;
+            // A one-pair track is already resident in the current buffer.
+            // Invalidating it here would make the callback wait for a pair
+            // that the worker will never request again.
+            if (g_musicStream.pairCount > 1u) {
+                g_musicStream.currentPair = kInvalidPair;
+            }
         }
 
-        const u32 sourceFrame = static_cast<u32>(g_musicStream.cursor);
+        const u32 sourceFrame = static_cast<u32>(g_musicStream.cursor >> kCursorFractionBits);
         const u32 pair = sourceFrame / g_musicStream.framesPerPair;
-        if (pair >= g_musicStream.pairCount || !PrepareMusicPair(pair)) {
-            g_musicStream.active.store(false, std::memory_order_release);
+        if (pair >= g_musicStream.pairCount) break;
+        if (pair != g_musicStream.currentPair) {
+            if (!PromoteMusicPair(pair)) {
+                // A slow Memory Stick or worker can miss a period. Keep the
+                // stream alive and hold the last sample for this period
+                // instead of producing a long zero-filled hole.
+                underrun = true;
+                underrunFrame = frame;
+                break;
+            }
+            const u32 nextPair = pair + 1u < g_musicStream.pairCount ? pair + 1u : 0u;
+            if (g_musicStream.pairCount > 1u) RequestMusicPair(nextPair);
+        }
+
+        const u32 currentBuffer = g_musicStream.currentBuffer.load(std::memory_order_acquire);
+        if (currentBuffer >= g_musicStream.chunks.size()) {
+            underrun = true;
+            underrunFrame = frame;
             break;
         }
-
+        const MusicChunk& chunkData = g_musicStream.chunks[currentBuffer];
         const u32 localFrame = sourceFrame % g_musicStream.framesPerPair;
         const u32 nextFrame = std::min<u32>(localFrame + 1, g_musicStream.framesPerPair - 1);
-        const float fraction = static_cast<float>(g_musicStream.cursor - sourceFrame);
-        const float left = static_cast<float>(g_musicStream.left[localFrame])
-            + (static_cast<float>(g_musicStream.left[nextFrame])
-                - static_cast<float>(g_musicStream.left[localFrame])) * fraction;
-        const float right = static_cast<float>(g_musicStream.right[localFrame])
-            + (static_cast<float>(g_musicStream.right[nextFrame])
-                - static_cast<float>(g_musicStream.right[localFrame])) * fraction;
+        const float fraction = CursorFraction(g_musicStream.cursor);
+        const float left = static_cast<float>(chunkData.left[localFrame])
+            + (static_cast<float>(chunkData.left[nextFrame])
+                - static_cast<float>(chunkData.left[localFrame])) * fraction;
+        const float right = static_cast<float>(chunkData.right[localFrame])
+            + (static_cast<float>(chunkData.right[nextFrame])
+                - static_cast<float>(chunkData.right[localFrame])) * fraction;
         const float gain = g_musicStream.volume * g_masterVolume;
         const u32 outputIndex = frame * 2;
         float outLeft = left * gain;
@@ -182,13 +364,34 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
         output[outputIndex + 1] = static_cast<s16>(std::clamp(
             static_cast<float>(output[outputIndex + 1]) + outRight, -32768.0f, 32767.0f));
 
-        g_musicStream.cursor += 0.5;
+        g_musicStream.holdLeft = outLeft;
+        g_musicStream.holdRight = outRight;
+
+        g_musicStream.cursor += kCursorOne / 2u;
+        ++mixedFrames;
         if (g_musicStream.fadeFrames > 0) {
             --g_musicStream.fadeFrames;
             g_musicStream.volume += (g_musicStream.targetVolume - g_musicStream.volume)
                 / static_cast<float>(g_musicStream.fadeFrames + 1);
         }
     }
+
+    if (underrun) {
+        PspPerf::RecordAudioUnderrun();
+        const s16 holdLeft = static_cast<s16>(std::clamp(
+            g_musicStream.holdLeft, -32768.0f, 32767.0f));
+        const s16 holdRight = static_cast<s16>(std::clamp(
+            g_musicStream.holdRight, -32768.0f, 32767.0f));
+        // The callback output was cleared before voice/music mixing. Fill the
+        // remainder with a stable tail sample to avoid a periodic hard click.
+        for (u32 frame = underrunFrame; frame < requestedFrames; ++frame) {
+            const u32 outputIndex = frame * 2;
+            if (output[outputIndex] == 0) output[outputIndex] = holdLeft;
+            if (output[outputIndex + 1] == 0) output[outputIndex + 1] = holdRight;
+        }
+    }
+
+    PspPerf::RecordAudioMusicMix(mixedFrames);
 
     g_musicMixers.fetch_sub(1, std::memory_order_release);
 }
@@ -200,16 +403,26 @@ static void ResetMusicStream() {
     while (g_musicMixers.load(std::memory_order_acquire) != 0) {
         sceKernelDelayThread(0);
     }
+    StopMusicWorker();
     g_musicStream.file.reset();
     g_musicStream.dataOffset = 0;
     g_musicStream.dataEnd = 0;
     g_musicStream.pairCount = 0;
     g_musicStream.totalFrames = 0;
-    g_musicStream.currentPair = 0xFFFFFFFFu;
-    g_musicStream.cursor = 0.0;
+    g_musicStream.currentPair = kInvalidPair;
+    g_musicStream.currentBuffer.store(kInvalidBuffer, std::memory_order_release);
+    g_musicStream.readyBuffer.store(kInvalidBuffer, std::memory_order_release);
+    g_musicStream.readyPair.store(kInvalidPair, std::memory_order_release);
+    g_musicStream.requestedPair.store(kInvalidPair, std::memory_order_release);
+    g_musicStream.cursor = 0;
+    g_musicStream.holdLeft = 0.0f;
+    g_musicStream.holdRight = 0.0f;
 }
 
 static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
+#if defined(PSP_PERF_TELEMETRY)
+    const u64 callbackStart = sceKernelGetSystemTimeWide();
+#endif
     auto* output = static_cast<s16*>(buffer);
     std::memset(output, 0, requestedFrames * 2 * sizeof(s16));
 
@@ -224,20 +437,28 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
         float left = voice.volume * g_masterVolume * (1.0f - std::clamp(voice.pan, -1.0f, 1.0f)) * 0.5f;
         float right = voice.volume * g_masterVolume * (1.0f + std::clamp(voice.pan, -1.0f, 1.0f)) * 0.5f;
         if (g_mono) right = left = (left + right) * 0.5f;
+        const u64 sampleEnd = static_cast<u64>(sample->frames) * kCursorOne;
+        u64 step = VoiceCursorStep(sample->rate, voice.pitch);
+        // Reduce large looping strides once. The inner loop only needs one
+        // subtraction to wrap, including one-frame clips and extreme pitch.
+        if (voice.loop) {
+            if (step >= sampleEnd) step %= sampleEnd;
+            if (voice.cursor >= sampleEnd) voice.cursor %= sampleEnd;
+        }
 
         for (u32 frame = 0; frame < requestedFrames; ++frame) {
             if (!voice.active) break;
-            if (voice.cursor >= sample->frames) {
-                if (voice.loop) voice.cursor = std::fmod(voice.cursor, static_cast<double>(sample->frames));
+            if (voice.cursor >= sampleEnd) {
+                if (voice.loop) voice.cursor -= sampleEnd;
                 else {
                     voice.active = false;
                     break;
                 }
             }
 
-            const u32 sourceFrame = static_cast<u32>(voice.cursor);
+            const u32 sourceFrame = static_cast<u32>(voice.cursor >> kCursorFractionBits);
             const u32 nextFrame = std::min<u32>(sourceFrame + 1, sample->frames - 1);
-            const float fraction = static_cast<float>(voice.cursor - sourceFrame);
+            const float fraction = CursorFraction(voice.cursor);
             const auto read = [&](u32 source) -> float {
                 if (sample->channels == 1) return sample->pcm[source];
                 const u32 index = source * sample->channels;
@@ -249,7 +470,7 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
             const u32 outputIndex = frame * 2;
             output[outputIndex] = static_cast<s16>(std::clamp(output[outputIndex] + value * left, -32768.0f, 32767.0f));
             output[outputIndex + 1] = static_cast<s16>(std::clamp(output[outputIndex + 1] + value * right, -32768.0f, 32767.0f));
-            voice.cursor += static_cast<double>(sample->rate) / kOutputRate * std::max(voice.pitch, 0.05f);
+            voice.cursor += step;
             if (voice.fadeFrames > 0) {
                 --voice.fadeFrames;
                 voice.volume += (voice.targetVolume - voice.volume) / static_cast<float>(voice.fadeFrames + 1);
@@ -260,6 +481,10 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
     }
 
     MixMusicStream(output, requestedFrames);
+#if defined(PSP_PERF_TELEMETRY)
+    const u64 callbackUs = sceKernelGetSystemTimeWide() - callbackStart;
+    PspPerf::RecordAudioCallback(static_cast<u32>(std::min<u64>(callbackUs, 0xFFFFFFFFull)));
+#endif
 }
 
 static AudioVoice AllocateVoice(u8 priority) {
@@ -293,10 +518,28 @@ static AudioVoice StartVoice(AudioSample sample, float volume, float pan, bool l
 } // namespace
 
 bool AudioEngine::Init() {
+#if defined(PSP_DISABLE_AUDIO_DIAGNOSTIC)
+    return false; // Isolation build: separate audio scheduling from GU stalls.
+#endif
     if (g_initialized) return true;
-    if (pspAudioInit() < 0) return false;
+    const int audioInitResult = pspAudioInit();
+    if (audioInitResult < 0) {
+        LOG("[PSP Audio] pspAudioInit failed: %d", audioInitResult);
+        return false;
+    }
+    // pspaudiolib reserves the channel first. Setting the frequency before
+    // that reservation is rejected by some firmware/emulator versions and
+    // used to make the entire audio engine silently fail to start.
+    const int frequencyResult = sceAudioSetFrequency(static_cast<int>(kOutputRate));
+    if (frequencyResult < 0) {
+        LOG("[PSP Audio] sceAudioSetFrequency(44100) failed: %d; using library default",
+            frequencyResult);
+    }
     pspAudioSetChannelCallback(0, AudioCallback, nullptr);
     pspAudioSetVolume(0, PSP_VOLUME_MAX, PSP_VOLUME_MAX);
+    PspPerf::SetAudioMemory(static_cast<u32>(sizeof(MusicStream)));
+    LOG("[PSP Audio] initialized: output=%u Hz callback=%u frames stream_ram=%u",
+        kOutputRate, kOutputFrames, static_cast<unsigned int>(sizeof(MusicStream)));
     g_initialized = true;
     return true;
 }
@@ -393,7 +636,7 @@ void AudioEngine::ReleaseVoice(AudioVoice voice) { if (Voice* state = GetVoice(v
 AudioVoice AudioEngine::PlayOnReservedVoice(AudioVoice voice, AudioSample sample, f32 volume, f32 pan) {
     Voice* state = GetVoice(voice);
     if (!state || !state->reserved || !GetSample(sample)) return AUDIO_VOICE_INVALID;
-    state->sample = sample; state->cursor = 0.0; state->volume = volume; state->targetVolume = volume;
+    state->sample = sample; state->cursor = 0; state->volume = volume; state->targetVolume = volume;
     state->pan = pan; state->loop = false; state->active = true;
     return voice;
 }
@@ -448,19 +691,31 @@ bool AudioEngine::PlayMusicSong(const char* path, u32 songIndex, f32 volume, boo
     g_musicStream.dataEnd = dataEnd;
     g_musicStream.pairCount = pairCount;
     g_musicStream.totalFrames = pairCount * kMusicChunkSamples;
-    g_musicStream.currentPair = 0xFFFFFFFFu;
-    g_musicStream.cursor = 0.0;
+    g_musicStream.currentPair = kInvalidPair;
+    g_musicStream.currentBuffer.store(kInvalidBuffer, std::memory_order_release);
+    g_musicStream.readyBuffer.store(kInvalidBuffer, std::memory_order_release);
+    g_musicStream.readyPair.store(kInvalidPair, std::memory_order_release);
+    g_musicStream.cursor = 0;
     g_musicStream.volume = std::max(volume, 0.0f);
     g_musicStream.targetVolume = g_musicStream.volume;
     g_musicStream.fadeFrames = 0;
     g_musicStream.loop = loop;
-    if (!PrepareMusicPair(0)) {
+    if (!StartMusicWorker()) {
+        ResetMusicStream();
+        return false;
+    }
+    RequestMusicPair(0);
+    if (!WaitForMusicPair(0) || !PromoteMusicPair(0)) {
         ResetMusicStream();
         return false;
     }
     // Publish the fully initialized stream only after its first decoded pair
     // is ready, so the callback never sees partial metadata or buffers.
     g_musicStream.active.store(true, std::memory_order_release);
+    PspPerf::RecordAudioMusicStart();
+    if (pairCount > 1u) RequestMusicPair(1u);
+    LOG("[PSP Audio] music stream ready: path=%s song=%u pairs=%u source_hz=22050 output_hz=%u",
+        path, songIndex, pairCount, kOutputRate);
     return true;
 }
 bool AudioEngine::PlayMusicSample(AudioSample sample, f32 volume, bool loop) {
