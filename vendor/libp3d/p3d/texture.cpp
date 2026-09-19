@@ -54,6 +54,10 @@ static tTexture* LoadPspNativeTexture(const char* path, s32* outWidth, s32* outH
     const std::string nativePath = PspNativeTexturePath(path);
     const auto file = p3d::io::ReadFile(nativePath);
     if (!file || file->size() < sizeof(PspNativeTextureHeader)) {
+#if !defined(NDEBUG)
+        LOG("[PspTexture] native miss path=%s resolved=%s", nativePath.c_str(),
+            p3d::io::ResolvePath(nativePath).c_str());
+#endif
         return nullptr;
     }
 
@@ -63,16 +67,32 @@ static tTexture* LoadPspNativeTexture(const char* path, s32* outWidth, s32* outH
         || header.format != 1
         || header.width == 0 || header.height == 0
         || header.width > 512 || header.height > 512) {
+#if !defined(NDEBUG)
+        LOG("[PspTexture] native invalid path=%s bytes=%lu magic=%c%c%c%c size=%ux%u format=%u",
+            nativePath.c_str(), static_cast<unsigned long>(file->size()),
+            header.magic[0], header.magic[1], header.magic[2], header.magic[3],
+            static_cast<unsigned>(header.width), static_cast<unsigned>(header.height),
+            static_cast<unsigned>(header.format));
+#endif
         return nullptr;
     }
 
     const std::size_t pixelCount = static_cast<std::size_t>(header.width) * header.height;
     if (file->size() != sizeof(header) + pixelCount * sizeof(u16)) {
+#if !defined(NDEBUG)
+        LOG("[PspTexture] native size mismatch path=%s bytes=%lu expected=%lu",
+            nativePath.c_str(), static_cast<unsigned long>(file->size()),
+            static_cast<unsigned long>(sizeof(header) + pixelCount * sizeof(u16)));
+#endif
         return nullptr;
     }
 
     tTexture* texture = new tTexture();
     if (!texture->Create(header.width, header.height, 16, 4, nullptr)) {
+#if !defined(NDEBUG)
+        LOG("[PspTexture] native create failed path=%s size=%ux%u", nativePath.c_str(),
+            static_cast<unsigned>(header.width), static_cast<unsigned>(header.height));
+#endif
         texture->Release();
         return nullptr;
     }
@@ -81,9 +101,17 @@ static tTexture* LoadPspNativeTexture(const char* path, s32* outWidth, s32* outH
     nativeTexture->SetNative4444Data(header.width, header.height,
         reinterpret_cast<const u16*>(file->data() + sizeof(header)));
     if (!nativeTexture->IsValid()) {
+#if !defined(NDEBUG)
+        LOG("[PspTexture] native upload failed path=%s", nativePath.c_str());
+#endif
         texture->Release();
         return nullptr;
     }
+
+#if !defined(NDEBUG)
+    LOG("[PspTexture] native loaded path=%s size=%ux%u", nativePath.c_str(),
+        static_cast<unsigned>(header.width), static_cast<unsigned>(header.height));
+#endif
 
     if (outWidth) *outWidth = header.width;
     if (outHeight) *outHeight = header.height;

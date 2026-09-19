@@ -851,13 +851,24 @@ void feCustomMenuMgr::Init(CustomText* textSystem) {
 
     BuildPages();
     BuildPopups();
+#if !defined(RC_PLATFORM_PSP)
     LoadControllerOverlayTexture();
     LoadMenuOrnamentTexture();
+#endif
     LoadSplashTextures();
+#if !defined(RC_PLATFORM_PSP)
     LoadSliderTextures();
+#endif
+
+#if !defined(NDEBUG)
+    LOG("[CustomMenu] Init: splash assets ready");
+#endif
 
     m_pulse.Start();
     SetPage(MenuPage_None);
+#if !defined(NDEBUG)
+    LOG("[CustomMenu] Init: complete");
+#endif
 }
 
 void feCustomMenuMgr::Shutdown() {
@@ -1109,6 +1120,17 @@ void feCustomMenuMgr::DrawTitleDebrisParticles() const {
         const u8 a = (u8)(255.0f * t01);
         const f32 dotSize = p.size * (0.5f + 0.5f * t01);
 
+#if defined(RC_PLATFORM_PSP)
+        // The GU cannot execute the desktop "dot" fragment shader. Its
+        // generic shader fallback draws the entire quad as a solid square.
+        // Use small native polygonal sparks with a faint outer edge instead.
+        const f32 radiusX = dotSize * (0.36f + 0.06f * std::sin(p.shapeSeed));
+        const f32 radiusY = dotSize * (0.36f + 0.06f * std::cos(p.shapeSeed));
+        ScreenDraw::DrawFilledCircle(p.x, p.y, radiusX, radiusY,
+            0.0f, 0.0f, 1.0f, 1.0f, 8, p.r, p.g, p.b, a / 4);
+        ScreenDraw::DrawFilledCircle(p.x, p.y, radiusX * 0.72f, radiusY * 0.72f,
+            0.0f, 0.0f, 1.0f, 1.0f, 8, p.r, p.g, p.b, a);
+#else
         if (m_titleDebrisDotShader) {
             m_titleDebrisDotShader->SetColour(0, pddiColour(p.r, p.g, p.b, a));
             m_titleDebrisDotShader->SetFloat("uShapeSeed", p.shapeSeed);
@@ -1120,6 +1142,7 @@ void feCustomMenuMgr::DrawTitleDebrisParticles() const {
             ScreenDraw::DrawColoredRect(p.x - dotSize * 0.5f, p.y - dotSize * 0.5f,
                                         dotSize, dotSize, p.r, p.g, p.b, a);
         }
+#endif
     }
 }
 
@@ -1184,6 +1207,9 @@ void feCustomMenuMgr::OpenPopup(PopupKind kind, f32 minTimerSec, std::function<s
     m_popupClosing = false;
     m_popupMinTimer = minTimerSec;
     m_popupPoll = std::move(poll);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[CustomMenu] popup open kind=%d min=%.2f", static_cast<int>(kind), static_cast<double>(minTimerSec));
+#endif
 }
 
 void feCustomMenuMgr::ClosePopup(s32 closeResult) {
@@ -1192,6 +1218,9 @@ void feCustomMenuMgr::ClosePopup(s32 closeResult) {
     m_popupClosing = true;
     m_popupFadeSec = 0.0f;
     m_popupCloseResult = closeResult;
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[CustomMenu] popup close kind=%d result=%ld", static_cast<int>(m_activePopup), static_cast<long>(closeResult));
+#endif
 }
 
 f32 feCustomMenuMgr::GetPopupFadeAlpha() const {
@@ -2316,7 +2345,9 @@ void feCustomMenuMgr::SetPage(MenuPage page) {
 void feCustomMenuMgr::Activate(MenuPage startPage) {
     m_active = true;
     m_cursor = 0;
+#if !defined(RC_PLATFORM_PSP)
     LoadControllerOverlayTexture();
+#endif
 
     if (g_display) {
         g_display->SetCursorCaptured(false);
@@ -3703,18 +3734,20 @@ void feCustomMenuMgr::LoadSplashTextures() {
 void feCustomMenuMgr::LoadSliderTextures() {
     if (!m_sliderOTex) {
         m_sliderOTex = tTexture::LoadFromImagePath(kSliderOTexturePath);
-        m_sliderOTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-
-        if (!m_sliderOTex) {
+        if (m_sliderOTex && m_sliderOTex->GetTexture()) {
+            m_sliderOTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+        }
+        else {
             LOG("[CustomMenu] Failed to load slider empty texture (%s)", kSliderOTexturePath);
         }
     }
 
     if (!m_sliderFTex) {
         m_sliderFTex = tTexture::LoadFromImagePath(kSliderFTexturePath);
-        m_sliderFTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-
-        if (!m_sliderFTex) {
+        if (m_sliderFTex && m_sliderFTex->GetTexture()) {
+            m_sliderFTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+        }
+        else {
             LOG("[CustomMenu] Failed to load slider filled texture (%s)", kSliderFTexturePath);
         }
     }
@@ -4076,6 +4109,11 @@ void feCustomMenuMgr::DrawGameOverContinuePrompt(s32 baseX, s32 baseY, u8 r, u8 
 bool feCustomMenuMgr::DrawLoadingScreen(u8 fill, u8 pulseR8) {
     LoadSplashTextures();
     if (!m_titleScreenBackgroundTexture || !m_loadingBarTexture) {
+#if !defined(NDEBUG)
+        LOG("[CustomMenu] PSP loading draw skipped bg=%p bar=%p",
+            static_cast<void*>(m_titleScreenBackgroundTexture),
+            static_cast<void*>(m_loadingBarTexture));
+#endif
         return false;
     }
 
@@ -4084,13 +4122,39 @@ bool feCustomMenuMgr::DrawLoadingScreen(u8 fill, u8 pulseR8) {
     f32 drawW = 0.0f;
     f32 drawH = 0.0f;
     if (!GetSplashScreenRect(&drawX, &drawY, &drawW, &drawH)) {
+#if !defined(NDEBUG)
+        LOG("[CustomMenu] PSP loading draw skipped invalid rect screen=%fx%f",
+            static_cast<double>(SCREEN_WIDTH), static_cast<double>(SCREEN_HEIGHT));
+#endif
         return false;
     }
+
+#if !defined(NDEBUG)
+    static u32 loadingDrawLogCount = 0;
+    const bool logLoadingDraw = loadingDrawLogCount < 4;
+    if (logLoadingDraw) {
+        ++loadingDrawLogCount;
+        LOG("[CustomMenu] PSP loading draw #%u fill=%u bg=%dx%d bar=%dx%d rect=%f,%f %fx%f",
+            loadingDrawLogCount,
+            static_cast<unsigned>(fill),
+            m_titleScreenBackgroundTexture->GetWidth(),
+            m_titleScreenBackgroundTexture->GetHeight(),
+            m_loadingBarTexture->GetWidth(),
+            m_loadingBarTexture->GetHeight(),
+            static_cast<double>(drawX), static_cast<double>(drawY),
+            static_cast<double>(drawW), static_cast<double>(drawH));
+    }
+#endif
 
     // Clear to black first so narrower/taller targets produce clean letterbox bars.
     ScreenDraw::DrawColoredRect(0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0, 255);
     ScreenDraw::DrawQuad(m_titleScreenBackgroundTexture, drawX, drawY, drawW, drawH);
     ScreenDraw::DrawQuad(m_loadingBarTexture, drawX, drawY, drawW, drawH);
+#if !defined(NDEBUG)
+    if (logLoadingDraw) {
+        LOG("[CustomMenu] PSP loading draw #%u submitted", loadingDrawLogCount);
+    }
+#endif
 
     if (fill > 0) {
         if (fill > 100) {
@@ -4125,13 +4189,28 @@ void feCustomMenuMgr::DrawLegalScreen(f32 alpha01) {
     }
 
     if (!g_textManager || !g_textManager->SetFontByName("Legal")) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        static bool loggedLegalFontFailure = false;
+        if (!loggedLegalFontFailure) {
+            loggedLegalFontFailure = true;
+            LOG("[CustomMenu] Legal screen text skipped: Legal font unavailable");
+        }
+#endif
         return;
     }
 
     static constexpr f32 kColumnWidth = 420.0f;
     static constexpr f32 kVerticalUpOffset = 4.0f;
+#if defined(RC_PLATFORM_PSP)
+    // The original 512x240 UI scale makes the 48 px legal font only about
+    // four native pixels high on the 480x272 framebuffer.  Keep the source
+    // layout intact, but give the PSP's native screen a readable glyph size.
+    static constexpr f32 kLegalTextScale = 0.30f;
+#else
+    static constexpr f32 kLegalTextScale = 0.20f;
+#endif
 
-    g_textManager->SetScale(SCREEN_SCALE_Y(0.2f), SCREEN_SCALE_Y(0.2f));
+    g_textManager->SetScale(SCREEN_SCALE_Y(kLegalTextScale), SCREEN_SCALE_Y(kLegalTextScale));
     g_textManager->SetAlignment(TextAlign_Left);
     g_textManager->SetWrapWidth(SCREEN_SCALE_X(kColumnWidth));
     g_textManager->SetLineSpacing(0);
@@ -5588,6 +5667,17 @@ void feCustomMenuMgr::RenderCurrentPage() {
 
 void feCustomMenuMgr::RenderActivePopup() {
     const PageDef& popup = m_popups[m_activePopup];
+
+#if defined(RC_PLATFORM_PSP)
+    // The boot-time autosave notice is the first overlay after the legal
+    // splash and has no page underneath it.  Clear the native target before
+    // drawing it so the first PSP framebuffer cannot expose stale pixels from
+    // the previous presentation buffer during the hand-off.
+    if (m_currPage == MenuPage_None) {
+        ScreenDraw::DrawColoredRect(0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                    0, 0, 0, 255);
+    }
+#endif
 
     const s32 panelX = DEF_WINDOW_CENTER_X - popup.frameW / 2;
     const s32 panelY = DEF_WINDOW_CENTER_Y - popup.frameH / 2 + 10;

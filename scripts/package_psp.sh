@@ -25,7 +25,12 @@ cp psp/EBOOT.PBP "$output_root/EBOOT.PBP"
 # The source tree may also contain the raw ISO, desktop launchers, profiling
 # reports and the original movie payloads.  None of those are part of the
 # native PSP runtime path.
-rsync -a --prune-empty-dirs \
+# The repository keeps bin/pc as a compatibility symlink into res/pc.  Follow
+# it while staging so the standalone memstick does not contain a dangling
+# ../res link.
+# Keep empty runtime directories: the PSP asset gate checks fe/ and tim/
+# even when their desktop-only contents (such as movies) are excluded.
+rsync -aL \
     --exclude='/discimage/***' \
     --exclude='/fe/movies/***' \
     --exclude='/PSP_LOG.TXT' \
@@ -41,39 +46,112 @@ fi
 
 # The desktop art is 1920x1080.  Keep the source assets in the package for
 # compatibility, but add a native-size PSP set so the EBOOT never asks stb
-# for an 8 MiB RGBA decode during boot.  The PSP backend selects this subtree
-# at compile time and stores the result in a 16-bit GU texture.
+# for an 8 MiB RGBA decode during boot.  The PSP frontend path is selected at
+# compile time and stores the result in a 16-bit GU texture.
 psp_frontend="$output_root/data/psp/textures/frontend"
 mkdir -p "$psp_frontend"
-for name in background jackie jcslogo loading_bar game_over; do
-    raw_path="$psp_frontend/${name}.rgba"
+
+generate_ptex() {
+    source_path="$1"
+    output_path="$2"
+    target_width="$3"
+    target_height="$4"
+    raw_path="${output_path%.ptex}.rgba"
+
+    mkdir -p "$(dirname "$output_path")"
     ffmpeg -hide_banner -loglevel error -y \
-        -i "$output_root/data/pc/textures/frontend/${name}.png" \
-        -vf 'scale=480:272:flags=lanczos' -frames:v 1 -f rawvideo \
+        -i "$source_path" \
+        -vf "scale=${target_width}:${target_height}:flags=lanczos" -frames:v 1 -f rawvideo \
         -pix_fmt rgba "$raw_path"
-    python3 - "$raw_path" "$psp_frontend/${name}.ptex" <<'PY'
+    python3 - "$raw_path" "$output_path" "$target_width" "$target_height" <<'PY'
 import struct
 import sys
 
-source_path, output_path = sys.argv[1:3]
+source_path, output_path, width_text, height_text = sys.argv[1:]
+width = int(width_text)
+height = int(height_text)
 rgba = open(source_path, "rb").read()
-expected = 480 * 272 * 4
+expected = width * height * 4
 if len(rgba) != expected:
     raise SystemExit(f"unexpected RGBA size: {len(rgba)} != {expected}")
 
-pixels = bytearray(480 * 272 * 2)
+pixels = bytearray(width * height * 2)
 for src in range(0, len(rgba), 4):
     r, g, b, a = rgba[src:src + 4]
     value = (r >> 4) | ((g >> 4) << 4) | ((b >> 4) << 8) | ((a >> 4) << 12)
     struct.pack_into("<H", pixels, (src // 4) * 2, value)
 
 with open(output_path, "wb") as output:
-    output.write(struct.pack("<4sHHH", b"PSTX", 480, 272, 1))
+    output.write(struct.pack("<4sHHH", b"PSTX", width, height, 1))
     output.write(pixels)
 PY
     rm -f "$raw_path"
+}
+
+# The five full-screen frontend layers are authored at 1920x1080.  Keep the
+# source PNGs in the package for compatibility, but make the PSP path use a
+# native framebuffer-sized 16-bit texture instead of decoding multi-megabyte
+# RGBA images during boot.
+for name in background jackie jcslogo loading_bar game_over; do
+    generate_ptex \
+        "$output_root/data/pc/textures/frontend/${name}.png" \
+        "$psp_frontend/${name}.ptex" 480 272
 done
 
+# Every image used by the custom frontend/HUD is also prepared beside its
+# original PC path.  LoadFromImagePath() transparently replaces .png with
+# .ptex on PSP, so no desktop asset is overwritten and the PSP never falls
+# back to stb_image for these assets.  Keep each source aspect ratio while
+# clamping the largest side to the GE's 512-pixel texture limit.
+psp_native_assets="
+pc/textures/frontend/controller_overlay_default.png
+pc/textures/frontend/controller_overlay_ps.png
+pc/textures/frontend/controller_overlay_switch.png
+pc/textures/frontend/controller_sheet_default.png
+pc/textures/frontend/controller_sheet_ps.png
+pc/textures/frontend/controller_sheet_switch.png
+pc/textures/frontend/keyboard_mouse_sheet_default.png
+pc/textures/frontend/menu_ornament.png
+pc/textures/frontend/scroll_arrow.png
+pc/textures/frontend/slider_o.png
+pc/textures/frontend/slider_f.png
+pc/textures/frontend/clock.png
+pc/textures/collectibles/bowl.png
+pc/textures/collectibles/gold_dragon.png
+pc/textures/collectibles/grey_dragon.png
+pc/textures/collectibles/milk.png
+pc/textures/collectibles/noodlebox.png
+pc/textures/collectibles/red_dragon.png
+pc/textures/collectibles/take.png
+"
+
+for relative_path in $psp_native_assets; do
+    source_path="$output_root/data/$relative_path"
+    output_path="${source_path%.png}.ptex"
+    dimensions=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=width,height -of csv=p=0 "$source_path")
+    source_width=${dimensions%,*}
+    source_height=${dimensions#*,}
+    if [ "$source_width" -ge "$source_height" ]; then
+        target_width=512
+        target_height=$(( (source_height * 512 + source_width / 2) / source_width ))
+    else
+        target_height=512
+        target_width=$(( (source_width * 512 + source_height / 2) / source_height ))
+    fi
+    [ "$target_width" -gt 512 ] && target_width=512
+    [ "$target_height" -gt 512 ] && target_height=512
+    # HUD/menu icons are displayed at a few dozen pixels.  A 256x256 native
+    # copy is enough for square 512px source art and saves 75% of its PSP
+    # texture memory without changing the logical UVs.
+    if [ "$source_width" -eq 512 ] && [ "$source_height" -eq 512 ]; then
+        target_width=256
+        target_height=256
+    fi
+    generate_ptex "$source_path" "$output_path" "$target_width" "$target_height"
+done
+
+echo "PSP native frontend/HUD assets: 16-bit PSTX set generated beside pc/*.png."
+
 echo "PSP package ready: $output_root"
-echo "Frontend assets: 480x272 16-bit PSTX set generated under data/psp/."
 echo "PSX VRAM pages are converted to GU 16-bit pages on demand."

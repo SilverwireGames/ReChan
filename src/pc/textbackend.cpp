@@ -96,12 +96,10 @@ class StbTextBackend : public ITextBackend {
 public:
     static constexpr s32 kLayoutReferencePixelHeight = 32;
 #if defined(RC_PLATFORM_PSP)
-    // A 2048² atlas briefly needs more than 20 MB while it is assembled
-    // (alpha + RGBA staging). That exceeds the PSP user heap once the game,
-    // font data and runtime state are resident. 1024² at native sampling is
-    // sufficient for the 480x272 UI and keeps registration below the memory
-    // budget.
-    static constexpr s32 kAtlasSize = 1024;
+    // The PSP GE supports texture pages up to 512².  A 512² atlas is enough
+    // for the native UI when the rarely used extended glyph block is omitted;
+    // larger atlases silently fail to sample on PPSSPP/real hardware.
+    static constexpr s32 kAtlasSize = 512;
     static constexpr u32 kOversampleX = 1;
     static constexpr u32 kOversampleY = 1;
 #else
@@ -190,8 +188,8 @@ public:
         static const RangeDef kRanges[] = {
             { 32, 95 },        // Basic Latin
             { 160, 96 },       // Latin-1 Supplement
-            { 0x0100, 128 },   // Latin Extended-A
 #if !defined(RC_PLATFORM_PSP)
+            { 0x0100, 128 },   // Latin Extended-A
             { 0x0180, 208 },   // Latin Extended-B subset
 #endif
             { 0x20AC, 1 },     // Euro sign
@@ -319,6 +317,21 @@ public:
         if (lineWidths.empty()) {
             return;
         }
+
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        static u32 pspTextDrawLogCount = 0;
+        if (pspTextDrawLogCount < 12) {
+            ++pspTextDrawLogCount;
+            LOG("[TextBackend/PSP] draw #%u font=%u textBytes=%d pos=%.2f,%.2f scale=%.3f,%.3f color=%u atlas=%dx%d",
+                pspTextDrawLogCount,
+                state.font,
+                text.length,
+                static_cast<double>(x), static_cast<double>(y),
+                static_cast<double>(state.scaleX), static_cast<double>(state.scaleY),
+                static_cast<unsigned>(state.color.a),
+                font->atlasW, font->atlasH);
+        }
+#endif
 
         const f32 lineHeight = font->lineHeightPx * state.scaleY;
         const f32 lineStep = lineHeight + (f32)state.lineSpacing;
