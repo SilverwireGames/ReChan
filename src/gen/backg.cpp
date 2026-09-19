@@ -16,19 +16,25 @@
 #include "p3d/p3dmath.h"
 #include "p3d/texture.h"
 #include "pc/tim.h"
+#if defined(RC_PLATFORM_PSP)
+#include "p3d/context.h"
+#include "pddi/psp/psprender.h"
+#endif
 
 static BackGWorkParams s_backgWork;
 static BackGRuntimeParams s_backgRuntime;
 static BackG* s_backg = nullptr;
 
 static constexpr s32 kBackGMaxEntries = 100;
+#if !defined(RC_PLATFORM_PSP)
 static constexpr s32 kBackGVramCacheEntries = 32;
 static BackGVramCacheEntry s_backgVramCache[kBackGVramCacheEntries];
 static s32 s_backgVramCacheNext = 0;
 static u8 s_backgDecodePageRGBA[256 * 256 * 4];
+static tTexture* GetBackGVramTexture(const World* world, u16 tpage, u16 cba);
+#endif
 
 static void ClearBackGVramCache();
-static tTexture* GetBackGVramTexture(const World* world, u16 tpage, u16 cba);
 
 static s32 BackGMag2(s32 x, s32 y);
 static s32 BackGCartesianToPolar(s32* outMagnitude, s32* outAngle, s32 y, s32 x);
@@ -167,6 +173,7 @@ static s32 BackGCartesianToPolar(s32* outMagnitude, s32* outAngle, s32 y, s32 x)
 }
 
 static void ClearBackGVramCache() {
+#if !defined(RC_PLATFORM_PSP)
     for (s32 i = 0; i < kBackGVramCacheEntries; i++) {
         if (s_backgVramCache[i].texture) {
             delete s_backgVramCache[i].texture;
@@ -179,8 +186,10 @@ static void ClearBackGVramCache() {
     }
 
     s_backgVramCacheNext = 0;
+#endif
 }
 
+#if !defined(RC_PLATFORM_PSP)
 static tTexture* GetBackGVramTexture(const World* world, u16 tpage, u16 cba) {
     if (!world) {
         return nullptr;
@@ -224,6 +233,7 @@ static tTexture* GetBackGVramTexture(const World* world, u16 tpage, u16 cba) {
     slot->texture = tex;
     return tex;
 }
+#endif
 
 static const u8* ResolveBackGSpritePacket(const tPrimGeom* geo) {
     if (!geo || !geo->primList) {
@@ -772,6 +782,21 @@ s32 BackG::DrawSprite(BackGGeoEntry* entry, s16 x, s16 y) {
         return 0;
     }
 
+    const f32 nx = SCALE_AND_CENTER_X(static_cast<f32>(drawX));
+    const f32 ny = SCREEN_SCALE_Y(static_cast<f32>(drawY));
+    const f32 nw = SCALE_AND_CENTER_X(static_cast<f32>(drawX) + static_cast<f32>(w)) - nx;
+    const f32 nh = SCREEN_SCALE_Y(static_cast<f32>(drawY) + static_cast<f32>(h)) - ny;
+
+#if defined(RC_PLATFORM_PSP)
+    // The desktop cache allocates a full RGBA page per palette. Under PSP
+    // heap pressure Create fails and every visible sprite decodes it again.
+    // Background runs before world drawing, outside ScreenDraw batches.
+    static_cast<pspContext*>(p3d::context)->DrawVRAMQuad(
+        world->GetVRAMHandle(), tpage, cba, nx, ny, nw, nh, u, v, u1Byte, v1Byte,
+        pddiColour(PsxColMod128To255(s_backgWork.fieldED4),
+                   PsxColMod128To255(s_backgWork.fieldED5),
+                   PsxColMod128To255(s_backgWork.fieldED6), 255));
+#else
     tTexture* texture = GetBackGVramTexture(world, tpage, cba);
     if (!texture) {
         return 0;
@@ -781,11 +806,6 @@ s32 BackG::DrawSprite(BackGGeoEntry* entry, s16 x, s16 y) {
     const f32 v0 = static_cast<f32>(v) / 256.0f;
     const f32 u1 = static_cast<f32>(u1Byte) / 256.0f;
     const f32 v1 = static_cast<f32>(v1Byte) / 256.0f;
-
-    const f32 nx = SCALE_AND_CENTER_X(static_cast<f32>(drawX));
-    const f32 ny = SCREEN_SCALE_Y(static_cast<f32>(drawY));
-    const f32 nw = SCALE_AND_CENTER_X(static_cast<f32>(drawX) + static_cast<f32>(w)) - nx;
-    const f32 nh = SCREEN_SCALE_Y(static_cast<f32>(drawY) + static_cast<f32>(h)) - ny;
 
     ScreenDraw::DrawQuad(
         texture,
@@ -801,6 +821,7 @@ s32 BackG::DrawSprite(BackGGeoEntry* entry, s16 x, s16 y) {
         PsxColMod128To255(s_backgWork.fieldED5),
         PsxColMod128To255(s_backgWork.fieldED6),
         255);
+#endif
 
     return 1;
 }

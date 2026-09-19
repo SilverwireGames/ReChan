@@ -47,8 +47,17 @@ void Time::ResetPlayPresentationState() {
 
 s32 Time::BeginPlayFixedStep() {
     static constexpr f32 kPlayLogicDt = 1.0f / 30.0f;
+#if defined(RC_PLATFORM_PSP)
+    // A PSP frame cannot afford a multi-step catch-up after a streamed asset
+    // load. Limit catch-up to one 30 Hz simulation step per presentation
+    // frame, retaining the fractional remainder for interpolation.
+    static constexpr s32 kMaxLogicStepsPerFrame = 1;
+#else
     static constexpr s32 kMaxLogicStepsPerFrame = 4;
+#endif
+#if !defined(RC_PLATFORM_PSP)
     static constexpr f32 kMaxAccumulatedTime = kPlayLogicDt * (f32)kMaxLogicStepsPerFrame;
+#endif
 
     if (targetFPS == 30) {
         playLogicAccumulator = 0.0f;
@@ -58,9 +67,18 @@ s32 Time::BeginPlayFixedStep() {
     }
 
     playLogicAccumulator += deltaTime;
+#if defined(RC_PLATFORM_PSP)
+    // Drop only whole overdue ticks. Clamping the entire accumulator to one
+    // tick loses the remainder on ordinary frames (e.g. 20+16 ms), slowing
+    // simulation at 50 Hz and repeatedly snapping interpolation to zero.
+    if (playLogicAccumulator >= 2.0f * kPlayLogicDt) {
+        playLogicAccumulator = kPlayLogicDt + std::fmod(playLogicAccumulator, kPlayLogicDt);
+    }
+#else
     if (playLogicAccumulator > kMaxAccumulatedTime) {
         playLogicAccumulator = kMaxAccumulatedTime;
     }
+#endif
 
     playLogicStepCount = 0;
     while (playLogicAccumulator >= kPlayLogicDt && playLogicStepCount < kMaxLogicStepsPerFrame) {
@@ -104,11 +122,11 @@ void Time::Sleep(f32 seconds) {
 
 void Time::WaitForFrameEnd(f64 frameStart) const {
 #if defined(RC_PLATFORM_PSP)
-    const f64 frameEnd = frameStart + static_cast<f64>(GetTargetDt());
-    const f64 remaining = frameEnd - GetTimeInSeconds();
-    if (remaining > 0.0) {
-        sceKernelDelayThread(static_cast<unsigned int>(remaining * 1000000.0));
-    }
+    // pspDisplay::SwapBuffers() already submits the GU list and blocks on the
+    // next vblank. Sleeping again here would add a second frame limiter after
+    // the synchronized swap, producing jitter and occasionally dropping the
+    // presentation cadence below 60 Hz. Keep the argument for the shared API.
+    (void)frameStart;
     return;
 #else
     f32 target = GetTargetDt();
