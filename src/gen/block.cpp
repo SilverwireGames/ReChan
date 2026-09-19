@@ -42,6 +42,11 @@ void Block::Destroy() {
         collision->Unload();
         collision = nullptr;
     }
+#if defined(RC_PLATFORM_PSP)
+    delete[] ownedCollisionData;
+    ownedCollisionData = nullptr;
+    ownedCollisionSize = 0;
+#endif
 
     if (shadowCasterBuffer) {
         shadowCasterBuffer->Release();
@@ -240,7 +245,34 @@ void Block::SetDimension(const LVector* a, const LVector* b) {
 void Block::Parse(u32 size, const u8* blkData) {
     MARKFUNCTION(0x80052F80);
 
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP BLK] parse begin block=%u size=%lu data=%p",
+        static_cast<unsigned>(blockNum), static_cast<unsigned long>(size),
+        static_cast<const void*>(blkData));
+#endif
+
+    if (!blkData || size < 24 || (reinterpret_cast<uintptr_t>(blkData) & 3u) != 0) {
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP BLK] parse rejected block=%u header",
+            static_cast<unsigned>(blockNum));
+#endif
+        return;
+    }
+
     const u32* d = (const u32*)blkData;
+
+    // A block can be parsed again during a PSP petal reload.  Release the
+    // previous sector before replacing its backing data so no global collision
+    // slot keeps pointing at freed memory.
+    if (collision) {
+        collision->Unload();
+        collision = nullptr;
+    }
+#if defined(RC_PLATFORM_PSP)
+    delete[] ownedCollisionData;
+    ownedCollisionData = nullptr;
+    ownedCollisionSize = 0;
+#endif
 
     // PSX: *(a1+64) = a3
     data = blkData;
@@ -252,7 +284,45 @@ void Block::Parse(u32 size, const u8* blkData) {
     // AsynchLoad scans g_collisionSectors[12] for empty slot (status == -1),
     // sets status = blockNum, calls Load with the collision data pointer.
     u32 colOffset = d[5]; // *(data+20)
-    const u32* colData = (const u32*)(blkData + colOffset);
+    constexpr u32 kCollisionHeaderBytes = 48;
+    if (colOffset > size || size - colOffset < kCollisionHeaderBytes) {
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP BLK] parse rejected block=%u colOffset=%lu size=%lu",
+            static_cast<unsigned>(blockNum), static_cast<unsigned long>(colOffset),
+            static_cast<unsigned long>(size));
+#endif
+        LoadPrim(blkData + 24, size - 24);
+        return;
+    }
+
+    const u8* colPayload = blkData + colOffset;
+    const u32 wallCount = p3dReadU32LE(colPayload + 36);
+    const u32 floorCount = p3dReadU32LE(colPayload + 40);
+    const u64 collisionBytes = static_cast<u64>(kCollisionHeaderBytes)
+        + static_cast<u64>(wallCount) * 56u
+        + static_cast<u64>(floorCount) * 80u;
+    if (collisionBytes > static_cast<u64>(size - colOffset)
+        || collisionBytes > 0xFFFFFFFFu) {
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP BLK] parse rejected block=%u collisionBytes=%llu payload=%lu",
+            static_cast<unsigned>(blockNum), static_cast<unsigned long long>(collisionBytes),
+            static_cast<unsigned long>(size - colOffset));
+#endif
+        LoadPrim(blkData + 24, size - 24);
+        return;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    // LoadPspBlocksForPetal reuses its scratch vector for each block.  Copy the
+    // header, walls and 80-byte floor records before the next entry overwrites
+    // that vector; the geometry path already owns its own primitive copy.
+    ownedCollisionSize = static_cast<u32>(collisionBytes);
+    ownedCollisionData = new u8[ownedCollisionSize];
+    memcpy(ownedCollisionData, colPayload, ownedCollisionSize);
+    colPayload = ownedCollisionData;
+#endif
+
+    const u32* colData = (const u32*)colPayload;
 
     CollisionSector* slot = nullptr;
     for (int i = 0; i < MAX_COLLISION_SECTORS; i++) {
@@ -266,9 +336,17 @@ void Block::Parse(u32 size, const u8* blkData) {
         slot->Load((u32*)colData);
         collision = slot;
     }
+
     else {
         LOG("[Block] WARNING: No free collision sector for block %u (all 12 slots used)", blockNum);
     }
+
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP BLK] collision done block=%u colOffset=%lu walls=%lu floors=%lu",
+        static_cast<unsigned>(blockNum), static_cast<unsigned long>(colOffset),
+        static_cast<unsigned long>(collision ? collision->wallCount : 0),
+        static_cast<unsigned long>(collision ? collision->floorCount : 0));
+#endif
 
     LOG("[Block] Parse block %u: size=%u parsed=%u colOffset=%u walls=%u floors=%u bounds=(%d,%d,%d)-(%d,%d,%d)",
         blockNum, size, parsed, colOffset,
@@ -278,7 +356,15 @@ void Block::Parse(u32 size, const u8* blkData) {
         collision ? collision->boundsMax.x : 0, collision ? collision->boundsMax.y : 0, collision ? collision->boundsMax.z : 0);
 
     // PSX: *(a1+68) = LoadPrim(data + 24)
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP BLK] prim begin block=%u primSize=%lu",
+        static_cast<unsigned>(blockNum), static_cast<unsigned long>(size - 24));
+#endif
     LoadPrim(blkData + 24, size - 24);
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP BLK] parse end block=%u prim=%p",
+        static_cast<unsigned>(blockNum), static_cast<void*>(primGeom));
+#endif
 }
 
 // Unload__5Block (BLOCK.CPP:514)
@@ -292,6 +378,11 @@ void Block::Unload() {
         collision->Unload();
     }
     collision = nullptr;
+#if defined(RC_PLATFORM_PSP)
+    delete[] ownedCollisionData;
+    ownedCollisionData = nullptr;
+    ownedCollisionSize = 0;
+#endif
     data = nullptr;
 }
 
@@ -342,6 +433,20 @@ u32 Block::GetPrevBlockNumber() const {
 bool Block::Draw(const LVector* drawPos) {
     MARKFUNCTION(0x800530F8);
 
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspBlockDrawProbe = 0;
+    const u32 pspBlockDrawId = pspBlockDrawProbe++;
+    if (pspBlockDrawId < 32u) {
+        Log::Get().LogMessage("[PSP Block] begin #%lu block=%u geom=%p polys=%u loops=%u fog=%u/%u",
+            static_cast<unsigned long>(pspBlockDrawId),
+            static_cast<unsigned>(blockNum),
+            static_cast<void*>(primGeom),
+            primGeom ? static_cast<unsigned>(primGeom->numPolys) : 0u,
+            primGeom ? static_cast<unsigned>(primGeom->numLoops) : 0u,
+            static_cast<unsigned>(fogMinDist), static_cast<unsigned>(fogMaxDist));
+    }
+#endif
+
     if (!primGeom) return false;
 
     const Mat4 savedWorld = p3d::context->GetWorldMatrix();
@@ -366,8 +471,26 @@ bool Block::Draw(const LVector* drawPos) {
 
     PspPerf::Trace("block draw: uv begin");
     UpdateUVPrimData(blockNum, primGeom);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBlockDrawId < 32u) {
+        Log::Get().LogMessage("[PSP Block] after uv #%lu block=%u",
+            static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
+    }
+#endif
     UpdateCBVPrimData(blockNum, primGeom);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBlockDrawId < 32u) {
+        Log::Get().LogMessage("[PSP Block] after cbv #%lu block=%u",
+            static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
+    }
+#endif
     PspPerf::Trace("block draw: uv done");
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBlockDrawId < 32u) {
+        Log::Get().LogMessage("[PSP Block] after uv trace #%lu block=%u",
+            static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
+    }
+#endif
 
     const u16 blockFogNear = fogMinDist;
     const u16 blockFogFar = fogMaxDist;
@@ -376,6 +499,13 @@ bool Block::Draw(const LVector* drawPos) {
     const u16 globalFogNear = static_cast<u16>(splat_fog_near);
     const u16 globalFogFar = static_cast<u16>(splat_fog_far);
     const u32 globalFogColor = splat_fog_color;
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBlockDrawId < 32u) {
+        Log::Get().LogMessage("[PSP Block] fog state #%lu block=%u global=%u/%u",
+            static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum),
+            static_cast<unsigned>(globalFogNear), static_cast<unsigned>(globalFogFar));
+    }
+#endif
 
     if (s_lastLoggedSplatFogNear != splat_fog_near ||
         s_lastLoggedSplatFogFar != splat_fog_far ||
@@ -400,10 +530,28 @@ bool Block::Draw(const LVector* drawPos) {
         fogFar = globalFogFar;
     }
     else {
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspBlockDrawId < 32u) {
+            Log::Get().LogMessage("[PSP Block] before clip call #%lu block=%u",
+                static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
+        }
+#endif
         PspPerf::Trace("block draw: clip begin");
         RP_ZCullGClip(primGeom, drawPos);
         PspPerf::Trace("block draw: clip done");
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspBlockDrawId < 32u) {
+            Log::Get().LogMessage("[PSP Block] after clip #%lu block=%u",
+                static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
+        }
+#endif
         p3d::context->SetWorldMatrix(savedWorld);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspBlockDrawId < 32u) {
+            Log::Get().LogMessage("[PSP Block] after restore #%lu block=%u",
+                static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
+        }
+#endif
         return true;
     }
 
@@ -423,6 +571,12 @@ bool Block::Draw(const LVector* drawPos) {
     }
     PspPerf::Trace("block draw: fog begin");
     const int drew = RP_ZCullGMFog(primGeom, drawPos, fogNear, fogFar, fogCol);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBlockDrawId < 32u) {
+        Log::Get().LogMessage("[PSP Block] after fog #%lu block=%u drew=%d",
+            static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum), drew);
+    }
+#endif
     PspPerf::Trace("block draw: fog done");
     if (!drew) {
         LOG("[Block] GMFog draw dropped: block=%u primGeom=%p near=%u far=%u col=0x%06X gNear=%u gFar=%u gCol=0x%06X",
@@ -461,10 +615,20 @@ void Block::LoadPrim(const u8* primData, u32 primSize) {
         return;
     }
 
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP BLK] loadprim allocate size=%lu",
+        static_cast<unsigned long>(primSize));
+#endif
+
     tPrimGeom* geom = new tPrimGeom();
     geom->ownedRawData = new u8[primSize];
     geom->ownedRawSize = primSize;
     memcpy(geom->ownedRawData, primData, primSize);
+
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP BLK] loadprim copied size=%lu raw=%p",
+        static_cast<unsigned long>(primSize), static_cast<void*>(geom->ownedRawData));
+#endif
 
     const u8* raw = geom->ownedRawData;
 

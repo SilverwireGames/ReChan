@@ -55,6 +55,13 @@ struct Block {
     tPrimGeom* primGeom;
     // +72: collision sector pointer
     CollisionSector* collision;
+#if defined(RC_PLATFORM_PSP)
+    // PSP streams reuse one scratch buffer for every .BLK entry.  Collision
+    // sectors keep pointers into their source payload, so retain just this
+    // block's collision section after Parse() returns.
+    u8* ownedCollisionData = nullptr;
+    u32 ownedCollisionSize = 0;
+#endif
     // PC: cached unculled shadow-caster geometry for this block, built once from
     // primGeom and reused every frame by ShadowCSM::DrawBlockCasterIntoCascades,
     // instead of being rebuilt (CPU retriangulation + GL buffer create/upload) on
