@@ -544,9 +544,13 @@ struct PspPrimGeomFrameScratch {
 static PspPrimGeomFrameScratch s_pspPrimGeomFrameScratch;
 
 static void ReservePspPrimGeomScratch(PspPrimGeomFrameScratch* scratch, const tPrimGeom* geom) {
-    const u32 loopCapacity = std::max<u32>(128u, geom->numLoops);
-    const u32 vertexCapacity = std::max<u32>(8192u, static_cast<u32>(geom->numPolys) * 4u);
-    const u32 indexCapacity = std::max<u32>(24576u, static_cast<u32>(geom->numPolys) * 6u);
+    // Keep the reusable PSP scratch proportional to the geometry currently
+    // being decoded. A fixed 8192/24576 reservation duplicated by the
+    // pspPrimBuffer consumed most of the small PSP user heap before the first
+    // gameplay block was submitted.
+    const u32 loopCapacity = std::max<u32>(32u, geom->numLoops);
+    const u32 vertexCapacity = std::max<u32>(1024u, static_cast<u32>(geom->numPolys) * 4u);
+    const u32 indexCapacity = std::max<u32>(3072u, static_cast<u32>(geom->numPolys) * 6u);
 
     if (scratch->loops.capacity() < loopCapacity) scratch->loops.reserve(loopCapacity);
     if (scratch->verts.capacity() < vertexCapacity) scratch->verts.reserve(vertexCapacity);
@@ -564,6 +568,16 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                                                    , std::vector<RealTextureGroup>* outRealTexGroups = nullptr
 #endif
                                                    ) {
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspBuildStageProbe = 0;
+    const u32 pspBuildStageId = pspBuildStageProbe++;
+    if (pspBuildStageId < 20u) {
+        Log::Get().LogMessage("[PSP Build] begin #%lu geom=%p polys=%u loops=%u",
+            static_cast<unsigned long>(pspBuildStageId), static_cast<const void*>(geom),
+            geom ? static_cast<unsigned>(geom->numPolys) : 0u,
+            geom ? static_cast<unsigned>(geom->numLoops) : 0u);
+    }
+#endif
     if (outUsesSemiTrans) {
         *outUsesSemiTrans = false;
     }
@@ -585,6 +599,20 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     if (geom->numVerts == 0 || geom->numPolys == 0 || geom->numLoops == 0)
         return nullptr;
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 s_pspBuildProbe = 0;
+    const u32 buildProbe = s_pspBuildProbe++;
+    if (buildProbe < 12u) {
+        LOG("[PSP Geom] build begin #%lu geom=%p verts=%u polys=%u loops=%u gmFog=%u",
+            static_cast<unsigned long>(buildProbe),
+            geom,
+            static_cast<unsigned>(geom->numVerts),
+            static_cast<unsigned>(geom->numPolys),
+            static_cast<unsigned>(geom->numLoops),
+            (gmFogState && gmFogState->enabled) ? 1u : 0u);
+    }
+#endif
+
     // PSX path difference:
     // - RP_ZCullGClip rejects when all clip bits overlap after NCLIP.
     // - RP_ZCullGMFog only gates on NCLIP sign (no clip-bit overlap reject).
@@ -594,6 +622,12 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     PspPrimGeomFrameScratch* frameScratch = reusePspFrameBuffer ? &s_pspPrimGeomFrameScratch : nullptr;
     if (frameScratch) {
         ReservePspPrimGeomScratch(frameScratch, geom);
+    }
+#endif
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBuildStageId < 20u) {
+        Log::Get().LogMessage("[PSP Build] scratch ready #%lu",
+            static_cast<unsigned long>(pspBuildStageId));
     }
 #endif
 
@@ -639,6 +673,12 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             (gmFogState && gmFogState->enabled) ? 1u : 0u);
         return nullptr;
     }
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBuildStageId < 20u) {
+        Log::Get().LogMessage("[PSP Build] loops ready #%lu expected=%u",
+            static_cast<unsigned long>(pspBuildStageId), static_cast<unsigned>(expectedPolyCount));
+    }
+#endif
 
     std::vector<PrimGeomBuildVert> localVertBuf;
     std::vector<u16> localIdxBuf;
@@ -665,7 +705,17 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     // PSX RP_ZCull* does primitive rejection in tPort space, not GL NDC.
     // GClip uses NCLIP + clip-bit overlap; GMFog uses NCLIP sign only.
     // Use the same tPort transform/clip convention as world culling.
-    bool doPsxFaceCull = (drawPos && p3d::context && g_display);
+#if defined(RC_PLATFORM_PSP)
+    // The PSP GE already performs front-face rejection in the native GU
+    // pipeline. Re-projecting every PSX triangle on the CPU duplicates that
+    // work, costs several divisions per vertex, and is unsafe when a streamed
+    // camera/vertex briefly contains a non-finite value. Keep the original
+    // software NCLIP path for desktop parity; on PSP the fixed-function GU is
+    // the authoritative culler and the geometry builder only decodes packets.
+    const bool doPsxFaceCull = false;
+#else
+    const bool doPsxFaceCull = (drawPos && p3d::context && g_display);
+#endif
     Mat4 viewMatrix;
     ChanProjectionState portState;
     s32 worldTx = 0;
@@ -943,6 +993,14 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     u32 polyIdx = 0;
 
     auto processPrimitive = [&](u16 vertBase, int bucket) -> bool {
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspBuildStageId < 20u && (polyIdx % 32u) == 0u) {
+            Log::Get().LogMessage("[PSP Build] primitive #%lu poly=%u bucket=%d cursor=%lu",
+                static_cast<unsigned long>(pspBuildStageId),
+                static_cast<unsigned>(polyIdx), bucket,
+                static_cast<unsigned long>(primCursor - primStart));
+        }
+#endif
         if (polyIdx >= geom->numPolys) {
             ASSERT(false);
             return false;
@@ -1280,6 +1338,15 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         }
     }
 
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBuildStageId < 20u) {
+        Log::Get().LogMessage("[PSP Build] primitives ready #%lu verts=%lu indices=%lu",
+            static_cast<unsigned long>(pspBuildStageId),
+            static_cast<unsigned long>(vertBuf.size()),
+            static_cast<unsigned long>(idxBuf.size()));
+    }
+#endif
+
     ASSERT(polyIdx == geom->numPolys);
     if (polyIdx != geom->numPolys)
         return nullptr;
@@ -1287,6 +1354,16 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     if (idxBuf.empty()) {
         return nullptr;
     }
+
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (buildProbe < 12u) {
+        LOG("[PSP Geom] build complete #%lu verts=%lu indices=%lu polys=%u",
+            static_cast<unsigned long>(buildProbe),
+            static_cast<unsigned long>(vertBuf.size()),
+            static_cast<unsigned long>(idxBuf.size()),
+            static_cast<unsigned>(polyIdx));
+    }
+#endif
 
 #if REAL_TEXTURE_RENDERING
     // Re-sort the (already complete, triangle-list) index buffer by each
@@ -1360,8 +1437,20 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     if (!buffer) {
         return nullptr;
     }
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBuildStageId < 20u) {
+        Log::Get().LogMessage("[PSP Build] buffer ready #%lu buffer=%p",
+            static_cast<unsigned long>(pspBuildStageId), static_cast<void*>(buffer));
+    }
+#endif
     buffer->SetVertexData(vertBuf.data(), static_cast<u32>(vertBuf.size()));
     buffer->SetIndices(idxBuf.data(), static_cast<u32>(idxBuf.size()));
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspBuildStageId < 20u) {
+        Log::Get().LogMessage("[PSP Build] data ready #%lu",
+            static_cast<unsigned long>(pspBuildStageId));
+    }
+#endif
 
     if (outUsesSemiTrans) {
         *outUsesSemiTrans = usesSemiTrans;
@@ -1899,11 +1988,29 @@ bool ExtractPrimGeomVerts(const u8* raw, u32 size,
 int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
     MARKFUNCTION(0x800A0E14);
 
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspClipProbe = 0;
+    const u32 pspClipId = pspClipProbe++;
+    if (pspClipId < 32u) {
+        const tPrimGeom* probeGeom = static_cast<const tPrimGeom*>(geometry);
+        Log::Get().LogMessage("[PSP Clip] begin #%lu geom=%p polys=%u",
+            static_cast<unsigned long>(pspClipId), geometry,
+            probeGeom ? static_cast<unsigned>(probeGeom->numPolys) : 0u);
+    }
+#endif
+
     tPrimGeom* primGeom = static_cast<tPrimGeom*>(geometry);
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
     PspPerf::Trace("geometry clip: build begin");
     pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode, true);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspClipId < 32u) {
+        Log::Get().LogMessage("[PSP Clip] after build #%lu buffer=%p semi=%u mode=%u",
+            static_cast<unsigned long>(pspClipId), static_cast<void*>(buffer),
+            usesSemiTrans ? 1u : 0u, static_cast<unsigned>(semiTransMode));
+    }
+#endif
     PspPerf::Trace("geometry clip: build done");
     if (!buffer)
         return 0;
@@ -1926,12 +2033,37 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
     }
 
     PspPerf::Trace("geometry clip: draw begin");
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspClipId < 32u) {
+        Log::Get().LogMessage("[PSP Clip] before draw #%lu buffer=%p",
+            static_cast<unsigned long>(pspClipId), static_cast<void*>(buffer));
+    }
+#endif
     p3d::context->DrawPrimBuffer(buffer);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspClipId < 32u) {
+        Log::Get().LogMessage("[PSP Clip] after draw #%lu",
+            static_cast<unsigned long>(pspClipId));
+    }
+#endif
     PspPerf::Trace("geometry clip: draw done");
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspClipId < 32u) {
+        Log::Get().LogMessage("[PSP Clip] after trace #%lu",
+            static_cast<unsigned long>(pspClipId));
+    }
+#endif
 
     if (usesSemiTrans) {
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
+
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspClipId < 32u) {
+        Log::Get().LogMessage("[PSP Clip] before return #%lu",
+            static_cast<unsigned long>(pspClipId));
+    }
+#endif
 
 #if !defined(RC_PLATFORM_PSP)
     buffer->Release();
@@ -1941,6 +2073,18 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
 
 int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 fogFar, u32 fogColour) {
     MARKFUNCTION(0x800A18F4);
+
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspFogProbe = 0;
+    const u32 pspFogId = pspFogProbe++;
+    if (pspFogId < 32u) {
+        const tPrimGeom* probeGeom = static_cast<const tPrimGeom*>(geometry);
+        Log::Get().LogMessage("[PSP Fog] begin #%lu geom=%p polys=%u fog=%u/%u",
+            static_cast<unsigned long>(pspFogId), geometry,
+            probeGeom ? static_cast<unsigned>(probeGeom->numPolys) : 0u,
+            static_cast<unsigned>(fogNear), static_cast<unsigned>(fogFar));
+    }
+#endif
 
     GMFogState gmFogState;
     gmFogState.enabled = true;
@@ -1953,6 +2097,13 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
     u8 semiTransMode = 0;
     PspPerf::Trace("geometry fog: build begin");
     pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode, true);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspFogId < 32u) {
+        Log::Get().LogMessage("[PSP Fog] after build #%lu buffer=%p semi=%u mode=%u",
+            static_cast<unsigned long>(pspFogId), static_cast<void*>(buffer),
+            usesSemiTrans ? 1u : 0u, static_cast<unsigned>(semiTransMode));
+    }
+#endif
     PspPerf::Trace("geometry fog: build done");
     if (!buffer)
         return 0;
@@ -1971,7 +2122,19 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
     }
 
     PspPerf::Trace("geometry fog: draw begin");
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspFogId < 32u) {
+        Log::Get().LogMessage("[PSP Fog] before draw #%lu buffer=%p",
+            static_cast<unsigned long>(pspFogId), static_cast<void*>(buffer));
+    }
+#endif
     p3d::context->DrawPrimBuffer(buffer);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspFogId < 32u) {
+        Log::Get().LogMessage("[PSP Fog] after draw #%lu",
+            static_cast<unsigned long>(pspFogId));
+    }
+#endif
     PspPerf::Trace("geometry fog: draw done");
 
     if (usesSemiTrans) {

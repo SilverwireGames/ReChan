@@ -4,6 +4,8 @@
 #include "gen/block.h"
 #include "gen/blockmgr.h"
 #include "p3d/stream.h"
+#include <algorithm>
+#include <cstring>
 #include <vector>
 #include <string>
 
@@ -32,7 +34,10 @@ struct PsxVRAM {
     u16  Get(int x, int y) const { return data[y * 1024 + x]; }
     void Set(int x, int y, u16 v) { data[y * 1024 + x] = v; }
 
-    void Clear() { memset(data, 0, 1024 * 512 * sizeof(u16)); }
+    void Clear() {
+        memset(data, 0, 1024 * 512 * sizeof(u16));
+        MarkDirty(0, 0, 1024, 512);
+    }
 
     void Upload(s16 x, s16 y, s16 w, s16 h, const u8* raw) {
         for (int row = 0; row < h; row++) {
@@ -44,10 +49,73 @@ struct PsxVRAM {
                 }
             }
         }
+        MarkDirty(x, y, w, h);
+    }
+
+    bool ConsumeDirtyRect(s16& outX, s16& outY, s16& outW, s16& outH) {
+        if (!dirty) {
+            return false;
+        }
+
+        outX = dirtyMinX;
+        outY = dirtyMinY;
+        outW = static_cast<s16>(dirtyMaxX - dirtyMinX);
+        outH = static_cast<s16>(dirtyMaxY - dirtyMinY);
+        dirty = false;
+        dirtyMinX = 1024;
+        dirtyMinY = 512;
+        dirtyMaxX = 0;
+        dirtyMaxY = 0;
+        return outW > 0 && outH > 0;
+    }
+
+    bool IsDirty() const { return dirty; }
+
+    void ClearDirty() {
+        dirty = false;
+        dirtyMinX = 1024;
+        dirtyMinY = 512;
+        dirtyMaxX = 0;
+        dirtyMaxY = 0;
     }
 
     // Decode a 256x256 texture page to RGBA8 (out must be 256*256*4 bytes)
     void DecodePage(u16 tpage, u16 cba, u8* rgbaOut) const;
+
+private:
+    void MarkDirty(s16 x, s16 y, s16 w, s16 h) {
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+
+        const s32 minX = std::max<s32>(0, x);
+        const s32 minY = std::max<s32>(0, y);
+        const s32 maxX = std::min<s32>(1024, static_cast<s32>(x) + w);
+        const s32 maxY = std::min<s32>(512, static_cast<s32>(y) + h);
+        if (minX >= maxX || minY >= maxY) {
+            return;
+        }
+
+        if (!dirty) {
+            dirtyMinX = static_cast<s16>(minX);
+            dirtyMinY = static_cast<s16>(minY);
+            dirtyMaxX = static_cast<s16>(maxX);
+            dirtyMaxY = static_cast<s16>(maxY);
+            dirty = true;
+            return;
+        }
+
+        dirtyMinX = static_cast<s16>(std::min<s32>(dirtyMinX, minX));
+        dirtyMinY = static_cast<s16>(std::min<s32>(dirtyMinY, minY));
+        dirtyMaxX = static_cast<s16>(std::max<s32>(dirtyMaxX, maxX));
+        dirtyMaxY = static_cast<s16>(std::max<s32>(dirtyMaxY, maxY));
+    }
+
+    bool dirty = true;
+    s16 dirtyMinX = 0;
+    s16 dirtyMinY = 0;
+    s16 dirtyMaxX = 1024;
+    s16 dirtyMaxY = 512;
 };
 
 class World : public Manager {

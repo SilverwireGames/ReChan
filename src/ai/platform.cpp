@@ -1188,6 +1188,17 @@ bool Platform::HandleEnvironmentCollision(LVector& nextPos) {
 void Platform::Draw() {
     MARKFUNCTION(0x800209BC);
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspPlatformDrawProbe = 0;
+    const u32 pspPlatformDrawProbeId = pspPlatformDrawProbe++;
+    const bool pspPlatformProbe = pspPlatformDrawProbeId < 8u;
+    if (pspPlatformProbe) {
+        LOG("[PSP Platform] draw entry #%lu this=%p flags=%08lX model=%p",
+            static_cast<unsigned long>(pspPlatformDrawProbeId), static_cast<void*>(this),
+            static_cast<unsigned long>(platformFlags), model);
+    }
+#endif
+
     if (!model) return;
 
     // PSX: check platformFlags bit 2 (visible) must be set
@@ -1199,6 +1210,13 @@ void Platform::Draw() {
     // (not implemented - would need camera distance)
 
     Obstacle::Draw();
+
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (pspPlatformProbe) {
+        LOG("[PSP Platform] draw after obstacle #%lu this=%p",
+            static_cast<unsigned long>(pspPlatformDrawProbeId), static_cast<void*>(this));
+    }
+#endif
 }
 
 void Platform::UpdatePosition() {

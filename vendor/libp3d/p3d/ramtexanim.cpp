@@ -94,6 +94,16 @@ void tRAMTexFlip::Update() {
         return;
     }
 
+    // The PSP path copies these textures directly into the emulated PSX VRAM.
+    // Reject malformed stream metadata before the nested copy loop can walk
+    // outside the texture buffer or spend an unbounded amount of time copying.
+    if (rect->x < 0 || rect->y < 0 || rect->w <= 0 || rect->h <= 0 ||
+        rect->x >= 1024 || rect->y >= 512 || rect->w > 1024 - rect->x ||
+        rect->h > 512 - rect->y ||
+        texture->GetTextureDataSize() < static_cast<u32>(rect->w) * rect->h * 2u) {
+        return;
+    }
+
     if (rect->h == 1) {
         rect->x = 768;
         rect->y = 143;

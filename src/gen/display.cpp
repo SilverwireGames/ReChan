@@ -123,7 +123,7 @@ void Display::InternalOpen() {
     theCamera->Reset();
 
     tMatrixCamera* p3dCam = theCamera->GetP3DCamera();
-    p3dCam->SetNearPlane(1.0f);
+    p3dCam->SetNearPlane(Camera::kRenderNearPlane);
     p3dCam->SetFarPlane(65535.0f);
     view.SetCamera(p3dCam);
     view.SetBackgroundColour(pddiColour(0, 0, 0));

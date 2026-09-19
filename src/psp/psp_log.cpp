@@ -45,7 +45,14 @@ void Log::LogMessage(const char* fmt, ...) {
 void Log::LogMessageV(const char* fmt, va_list args) {
     char buffer[512];
     std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+#if defined(RC_PLATFORM_PSP)
+    // The PSP path logs directly to the debug file/console. Retaining every
+    // message in Log::m_MessageStack creates one heap allocation per draw
+    // probe and eventually starves/corrupts the small game heap while a
+    // streamed level is rendering.
+#else
     m_MessageStack.emplace_back(buffer);
+#endif
     WriteToConsole(buffer);
     WriteToConsole("\n");
     if (g_pspLogFile) {

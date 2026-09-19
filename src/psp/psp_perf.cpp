@@ -2,20 +2,42 @@
 
 #include "p3d/fileio.h"
 
+#if defined(PSP_RUNTIME_DIAGNOSTIC)
+namespace PspPerf {
+volatile RuntimeMarker g_runtimeMarkers[256] = {};
+volatile u32 g_runtimeMarkerSequence = 0;
+void Mark(RuntimeStage stage, u32 value, u32 detail) {
+    const u32 sequence = g_runtimeMarkerSequence + 1u;
+    volatile auto& marker = g_runtimeMarkers[sequence & 255u];
+    marker.stage = static_cast<u32>(stage);
+    marker.value = value;
+    marker.detail = detail;
+    marker.sequence = sequence;
+    g_runtimeMarkerSequence = sequence;
+}
+} // namespace PspPerf
+#endif
+
 #if defined(PSP_PERF_TELEMETRY)
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <malloc.h>
 #include <string>
 
+#if defined(PSP_TRACE_TELEMETRY)
 #include <pspiofilemgr.h>
+#endif
 
 namespace {
 
 constexpr std::size_t kWindowSize = 600;
-constexpr u32 kFrameBudgetUs = 16667;
+// PSP display cadence is approximately 59.94 Hz.
+constexpr u32 kFrameBudgetUs = 16684;
 
 struct MetricRing {
     std::array<u32, kWindowSize> values = {};
@@ -54,20 +76,65 @@ MetricRing g_swap;
 MetricRing g_drawCalls;
 MetricRing g_submittedVertices;
 MetricRing g_pageCacheMisses;
+std::array<u64, static_cast<u32>(PspPerf::RendererCounter::Count)> g_rendererTotals{};
 u32 g_totalFrames = 0;
 u32 g_currentDrawCalls = 0;
 u32 g_currentSubmittedVertices = 0;
 u32 g_currentPageCacheMisses = 0;
+#if defined(PSP_TRACE_TELEMETRY)
 SceUID g_traceFd = -1;
 u32 g_tracePlayFrame = 0;
 bool g_traceFrameActive = false;
+#endif
+u32 g_rendererMemoryBytes = 0;
+u32 g_audioMemoryBytes = 0;
+std::atomic_uint g_audioCallbackCount{0};
+std::atomic_uint g_audioUnderruns{0};
+std::atomic_uint g_audioMaxUs{0};
+std::atomic_uint g_audioMusicStarts{0};
+std::atomic_uint g_audioMusicMixCallbacks{0};
+std::atomic_uint g_audioMusicMixedFrames{0};
+std::atomic_uint g_audioWorkerErrors{0};
 
+struct MemoryMetrics {
+    u32 samples = 0;
+    u32 firstHeapFree = 0;
+    u32 lastHeapFree = 0;
+    u32 minHeapFree = std::numeric_limits<u32>::max();
+    u32 maxHeapFree = 0;
+    u32 lastHeapMax = 0;
+    u32 minHeapMax = std::numeric_limits<u32>::max();
+    u32 maxHeapMax = 0;
+    u32 lastVramUsed = 0;
+    u32 minVramUsed = std::numeric_limits<u32>::max();
+    u32 maxVramUsed = 0;
+    u32 lastVramFree = 0;
+    u32 minVramFree = std::numeric_limits<u32>::max();
+    u32 maxVramFree = 0;
+    u32 libcArena = 0;
+    u32 libcUsed = 0;
+    u32 libcFree = 0;
+    u32 libcFreeChunks = 0;
+    u32 libcUsedMin = std::numeric_limits<u32>::max();
+    u32 libcUsedMax = 0;
+};
+
+MemoryMetrics g_memory;
+
+#if defined(PSP_TRACE_TELEMETRY)
 static bool IsTraceInteresting(const char* message) {
-    return std::strstr(message, "block draw:") != nullptr
+    return std::strstr(message, "play step:") != nullptr
+        || std::strstr(message, "render:") != nullptr
+        || std::strstr(message, "play:") != nullptr
+        || std::strstr(message, "state ") != nullptr
+        || std::strstr(message, "block draw:") != nullptr
         || std::strstr(message, "geometry clip:") != nullptr
+        || std::strstr(message, "geometry fog:") != nullptr
+        || std::strstr(message, "world render:") != nullptr
         || std::strstr(message, "gu draw:") != nullptr
         || std::strstr(message, "gu memory:") != nullptr;
 }
+#endif
 
 static u32 MillisecondsToMicroseconds(f32 milliseconds) {
     if (milliseconds <= 0.0f) {
@@ -108,8 +175,11 @@ static double FramesPerSecond(u32 averageUs) {
 namespace PspPerf {
 
 void WriteReport();
+u32 g_rendererCounters[static_cast<u32>(RendererCounter::Count)] = {};
 
 void Reset() {
+    g_rendererTotals.fill(0);
+    std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
     g_frame.Reset();
     g_logic.Reset();
     g_draw.Reset();
@@ -121,11 +191,28 @@ void Reset() {
     g_currentDrawCalls = 0;
     g_currentSubmittedVertices = 0;
     g_currentPageCacheMisses = 0;
+#if defined(PSP_TRACE_TELEMETRY)
     g_tracePlayFrame = 0;
     g_traceFrameActive = false;
+#endif
+    g_rendererMemoryBytes = 0;
+    g_audioMemoryBytes = 0;
+    g_audioCallbackCount.store(0, std::memory_order_relaxed);
+    g_audioUnderruns.store(0, std::memory_order_relaxed);
+    g_audioMaxUs.store(0, std::memory_order_relaxed);
+    g_audioMusicStarts.store(0, std::memory_order_relaxed);
+    g_audioMusicMixCallbacks.store(0, std::memory_order_relaxed);
+    g_audioMusicMixedFrames.store(0, std::memory_order_relaxed);
+    g_audioWorkerErrors.store(0, std::memory_order_relaxed);
+    g_memory = {};
+    g_memory.minHeapFree = std::numeric_limits<u32>::max();
+    g_memory.minHeapMax = std::numeric_limits<u32>::max();
+    g_memory.minVramUsed = std::numeric_limits<u32>::max();
+    g_memory.minVramFree = std::numeric_limits<u32>::max();
 }
 
 void BeginFrame() {
+    std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
     g_currentDrawCalls = 0;
     g_currentSubmittedVertices = 0;
     g_currentPageCacheMisses = 0;
@@ -149,7 +236,78 @@ void RecordPageCacheMiss() {
     }
 }
 
+void RecordMemorySnapshot(u32 heapFree, u32 heapMax, u32 vramUsed, u32 vramFree) {
+    const struct mallinfo allocator = mallinfo();
+    g_memory.libcArena = static_cast<u32>(allocator.arena);
+    g_memory.libcUsed = static_cast<u32>(allocator.uordblks);
+    g_memory.libcFree = static_cast<u32>(allocator.fordblks);
+    g_memory.libcFreeChunks = static_cast<u32>(allocator.ordblks);
+    g_memory.libcUsedMin = std::min(g_memory.libcUsedMin, g_memory.libcUsed);
+    g_memory.libcUsedMax = std::max(g_memory.libcUsedMax, g_memory.libcUsed);
+    if (g_memory.samples == 0) {
+        g_memory.firstHeapFree = heapFree;
+    }
+    g_memory.lastHeapFree = heapFree;
+    g_memory.minHeapFree = std::min(g_memory.minHeapFree, heapFree);
+    g_memory.maxHeapFree = std::max(g_memory.maxHeapFree, heapFree);
+    g_memory.lastHeapMax = heapMax;
+    g_memory.minHeapMax = std::min(g_memory.minHeapMax, heapMax);
+    g_memory.maxHeapMax = std::max(g_memory.maxHeapMax, heapMax);
+    g_memory.lastVramUsed = vramUsed;
+    g_memory.minVramUsed = std::min(g_memory.minVramUsed, vramUsed);
+    g_memory.maxVramUsed = std::max(g_memory.maxVramUsed, vramUsed);
+    g_memory.lastVramFree = vramFree;
+    g_memory.minVramFree = std::min(g_memory.minVramFree, vramFree);
+    g_memory.maxVramFree = std::max(g_memory.maxVramFree, vramFree);
+    ++g_memory.samples;
+}
+
+void AddRendererMemory(s32 bytes) {
+    if (bytes >= 0) {
+        g_rendererMemoryBytes += static_cast<u32>(bytes);
+    }
+    else {
+        const u32 amount = static_cast<u32>(-bytes);
+        g_rendererMemoryBytes = amount > g_rendererMemoryBytes
+            ? 0u : g_rendererMemoryBytes - amount;
+    }
+}
+
+void SetAudioMemory(u32 bytes) { g_audioMemoryBytes = bytes; }
+
+void RecordAudioCallback(u32 durationUs) {
+    g_audioCallbackCount.fetch_add(1, std::memory_order_relaxed);
+    unsigned int measuredUs = static_cast<unsigned int>(
+        std::min<u32>(durationUs, 0xFFFFFFFFu));
+    unsigned int previous = g_audioMaxUs.load(std::memory_order_relaxed);
+    while (measuredUs > previous
+        && !g_audioMaxUs.compare_exchange_weak(
+            previous, measuredUs, std::memory_order_relaxed)) {
+    }
+}
+
+void RecordAudioUnderrun() {
+    g_audioUnderruns.fetch_add(1, std::memory_order_relaxed);
+}
+
+void RecordAudioMusicStart() {
+    g_audioMusicStarts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void RecordAudioMusicMix(u32 mixedFrames) {
+    if (mixedFrames == 0) return;
+    g_audioMusicMixCallbacks.fetch_add(1, std::memory_order_relaxed);
+    g_audioMusicMixedFrames.fetch_add(mixedFrames, std::memory_order_relaxed);
+}
+
+void RecordAudioWorkerError() {
+    g_audioWorkerErrors.fetch_add(1, std::memory_order_relaxed);
+}
+
 void RecordFrame(u32 frameUs, f32 logicMs, f32 drawMs, f32 swapMs) {
+    for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
+        g_rendererTotals[i] += g_rendererCounters[i];
+    }
     g_frame.Push(frameUs);
     g_logic.Push(MillisecondsToMicroseconds(logicMs));
     g_draw.Push(MillisecondsToMicroseconds(drawMs));
@@ -158,15 +316,20 @@ void RecordFrame(u32 frameUs, f32 logicMs, f32 drawMs, f32 swapMs) {
     g_submittedVertices.Push(g_currentSubmittedVertices);
     g_pageCacheMisses.Push(g_currentPageCacheMisses);
     ++g_totalFrames;
-    // Temporary progress checkpoint while validating unattended PPSSPP runs.
-    // The final profile writes once during shutdown.
-    if (g_totalFrames == 1u || (g_totalFrames % 60u) == 0u) {
+#if defined(PSP_PERF_DIAGNOSTIC)
+    // Only explicit fault diagnostics may perturb scheduling with I/O.
+    if (g_totalFrames <= 5u || (g_totalFrames % 60u) == 0u) {
         WriteReport();
     }
+#endif
 }
 
 bool ShouldStop() {
+#if defined(PSP_PERF_SOAK)
+    return false;
+#else
     return g_totalFrames >= kWindowSize;
+#endif
 }
 
 void WriteReport() {
@@ -217,13 +380,96 @@ void WriteReport() {
         static_cast<unsigned long>(g_submittedVertices.Average()),
         static_cast<unsigned long>(g_pageCacheMisses.Average()));
 
+    const u32 heapUsedSinceProfileStart = g_memory.samples == 0
+        || g_memory.firstHeapFree < g_memory.lastHeapFree
+        ? 0u : g_memory.firstHeapFree - g_memory.lastHeapFree;
+    const u32 memoryLength = static_cast<u32>(std::strlen(report));
+    std::snprintf(
+        report + memoryLength,
+        sizeof(report) - memoryLength,
+        "\nMemory/VRAM\n"
+        "memory_samples=%lu\n"
+        "heap_free_last=%lu\n"
+        "heap_free_min=%lu\n"
+        "heap_free_max=%lu\n"
+        "heap_max_free_last=%lu\n"
+        "heap_used_since_profile_start=%lu\n"
+        "vram_used_last=%lu\n"
+        "vram_used_max=%lu\n"
+        "vram_free_last=%lu\n"
+        "vram_free_min=%lu\n"
+        "renderer_ram_bytes=%lu\n"
+        "audio_stream_ram_bytes=%lu\n"
+        "audio_callback_count=%lu\n"
+        "audio_underruns=%lu\n"
+        "audio_callback_max_us=%lu\n",
+        static_cast<unsigned long>(g_memory.samples),
+        static_cast<unsigned long>(g_memory.lastHeapFree),
+        static_cast<unsigned long>(g_memory.minHeapFree == std::numeric_limits<u32>::max() ? 0u : g_memory.minHeapFree),
+        static_cast<unsigned long>(g_memory.maxHeapFree),
+        static_cast<unsigned long>(g_memory.lastHeapMax),
+        static_cast<unsigned long>(heapUsedSinceProfileStart),
+        static_cast<unsigned long>(g_memory.lastVramUsed),
+        static_cast<unsigned long>(g_memory.maxVramUsed),
+        static_cast<unsigned long>(g_memory.lastVramFree),
+        static_cast<unsigned long>(g_memory.minVramFree == std::numeric_limits<u32>::max() ? 0u : g_memory.minVramFree),
+        static_cast<unsigned long>(g_rendererMemoryBytes),
+        static_cast<unsigned long>(g_audioMemoryBytes),
+        static_cast<unsigned long>(g_audioCallbackCount.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_audioUnderruns.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_audioMaxUs.load(std::memory_order_relaxed)));
+
+    const u32 allocatorLength = static_cast<u32>(std::strlen(report));
+    std::snprintf(report + allocatorLength, sizeof(report) - allocatorLength,
+        "libc_arena=%lu\nlibc_used=%lu\nlibc_free=%lu\nlibc_free_chunks=%lu\n"
+        "libc_used_min=%lu\nlibc_used_max=%lu\n",
+        static_cast<unsigned long>(g_memory.libcArena),
+        static_cast<unsigned long>(g_memory.libcUsed),
+        static_cast<unsigned long>(g_memory.libcFree),
+        static_cast<unsigned long>(g_memory.libcFreeChunks),
+        static_cast<unsigned long>(g_memory.libcUsedMin),
+        static_cast<unsigned long>(g_memory.libcUsedMax));
+
+    const u32 audioLength = static_cast<u32>(std::strlen(report));
+    std::snprintf(
+        report + audioLength,
+        sizeof(report) - audioLength,
+        "audio_music_starts=%lu\n"
+        "audio_music_mix_callbacks=%lu\n"
+        "audio_music_mixed_frames=%lu\n"
+        "audio_worker_errors=%lu\n",
+        static_cast<unsigned long>(g_audioMusicStarts.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_audioMusicMixCallbacks.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_audioMusicMixedFrames.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_audioWorkerErrors.load(std::memory_order_relaxed)));
+
+    static constexpr const char* rendererNames[] = {
+        "page_binds_avg", "gu_state_writes_avg", "list_flushes_avg",
+        "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg"
+    };
+    for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
+        const std::size_t length = std::strlen(report);
+        // Retain fractional averages: e.g. 599 flushes in 600 frames must
+        // not appear as zero. Formatting runs only when writing the report.
+        std::snprintf(report + length, sizeof(report) - length, "%s=%.3f\n",
+            rendererNames[i], g_totalFrames
+                ? static_cast<double>(g_rendererTotals[i]) / g_totalFrames : 0.0);
+    }
     p3d::io::WriteTextFile("PSP_PERF.TXT", std::string(report));
 }
 
 void Trace(const char* message) {
+#if defined(PSP_TRACE_TELEMETRY)
     if (!message) return;
     if (std::strcmp(message, "play: before Step") == 0) {
-        g_traceFrameActive = (g_tracePlayFrame == 1u);
+        // Capture the first complete gameplay frame. The previous value of
+        // one skipped the first frame and left PSP_TRACE.TXT empty whenever
+        // the test stopped before the next logic tick.
+        // Capture a small number of complete/incomplete frames. The first
+        // frame often succeeds while the next one stalls in a streamed model
+        // or GU path; limiting this to three frames keeps the diagnostic file
+        // bounded and avoids turning a profile into unbounded I/O.
+        g_traceFrameActive = (g_tracePlayFrame < 3u);
         if (g_traceFrameActive) {
             if (g_traceFd >= 0) sceIoClose(g_traceFd);
             g_traceFd = sceIoOpen("PSP_TRACE.TXT", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
@@ -249,6 +495,12 @@ void Trace(const char* message) {
     char line[192] = {};
     const int length = std::snprintf(line, sizeof(line), "%s\n", message);
     if (length > 0) sceIoWrite(g_traceFd, line, static_cast<SceSize>(length));
+#else
+    // Trace is intentionally disabled in optimized builds. The debug trace
+    // writes synchronously to the emulated Memory Stick and can starve the
+    // render/audio scheduling path, invalidating both gameplay and profiling.
+    (void)message;
+#endif
 }
 
 } // namespace PspPerf
@@ -262,6 +514,14 @@ void BeginFrame() {}
 void RecordDrawSubmission(u32) {}
 void RecordPageCacheMiss() {}
 void RecordFrame(u32, f32, f32, f32) {}
+void RecordMemorySnapshot(u32, u32, u32, u32) {}
+void AddRendererMemory(s32) {}
+void SetAudioMemory(u32) {}
+void RecordAudioCallback(u32) {}
+void RecordAudioUnderrun() {}
+void RecordAudioMusicStart() {}
+void RecordAudioMusicMix(u32) {}
+void RecordAudioWorkerError() {}
 bool ShouldStop() { return false; }
 void WriteReport() {}
 void Trace(const char*) {}

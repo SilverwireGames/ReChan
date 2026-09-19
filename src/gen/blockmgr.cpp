@@ -406,6 +406,16 @@ bool BlockManager::CrossedBoundary() const {
 s32 BlockManager::DemandLoading() {
     MARKFUNCTION(0x800506E8);
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 s_pspDemandProbe = 0;
+    const u32 demandProbe = s_pspDemandProbe++;
+    if (demandProbe < 4u) {
+        LOG("[PSP Demand] begin #%lu flag3=%u player=%p current=%u",
+            static_cast<unsigned long>(demandProbe), flag3 ? 1u : 0u,
+            static_cast<void*>(Player::s_player), static_cast<unsigned>(currentBlockNum));
+    }
+#endif
+
     if (!flag3 || !Player::s_player) {
         return 0;
     }
@@ -423,6 +433,9 @@ s32 BlockManager::DemandLoading() {
         && InLoadList(playerBlockNum);
 
     if (!blockChanged && listsAlreadyValidForPlayerBlock) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (demandProbe < 4u) LOG("[PSP Demand] already valid #%lu", static_cast<unsigned long>(demandProbe));
+#endif
         return 0;
     }
 
@@ -436,6 +449,10 @@ s32 BlockManager::DemandLoading() {
     }
 
     WEffect_PopulateWEffects();
+
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (demandProbe < 4u) LOG("[PSP Demand] complete #%lu playerBlock=%u", static_cast<unsigned long>(demandProbe), static_cast<unsigned>(playerBlockNum));
+#endif
 
     return 0;
 }

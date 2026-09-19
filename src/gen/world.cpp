@@ -49,7 +49,7 @@
 #include "pddi/pddidev.h"
 
 #include "extra/shadowcsm.h"
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP)
 #include "psp/psp_perf.h"
 #endif
 
@@ -2207,6 +2207,13 @@ static void LoadGeoPair(
     const u8* p3dData,
     u32 p3dSize,
     s32 storeId) {
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] geo begin store=%ld perm=%lu p3d=%lu free=%lu max=%lu",
+        static_cast<long>(storeId), static_cast<unsigned long>(permSize),
+        static_cast<unsigned long>(p3dSize),
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     if (!g_levelManager || !permData || !p3dData || p3dSize < 6) {
         return;
     }
@@ -2975,6 +2982,12 @@ static void LoadGeoPair(
 next_chunk:
         chunkPos += chunkSize;
     }
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] geo end store=%ld free=%lu max=%lu",
+        static_cast<long>(storeId),
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 }
 
 static void LoadGeoPairsInRange(
@@ -3282,12 +3295,31 @@ static bool LoadPspBlocksForPetal(
             continue;
         }
 
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] blk begin entry=%lu block=%lu size=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i), static_cast<unsigned long>(blockIndex),
+            static_cast<unsigned long>(entries[i].size),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         if (!ReadPspStreamEntry(file, entries[i], fileSize, scratch)) {
             LOG("[%s] Failed to read BLK entry %u", logTag, i);
             blockIndex++;
             continue;
         }
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] blk read entry=%lu bytes=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i), static_cast<unsigned long>(scratch.size()),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         blockMgr.LoadBlockAt(blockIndex, scratch.data(), static_cast<u32>(scratch.size()));
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] blk parsed entry=%lu block=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i), static_cast<unsigned long>(blockIndex),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         blockIndex++;
     }
 
@@ -3311,7 +3343,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
     streamPath = lcfPath;
     streamEntries.clear();
     streamData.clear();
-    vram.Clear();
+    // Characters and UI share this VRAM with the level. Their permanent
+    // textures are loaded before this stream; TPG uploads must only replace
+    // their own rectangles, as in LoadStream. PsxVRAM starts zero-initialized.
 
     p3d::io::FileHandle file;
     int64_t fileSize = 0;
@@ -3341,8 +3375,18 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         LoadTPGTexturePayload(pspStreamScratch.data(), static_cast<u32>(pspStreamScratch.size()));
     }
     RefreshVRAMTexture();
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP VRAM] LoadPspStream after initial TPG handle=%lu",
+        static_cast<unsigned long>(vramHandle));
+#endif
     FillMeter(40);
     PspPerf::Trace("psp stream: tpg ready");
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] tpg ready entries=%lu free=%lu max=%lu",
+        static_cast<unsigned long>(streamEntries.size()),
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     // RCI/RCP resources are level-wide and must be loaded before the selected
     // petal, exactly as on the resident desktop path.
@@ -3350,17 +3394,35 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         if (strncmp(streamEntries[i].magic, ".RCI", 4) != 0) {
             continue;
         }
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] rci pair begin index=%lu perm=%lu next=%s/%lu",
+            static_cast<unsigned long>(i),
+            static_cast<unsigned long>(streamEntries[i].size),
+            streamEntries[i + 1].magic,
+            static_cast<unsigned long>(streamEntries[i + 1].size));
+#endif
         const tStreamEntry& p3dEntry = streamEntries[i + 1];
         if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspPermScratch) ||
             !ReadPspStreamEntry(file, p3dEntry, fileSize, pspP3dScratch)) {
             LOG("[World] Failed to read RCI/RCP pair %u", i);
             continue;
         }
-        LoadGeoPair(this,
-                    pspPermScratch.data(), static_cast<u32>(pspPermScratch.size()),
-                    pspP3dScratch.data(), static_cast<u32>(pspP3dScratch.size()), 1);
+            LoadGeoPair(this,
+                        pspPermScratch.data(), static_cast<u32>(pspPermScratch.size()),
+                        pspP3dScratch.data(), static_cast<u32>(pspP3dScratch.size()), 1);
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] rci pair end index=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     }
     PspPerf::Trace("psp stream: permanent geometry ready");
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] rci complete free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     u32 petalStart = 0, petalEnd = 0, petalIdx = 0;
     if (!FindPspPetalRange(streamEntries, targetPetalIndex, petalStart, petalEnd, petalIdx)) {
@@ -3368,6 +3430,13 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         return false;
     }
     targetPetalIndex = petalIdx;
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] petal range start=%lu end=%lu petal=%lu free=%lu max=%lu",
+        static_cast<unsigned long>(petalStart), static_cast<unsigned long>(petalEnd),
+        static_cast<unsigned long>(petalIdx),
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     LOG("[World] PSP loading petal %u: entries %u-%u", petalIdx, petalStart, petalEnd - 1);
 
     BlockManager& blockMgr = *g_blockManager;
@@ -3376,19 +3445,45 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         if (strncmp(streamEntries[i].magic, ".WDB", 4) != 0) {
             continue;
         }
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] wdb begin index=%lu size=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i),
+            static_cast<unsigned long>(streamEntries[i].size),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspStreamScratch)) {
             LOG("[World] Failed to read WDB entry %u", i);
             continue;
         }
         g_database->Scan(pspStreamScratch.data(), static_cast<u32>(pspStreamScratch.size()));
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] wdb end index=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     }
     PspPerf::Trace("psp stream: database ready");
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] database ready free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     for (u32 i = petalStart; i + 1 < petalEnd; i++) {
         if (strncmp(streamEntries[i].magic, ".PCI", 4) != 0) {
             continue;
         }
         const tStreamEntry& p3dEntry = streamEntries[i + 1];
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] pci pair begin index=%lu perm=%lu p3d=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i),
+            static_cast<unsigned long>(streamEntries[i].size),
+            static_cast<unsigned long>(p3dEntry.size),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         if (!ReadPspStreamEntry(file, streamEntries[i], fileSize, pspPermScratch) ||
             !ReadPspStreamEntry(file, p3dEntry, fileSize, pspP3dScratch)) {
             LOG("[World] Failed to read PCI/PCP pair %u", i);
@@ -3397,9 +3492,20 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         LoadGeoPair(this,
                     pspPermScratch.data(), static_cast<u32>(pspPermScratch.size()),
                     pspP3dScratch.data(), static_cast<u32>(pspP3dScratch.size()), 2);
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] pci pair end index=%lu free=%lu max=%lu",
+            static_cast<unsigned long>(i),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     }
     PspPerf::Trace("psp stream: petal geometry ready");
     RefreshVRAMTexture();
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] petal geometry ready free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     std::vector<DBVolume*> blockVolumes;
     for (DBRoot* v = g_database->GetFirstBlock(); v; v = static_cast<DBRoot*>(v->next)) {
@@ -3407,6 +3513,12 @@ bool World::LoadPspStream(const std::string& lcfPath) {
     }
     blockMgr.LoadBlocksFunc(blockVolumes);
     PspPerf::Trace("psp stream: block metadata ready");
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] block metadata ready count=%lu free=%lu max=%lu",
+        static_cast<unsigned long>(blockMgr.GetNumBlocks()),
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     s32 minX = 0x7FFFFFFF, minY = 0x7FFFFFFF, minZ = 0x7FFFFFFF;
     s32 maxX = -0x7FFFFFFF, maxY = -0x7FFFFFFF, maxZ = -0x7FFFFFFF;
@@ -3446,6 +3558,12 @@ bool World::LoadPspStream(const std::string& lcfPath) {
     PspPerf::Trace("psp stream: memory query done");
 #endif
     LOG("[World] PSP stream metadata load complete: blocks=%u", blockMgr.GetNumBlocks());
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] stream return blocks=%lu free=%lu max=%lu",
+        static_cast<unsigned long>(blockMgr.GetNumBlocks()),
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     return blockMgr.GetNumBlocks() > 0;
 }
 
@@ -3981,9 +4099,19 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         StopLogo();
         return false;
     }
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] LoadLevelIndex: stream load returned free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     PspPerf::Trace("level index: stream load returned");
 
     PumpLoadingScreen();
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] LoadLevelIndex: loading pump returned free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     currentPetalIndex = targetPetalIndex;
 
@@ -4042,9 +4170,19 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     ParticleSystem_InitParticleInfoMemory();
 
     // PSX: Populate__2AI(0) - spawn entities from WDB database
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: before AI populate free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     if (g_ai) {
         g_ai->Populate();
     }
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: after AI populate free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     PspPerf::Trace("level index: ai populated");
     LOG("[World] Construct: AI populate complete");
     FillMeter(85);
@@ -4061,10 +4199,20 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     }
 
     // PSX: LoadBG, InitBG - background rendering setup
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: before background free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     BackG::LoadBG();
     LOG("[World] Construct: background load complete");
     BackG::InitBG();
     LOG("[World] Construct: background init complete");
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: after background free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
 
     // PSX: ScoreManager::SetPar
     if (g_scoreManager) {
@@ -4104,19 +4252,42 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     // On PC we deferred Parse() in Load() and do it here to match PSX timing.
 #if defined(RC_PLATFORM_PSP)
     {
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] Construct: before block load free=%lu max=%lu",
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         p3d::io::FileHandle pspStreamFile;
         const bool pspStreamOpen = pspStreamFile.Open(
             p3d::io::ResolvePath(streamPath), p3d::io::FileHandle::Mode::Read);
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] Construct: block file opened=%u size=%ld free=%lu max=%lu",
+            pspStreamOpen ? 1u : 0u,
+            static_cast<long>(pspStreamOpen ? pspStreamFile.Size() : 0),
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
         if (pspStreamOpen) {
             u32 pspPetalStart = 0, pspPetalEnd = 0, pspPetal = 0;
             if (FindPspPetalRange(streamEntries, currentPetalIndex,
                                   pspPetalStart, pspPetalEnd, pspPetal)) {
+#if defined(PSP_GU_DIAGNOSTIC)
+                Log::Get().LogMessage("[PSP LOAD] Construct: block range start=%lu end=%lu petal=%lu",
+                    static_cast<unsigned long>(pspPetalStart),
+                    static_cast<unsigned long>(pspPetalEnd),
+                    static_cast<unsigned long>(pspPetal));
+#endif
                 LoadPspBlocksForPetal(blockMgr, pspStreamFile, pspStreamFile.Size(),
                                       streamEntries, pspPetalStart, pspPetalEnd,
                                       startBlockNum, pspStreamScratch, "World");
                 PspPerf::Trace("level index: blocks loaded");
             }
         }
+#if defined(PSP_GU_DIAGNOSTIC)
+        Log::Get().LogMessage("[PSP LOAD] Construct: after block load free=%lu max=%lu",
+            static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+            static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     }
 #else
     LoadBlocksForPetalFromStream(blockMgr, streamData, currentPetalIndex, startBlockNum, "World");
@@ -4126,9 +4297,19 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     if (g_ai) {
         g_ai->PopulateBlock();
     }
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: after block populate free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     PspPerf::Trace("level index: block population done");
 
     WEffect_PopulateWEffects();
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: after effects free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     PspPerf::Trace("level index: effects populated");
 
     FillMeter(100);
@@ -4258,6 +4439,11 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         g_director->SkipNextWideScreenEnterAnim();
     }
     PspPerf::Trace("level index: complete");
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP LOAD] Construct: complete free=%lu max=%lu",
+        static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
+        static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
+#endif
     return true;
 }
 
@@ -4349,12 +4535,35 @@ bool World::Load(const std::string& lcfPath) {
                 }
             }
         }
+        // Keep the persistent VRAM image alive after custom texture uploads.
+        // Destroying and reallocating the 1 MiB image here can fail on the
+        // fragmented PSP heap even though the original allocation succeeded,
+        // leaving the render context with handle 0 and silently disabling all
+        // PSX page sampling.  Update only the accumulated dirty region.
         if (vramHandle) {
-            p3d::context->DestroyVRAMTexture(vramHandle);
-            vramHandle = 0;
+#if defined(RC_PLATFORM_PSP)
+            s16 dirtyX = 0;
+            s16 dirtyY = 0;
+            s16 dirtyW = 0;
+            s16 dirtyH = 0;
+            if (vram.ConsumeDirtyRect(dirtyX, dirtyY, dirtyW, dirtyH)) {
+                p3d::context->UpdateVRAMTextureRegion(vramHandle, 1024, 512, vram.data,
+                                                       dirtyX, dirtyY, dirtyW, dirtyH);
+            }
+#else
+            p3d::context->UpdateVRAMTexture(vramHandle, 1024, 512, vram.data);
+#endif
         }
-        vramHandle = p3d::context->CreateVRAMTexture(1024, 512, vram.data);
+        else {
+            vramHandle = p3d::context->CreateVRAMTexture(1024, 512, vram.data);
+        }
     }
+#endif
+
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP VRAM] LoadPspStream before return handle=%lu entries=%lu",
+        static_cast<unsigned long>(vramHandle),
+        static_cast<unsigned long>(streamEntries.size()));
 #endif
 
     // RCI/RCP resources are level-wide and survive petal reloads until PurgeLevel.
@@ -4486,17 +4695,77 @@ void World::RefreshVRAMTexture() {
     // destroy+recreate cycle every frame indefinitely doesn't bother
     // desktop's driver/VRAM budget but exhausts the GPU allocator on the
     // Switch (both real hardware and emulation) after enough calls.
+#if defined(RC_PLATFORM_PSP) && defined(PSP_GU_DIAGNOSTIC)
+    static u32 refreshProbe = 0;
+    const u32 refreshId = refreshProbe++;
+    if (refreshId < 12u) {
+        Log::Get().LogMessage("[PSP VRAM] refresh #%lu enter handle=%lu dirty=%u",
+            static_cast<unsigned long>(refreshId),
+            static_cast<unsigned long>(vramHandle),
+            vram.IsDirty() ? 1u : 0u);
+    }
+#endif
     if (vramHandle) {
+#if defined(RC_PLATFORM_PSP)
+        s16 dirtyX = 0;
+        s16 dirtyY = 0;
+        s16 dirtyW = 0;
+        s16 dirtyH = 0;
+        if (vram.ConsumeDirtyRect(dirtyX, dirtyY, dirtyW, dirtyH)) {
+            p3d::context->UpdateVRAMTextureRegion(vramHandle, 1024, 512, vram.data,
+                                                   dirtyX, dirtyY, dirtyW, dirtyH);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_GU_DIAGNOSTIC)
+            if (refreshId < 12u) {
+                Log::Get().LogMessage("[PSP VRAM] refresh #%lu region handle=%lu rect=%d,%d %dx%d",
+                    static_cast<unsigned long>(refreshId),
+                    static_cast<unsigned long>(vramHandle), dirtyX, dirtyY, dirtyW, dirtyH);
+            }
+#endif
+        }
+#else
         p3d::context->UpdateVRAMTexture(vramHandle, 1024, 512, vram.data);
+#endif
         return;
     }
     vramHandle = p3d::context->CreateVRAMTexture(1024, 512, vram.data);
+    vram.ClearDirty();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_GU_DIAGNOSTIC)
+    if (refreshId < 12u) {
+        Log::Get().LogMessage("[PSP VRAM] refresh #%lu create result handle=%lu",
+            static_cast<unsigned long>(refreshId),
+            static_cast<unsigned long>(vramHandle));
+    }
+#endif
 }
 
 void World::Render(const LVector* playerPos) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_GU_DIAGNOSTIC)
+    static u32 renderHandleProbe = 0;
+    if (renderHandleProbe < 8u) {
+        Log::Get().LogMessage("[PSP VRAM] world render #%lu handle=%lu",
+            static_cast<unsigned long>(renderHandleProbe),
+            static_cast<unsigned long>(vramHandle));
+        ++renderHandleProbe;
+    }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 s_pspWorldRenderEntryProbe = 0;
+    const u32 renderProbe = s_pspWorldRenderEntryProbe++;
+    if (renderProbe < 4u) {
+        LOG("[PSP World] Render enter #%lu world=%p manager=%p player=%p",
+            static_cast<unsigned long>(renderProbe), static_cast<void*>(this),
+            static_cast<void*>(g_blockManager), static_cast<const void*>(playerPos));
+    }
+#endif
     p3d::context->SetVRAMHandle(vramHandle);
     const f64 t0 = Time::GetTimeInSeconds();
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (renderProbe < 4u) LOG("[PSP World] Render before DrawEverything #%lu", static_cast<unsigned long>(renderProbe));
+#endif
     DrawEverythingHandler(playerPos);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (renderProbe < 4u) LOG("[PSP World] Render after DrawEverything #%lu", static_cast<unsigned long>(renderProbe));
+#endif
     g_frameProfile.drawSubmitMs = (f32)((Time::GetTimeInSeconds() - t0) * 1000.0);
     p3d::context->SetVRAMHandle(0);
 }
@@ -4567,14 +4836,33 @@ static u32 chanp3dClipCode(const ChanProjectionState& portState, s32 vx, s32 vy,
 
 // PSX: DrawLoop__FP6ccListUl (GAME.CPP:2543, 0x8002B224)
 // Iterates a ccList and calls Draw() on entities in the given block.
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+static bool s_pspWorldRenderProbe = false;
+static u32 s_pspWorldRenderProbeCalls = 0;
+#endif
+
 static void DrawEntityList(ccList& list, u16 blockNum, u32 vramHandle) {
     MARKFUNCTION(0x8002B224);
     for (ccMinNode* n = list.head; n; n = n->next) {
         Thing* thing = static_cast<Thing*>(n);
         if (thing->blockNum == blockNum) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (s_pspWorldRenderProbe) {
+                LOG("[PSP World] entity begin block=%u thing=%p type=%u model=%p",
+                    static_cast<unsigned>(blockNum), static_cast<void*>(thing),
+                    static_cast<unsigned>(thing->thingType), thing->model);
+            }
+#endif
             p3d::context->SetVRAMHandle(vramHandle);
             p3d::context->SetTexInfoOverride(false, 0);
             thing->Draw();
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (s_pspWorldRenderProbe) {
+                LOG("[PSP World] entity done block=%u thing=%p type=%u",
+                    static_cast<unsigned>(blockNum), static_cast<void*>(thing),
+                    static_cast<unsigned>(thing->thingType));
+            }
+#endif
         }
     }
 }
@@ -4597,27 +4885,61 @@ static void DrawEntityCasterList(ccList& list, u16 blockNum, u32 vramHandle) {
 // DESCENDING (farthest first for back-to-front rendering), applies OffsetToPreventSeams,
 // checks InDrawList, renders entities + block geometry.
 void World::DrawEverythingHandler(const LVector* playerPos) {
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::Mark(PspPerf::RuntimeStage::WorldBegin);
+#endif
     MARKFUNCTION(0x8002A98C);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspStageWorldCalls = 0;
+    const u32 pspStageWorldCall = pspStageWorldCalls++;
+    if (pspStageWorldCall < 4u) {
+        Log::Get().LogMessage("[PSP Stage] draw world begin call=%lu", static_cast<unsigned long>(pspStageWorldCall));
+    }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    const bool probePspWorldRender = s_pspWorldRenderProbeCalls < 2;
+    s_pspWorldRenderProbe = probePspWorldRender;
+    if (probePspWorldRender) {
+        LOG("[PSP World] begin render call=%lu", static_cast<unsigned long>(s_pspWorldRenderProbeCalls));
+    }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("world render: begin");
 #endif
 
     if (!g_blockManager) {
         ASSERT(false);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        s_pspWorldRenderProbe = false;
+#endif
         return;
     }
     BlockManager& blockMgr = *g_blockManager;
 
-    if (blockMgr.GetNumBlocks() == 0) return;
+    if (blockMgr.GetNumBlocks() == 0) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspWorldRender) LOG("[PSP World] no blocks");
+        s_pspWorldRenderProbe = false;
+        ++s_pspWorldRenderProbeCalls;
+#endif
+        return;
+    }
 
     // PSX: DemandLoading when game state == 8
     if (g_game && g_game->GetState() == GameState::Play) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         PspPerf::Trace("world render: demand begin");
+    PspPerf::Mark(PspPerf::RuntimeStage::WorldDemandBegin);
 #endif
         blockMgr.DemandLoading();
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspStageWorldCall < 4u) {
+            Log::Get().LogMessage("[PSP Stage] demand done call=%lu loaded=%lu", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned long>(blockMgr.GetAlreadyLoadedCount()));
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         PspPerf::Trace("world render: demand done");
+    PspPerf::Mark(PspPerf::RuntimeStage::WorldDemandDone);
 #endif
     }
 
@@ -4644,7 +4966,20 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
         count++;
     }
 
-    if (count == 0) return;
+    if (count == 0) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspWorldRender) LOG("[PSP World] empty draw list loaded=%lu", static_cast<unsigned long>(loadedCount));
+        s_pspWorldRenderProbe = false;
+        ++s_pspWorldRenderProbeCalls;
+#endif
+        return;
+    }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspWorldRender) {
+        LOG("[PSP World] draw list count=%lu loaded=%lu",
+            static_cast<unsigned long>(count), static_cast<unsigned long>(loadedCount));
+    }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("world render: draw list done");
 #endif
@@ -4726,8 +5061,21 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 #endif
     for (u32 i = 0; i < visibleCount; i++) {
         DrawEntry& entry = drawArray[i];
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspStageWorldCall < 4u && i < 8u) {
+            Log::Get().LogMessage("[PSP Stage] block begin call=%lu pass=1 index=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned long>(i), static_cast<unsigned>(entry.block->blockNum));
+        }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspWorldRender) {
+            LOG("[PSP World] block begin pass1 index=%lu block=%u draw=%d",
+                static_cast<unsigned long>(i), static_cast<unsigned>(entry.block->blockNum),
+                blockMgr.InDrawList(entry.block->blockNum) ? 1 : 0);
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         PspPerf::Trace("world render: pass1 block begin");
+        PspPerf::Mark(PspPerf::RuntimeStage::WorldBlock, i, entry.block->blockNum);
 #endif
 
         // Copy block->pos to local and apply OffsetToPreventSeams
@@ -4753,6 +5101,12 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 
             // PSX: DrawLoop for each entity list
             if (g_ai) {
+#if !defined(PSP_STAGE_SKIP_ENTITIES)
+#if defined(PSP_STAGE_DIAGNOSTIC)
+                if (pspStageWorldCall < 4u && i < 8u) {
+                    Log::Get().LogMessage("[PSP Stage] entities begin call=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned>(bn));
+                }
+#endif
 #if MODERN_GRAPHICS
                 p3d::context->SetReceiveShadows(false);
                 ShadowCSM::SetCasterWorldOffset((f32)(localPos.x - entry.block->posX),
@@ -4760,19 +5114,39 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
                                                 (f32)(localPos.z - entry.block->posZ));
 #endif
                 ComEffect_BeginLateRenderQueue(static_cast<s32>(bn));
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+                if (probePspWorldRender) LOG("[PSP World] humanoids begin block=%u", static_cast<unsigned>(bn));
+#endif
                 DrawEntityList(g_ai->humanoidList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+                if (probePspWorldRender) LOG("[PSP World] humanoids done block=%u", static_cast<unsigned>(bn));
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: humanoids done");
 #endif
                 DrawEntityList(g_ai->inactivePickupList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+                if (probePspWorldRender) LOG("[PSP World] inactive done block=%u", static_cast<unsigned>(bn));
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: inactive pickups done");
 #endif
                 DrawEntityList(g_ai->pickupList, bn, vramHandle);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+                if (probePspWorldRender) LOG("[PSP World] pickups done block=%u", static_cast<unsigned>(bn));
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: pickups done");
 #endif
                 DrawEntityList(g_ai->moveList, bn, vramHandle);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+                if (pspStageWorldCall < 4u && i < 8u) {
+                    Log::Get().LogMessage("[PSP Stage] entities done call=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned>(bn));
+                }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+                if (probePspWorldRender) LOG("[PSP World] moves done block=%u", static_cast<unsigned>(bn));
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: moves done");
 #endif
@@ -4782,6 +5156,7 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 #endif
 #if MODERN_GRAPHICS
                 ShadowCSM::SetCasterWorldOffset(0.0f, 0.0f, 0.0f);
+#endif
 #endif
             }
 
@@ -4795,12 +5170,30 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
             p3d::context->SetReceiveShadows(true);
 #endif
             p3d::context->SetWorldMatrix(blockBaseWorld);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+            if (pspStageWorldCall < 4u && i < 8u) {
+                Log::Get().LogMessage("[PSP Stage] geometry begin call=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned>(bn));
+            }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
             PspPerf::Trace("world render: block geometry begin");
+    PspPerf::Mark(PspPerf::RuntimeStage::WorldGeometryBegin);
 #endif
             entry.block->Draw(&localPos);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+            if (pspStageWorldCall < 4u && i < 8u) {
+                Log::Get().LogMessage("[PSP Stage] geometry done call=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned>(bn));
+                Log::Get().LogMessage("[PSP Stage] block done call=%lu pass=1 index=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned long>(i), static_cast<unsigned>(entry.block->blockNum));
+            }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (probePspWorldRender) {
+                LOG("[PSP World] block geometry done block=%u", static_cast<unsigned>(bn));
+            }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
             PspPerf::Trace("world render: block geometry done");
+    PspPerf::Mark(PspPerf::RuntimeStage::WorldGeometryDone);
 #endif
 #if MODERN_GRAPHICS
             p3d::context->SetReceiveShadows(false);
@@ -4823,6 +5216,14 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
     }
 
     EndModelShadowQueue();
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspStageWorldCall < 4u) {
+        Log::Get().LogMessage("[PSP Stage] pass1 done call=%lu", static_cast<unsigned long>(pspStageWorldCall));
+    }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspWorldRender) LOG("[PSP World] pass1 done");
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("world render: pass1 done");
 #endif
@@ -4870,13 +5271,26 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
         ComEffect_SetSeamOffset(0, 0, 0);
     }
     ComEffect_ClearLateRenderQueue();
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspStageWorldCall < 4u) {
+        Log::Get().LogMessage("[PSP Stage] pass2 done call=%lu", static_cast<unsigned long>(pspStageWorldCall));
+    }
+#endif
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     p3d::context->EnableZBuffer(true);
     p3d::context->SetDepthClamp(false);
 
     p3d::context->SetWorldMatrix(passBaseWorld);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspWorldRender) {
+        LOG("[PSP World] pass2 done");
+        s_pspWorldRenderProbe = false;
+        ++s_pspWorldRenderProbeCalls;
+    }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("world render: pass2 done");
+    PspPerf::Mark(PspPerf::RuntimeStage::WorldEnd);
 #endif
 
     // PSX: DebugDrawSector, ExitLayer(2), profile end(7)
@@ -5114,6 +5528,11 @@ void World::OffsetToPreventSeams(LVector& pos, const LVector& playerPos) {
 }
 
 void World::Unload() {
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP VRAM] World::Unload enter handle=%lu entries=%lu",
+        static_cast<unsigned long>(vramHandle),
+        static_cast<unsigned long>(streamEntries.size()));
+#endif
     if (g_hud) {
         g_hud->OnUnloadLevel();
     }
@@ -5188,6 +5607,11 @@ void World::Unload() {
         p3d::context->DestroyVRAMTexture(vramHandle);
         vramHandle = 0;
     }
+
+#if defined(PSP_GU_DIAGNOSTIC)
+    Log::Get().LogMessage("[PSP VRAM] World::Unload exit handle=%lu",
+        static_cast<unsigned long>(vramHandle));
+#endif
 
     rsEvent(RS_UNLOAD_LEVEL, 0, 0, 0);
 }

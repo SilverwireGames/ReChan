@@ -115,7 +115,27 @@ void Thing::Draw() {
         m->rotX = (u16)(drawOrient.x & 0xFFFF);
         m->rotY = (u16)(drawOrient.y & 0xFFFF);
         m->rotZ = (u16)(drawOrient.z & 0xFFFF);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        static u32 pspPlatformDrawProbe = 0;
+        const u32 pspPlatformDrawProbeId = pspPlatformDrawProbe++;
+        if (thingType == AITypes::TT_PLATFORM) {
+            if (pspPlatformDrawProbeId < 8u) {
+                LOG("[PSP Thing] platform draw begin #%lu thing=%p model=%p drawable=%p type=%ld",
+                    static_cast<unsigned long>(pspPlatformDrawProbeId), static_cast<void*>(this),
+                    static_cast<void*>(m), static_cast<void*>(m->drawable),
+                    static_cast<long>(m->drawableType));
+            }
+        }
+#else
+        const u32 pspPlatformDrawProbeId = 0u;
+#endif
         m->Show(0);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (thingType == AITypes::TT_PLATFORM && pspPlatformDrawProbeId < 8u) {
+            LOG("[PSP Thing] platform draw done #%lu thing=%p",
+                static_cast<unsigned long>(pspPlatformDrawProbeId), static_cast<void*>(this));
+        }
+#endif
         return;
     }
 

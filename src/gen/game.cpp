@@ -313,11 +313,31 @@ void Game::InternalReset() {
 
 // PSX: ProcessHandlers__4Game (GAME.CPP:2756, 0x8002B4F0)
 // Iterates both handler sets and calls each handler's funcPtr
-static void ProcessHandlerList(ccMinList& list) {
+static void ProcessHandlerList(ccMinList& list, const char* pspProbeLabel = nullptr) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspHandlerProbeCalls = 0;
+    const bool probePspHandlers = pspProbeLabel != nullptr && pspHandlerProbeCalls < 2;
+    if (probePspHandlers) {
+        LOG("[PSP Handler] %s list=%p head=%p tail=%p",
+            pspProbeLabel, static_cast<void*>(&list),
+            static_cast<void*>(list.head), static_cast<void*>(list.tail));
+    }
+#else
+    (void)pspProbeLabel;
+#endif
     u32 handlerIndex = 0;
     for (ccMinNode* n = list.head; n; ) {
         ccMinNode* next = n->next;
         Handler* h = static_cast<Handler*>(n);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspHandlers) {
+            LOG("[PSP Handler] %s index=%lu handler=%p func=%p begin",
+                pspProbeLabel,
+                static_cast<unsigned long>(handlerIndex),
+                static_cast<void*>(h),
+                reinterpret_cast<void*>(h->funcPtr));
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         if (handlerIndex < 16) {
             char trace[48];
@@ -329,6 +349,14 @@ static void ProcessHandlerList(ccMinList& list) {
         if (h->funcPtr) {
             h->funcPtr(h);
         }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspHandlers) {
+            LOG("[PSP Handler] %s index=%lu handler=%p done",
+                pspProbeLabel,
+                static_cast<unsigned long>(handlerIndex),
+                static_cast<void*>(h));
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         if (handlerIndex < 16) {
             char trace[48];
@@ -340,6 +368,11 @@ static void ProcessHandlerList(ccMinList& list) {
         n = next;
         ++handlerIndex;
     }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspHandlers) {
+        ++pspHandlerProbeCalls;
+    }
+#endif
 }
 
 static void UpdateSpatialAudioListener() {
@@ -497,6 +530,15 @@ void Game::AnimateEverythingHandler(Handler*) {
 // NOTE: tView::BeginRender/EndRender are handled by Display's handlers (pri 62/-62).
 void Game::DrawEverythingHandlerCB(Handler*) {
     MARKFUNCTION(0x8002A98C);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspWorldStageProbe = 0;
+#endif
+#if defined(RC_PLATFORM_PSP) && (!defined(NDEBUG) || defined(PSP_STAGE_DIAGNOSTIC))
+    static u32 pspWorldCallbackProbe = 0;
+    if (pspWorldCallbackProbe < 4u) {
+        Log::Get().LogMessage("[PSP World] callback entry #%lu", static_cast<unsigned long>(pspWorldCallbackProbe++));
+    }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: world begin");
 #endif
@@ -512,16 +554,39 @@ void Game::DrawEverythingHandlerCB(Handler*) {
     p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     p3d::context->SetCullMode(PDDI_CULL_NONE);
 
+#if defined(RC_PLATFORM_PSP)
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspWorldStageProbe < 4u) {
+        Log::Get().LogMessage("[PSP Stage] VRAM flipbook bridge bypassed");
+    }
+#endif
+    // The legacy face flipbook path mutates streamed texture data through a
+    // desktop-oriented callback. On PSP it can receive a stale puppet after
+    // the first frame and block the render thread before the next display
+    // list. Keep the native frame path deterministic; static face textures
+    // remain available and the bridge can be reintroduced once it is backed
+    // by a validated PSP upload queue.
+#else
     if (g_director) {
 #if HIGH_FPS_PLAY_PRESENTATION
         const bool isPlayRenderOnlyFrame = (g_game && g_game->GetState() == GameState::Play && g_time && !g_time->DidPlayLogicStepThisFrame());
-        if (!isPlayRenderOnlyFrame)
+        if (!isPlayRenderOnlyFrame) {
 #endif
         g_director->updateVramAnims();
+#if HIGH_FPS_PLAY_PRESENTATION
+        }
+#endif
     }
+#endif
 
     // PSX: DrawBG__5BackG is called before block/world geometry draw.
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspWorldStageProbe < 4u) Log::Get().LogMessage("[PSP Stage] before background #%lu", static_cast<unsigned long>(pspWorldStageProbe));
+#endif
     BackG::DrawBG();
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspWorldStageProbe < 4u) Log::Get().LogMessage("[PSP Stage] after background #%lu", static_cast<unsigned long>(pspWorldStageProbe));
+#endif
 
 #if MODERN_GRAPHICS
     // Prepare this frame's shadow cascades. World::Render runs a caster-only
@@ -529,12 +594,26 @@ void Game::DrawEverythingHandlerCB(Handler*) {
     // Quality is Low.
     ShadowCSM::BeginFrame();
 #endif
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspWorldStageProbe < 4u) Log::Get().LogMessage("[PSP Stage] before player/render #%lu", static_cast<unsigned long>(pspWorldStageProbe));
+#endif
 
     // PSX: passes player position (MEMORY[0x1C] = thePlayer->pos) to DrawEverythingHandler,
     // NOT the camera position. Used for block distance sorting and seam offsets.
     const LVector& playerPos = Player::s_player ? Player::s_player->pos
         : g_display->GetCamera()->GetPosition();
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    static u32 pspWorldCallbackStageProbe = 0;
+    if (pspWorldCallbackStageProbe < 4u) {
+        Log::Get().LogMessage("[PSP Stage] world before Render #%lu", static_cast<unsigned long>(pspWorldCallbackStageProbe));
+    }
+#endif
     world->Render(&playerPos);
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    if (pspWorldCallbackStageProbe < 4u) {
+        Log::Get().LogMessage("[PSP Stage] world after Render #%lu", static_cast<unsigned long>(pspWorldCallbackStageProbe++));
+    }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: world done");
 #endif
@@ -1512,8 +1591,20 @@ bool Game::gsPrePlayState(Game* game) {
         g_display->SetCursorCaptured(true);
 
 #if CUSTOM_MENU
+#if defined(RC_PLATFORM_PSP)
+    // The PSP front end already performed the loading transition.  The
+    // desktop handler's time-based play fade can remain active when the
+    // emulated VBlank clock is not advancing through this state, leaving a
+    // fullscreen black quad over an otherwise valid world.  Keep the native
+    // PSP path deterministic: enter gameplay fully revealed and let the
+    // streaming music started by PreloadMusicTrack continue immediately.
+    game->playFadeInActive = false;
+    FadeEnd();
+    g_deferLevelBeginMusic = false;
+#else
     game->playFadeInActive = true;
     FadeBegin();
+#endif
 #endif
 
     // PSX: SetState(Play=8)
@@ -1555,6 +1646,14 @@ bool Game::gsPrePlayState(Game* game) {
 bool Game::gsPlayState(Game* game) {
     MARKFUNCTION(0x80029C6C); // gsPlayState
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspPlayStateProbeFrames = 0;
+    const bool probePspPlayState = pspPlayStateProbeFrames < 4;
+    if (probePspPlayState) {
+        LOG("[PSP Play] enter state=%d directorActive=%d", static_cast<int>(game->state), g_directorActive);
+    }
+#endif
+
     if (game->autosavePhase != 0) {
         const f32 dt = g_time ? g_time->GetDeltaTime() : (1.0f / 30.0f);
         if (game->autosavePhase == 1) {
@@ -1590,6 +1689,9 @@ bool Game::gsPlayState(Game* game) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         PspPerf::Trace("play step: director begin");
 #endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) LOG("[PSP Play] before director");
+#endif
         for (s32 i = 0; i < logicSteps; ++i) {
             if (g_inputManager) {
                 g_inputManager->CommitHostPads();
@@ -1605,23 +1707,51 @@ bool Game::gsPlayState(Game* game) {
             if (g_director) {
                 g_director->Process();
             }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (probePspPlayState) LOG("[PSP Play] after director");
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
             PspPerf::Trace("play step: director done");
 #endif
 
             jcsUpdateDialogCD();
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (probePspPlayState) LOG("[PSP Play] after dialog update");
+#endif
             AdvanceGameplayAnimationOneTick();
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (probePspPlayState) LOG("[PSP Play] after animation");
+#endif
         }
 
         if (g_display && g_display->GetCamera()) {
             g_display->GetCamera()->UpdateHighFPS();
         }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) LOG("[PSP Play] after camera");
+#endif
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) LOG("[PSP Play] before spatial audio");
+#endif
         UpdateSpatialAudioListener();
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) {
+            LOG("[PSP Play] after audio drawList head=%p tail=%p",
+                static_cast<void*>(game->handlerSet2.handlerList.head),
+                static_cast<void*>(game->handlerSet2.handlerList.tail));
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         PspPerf::Trace("play step: audio done");
 #endif
-        ProcessHandlerList(game->handlerSet2.handlerList);
+        ProcessHandlerList(game->handlerSet2.handlerList, "play-draw");
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) {
+            LOG("[PSP Play] after draw handlers");
+            ++pspPlayStateProbeFrames;
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         PspPerf::Trace("play step: handlers done");
 #endif
@@ -1640,7 +1770,13 @@ bool Game::gsPlayState(Game* game) {
         if (g_time) {
             g_time->Step();
         }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) LOG("[PSP Play] before logic handlers");
+#endif
         ProcessHandlerList(game->handlerSet1.handlerList);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayState) LOG("[PSP Play] after logic handlers");
+#endif
 
         jcsUpdateDialogCD();
         AdvanceGameplayAnimationOneTick();
@@ -1668,12 +1804,30 @@ bool Game::gsPlayState(Game* game) {
         g_display->GetCamera()->UpdateHighFPS();
     }
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspPlayState) LOG("[PSP Play] after camera");
+#endif
+
     UpdateSpatialAudioListener();
+
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspPlayState) LOG("[PSP Play] after spatial audio");
+#endif
 
     // PSX: CInteractiveMusicController::Think (MSCCTRLR.CPP:56) - per-frame FAG song switching.
     InteractiveMusicControllerThink();
 
-    ProcessHandlerList(game->handlerSet2.handlerList);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspPlayState) LOG("[PSP Play] after music");
+#endif
+
+    ProcessHandlerList(game->handlerSet2.handlerList, "play-draw");
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (probePspPlayState) {
+        LOG("[PSP Play] after draw handlers");
+        ++pspPlayStateProbeFrames;
+    }
+#endif
     return true;
 #else
     if (g_directorActive) {
@@ -1987,9 +2141,13 @@ bool Game::gsQueueLevelLoad(Game* game) {
     }
 
     // PSX: MenuFade() - blocking fade to black
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: menu fade begin");
+#endif
     MenuFade();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: menu fade done");
+#endif
 
     // PSX: SetHUDVisible(0, 0, 1) - hide HUD during load
     if (g_hud) {
@@ -2038,13 +2196,17 @@ bool Game::gsQueueLevelLoad(Game* game) {
 
     // PSX: LoadLevel(world, targetLevelIndex) - internally calls Construct
     // which spawns AI entities, resets Director, sets level script
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: world load begin");
+#endif
     if (!world->LoadLevelIndex(world->GetTargetLevelIndex())) {
         game->SetState(GameState::Error);
         return true;
     }
     LOG("[Game] QueueLevelLoad: level load complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: world load done");
+#endif
 
     // PSX: Camera setup data is prepared during World::LoadLevelIndex
     // via ExecuteLoadCallbacks -> cameraLoadFunc -> SetupPaths.
@@ -2054,7 +2216,7 @@ bool Game::gsQueueLevelLoad(Game* game) {
     }
 
     tMatrixCamera* cam = g_display->GetCamera()->GetP3DCamera();
-    cam->SetNearPlane(1.0f);
+    cam->SetNearPlane(Camera::kRenderNearPlane);
     cam->SetFarPlane(65535.0f);
 
     g_display->GetView().SetCamera(g_display->GetCamera()->GetP3DCamera());
@@ -2068,7 +2230,9 @@ bool Game::gsQueueLevelLoad(Game* game) {
     }
 
     // PSX: SetState(PrePlay=7)
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: preplay");
+#endif
     game->SetState(GameState::PrePlay);
 
     // PSX: jcsStartDialog() - initialize dialog/subtitle system

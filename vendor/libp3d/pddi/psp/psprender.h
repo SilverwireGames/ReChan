@@ -3,8 +3,8 @@
 // Native PSP PDDI backend.  The renderer deliberately uses the fixed
 // function GU instead of a desktop compatibility layer: the game submits the
 // same PDDI primitives, while PSX VRAM/CLUT pages are decoded once into a
-// bounded page cache in aligned main memory; the eDRAM remains reserved for
-// the double framebuffer and depth buffer.
+// bounded page cache in aligned main memory and the eDRAM left after the
+// double framebuffer and depth buffer.
 
 #include "pddi/pddi.h"
 #include "pddi/pdditex.h"
@@ -12,6 +12,10 @@
 #include "pddi/pddidev.h"
 
 #include <array>
+#include <cstddef>
+#include <cstdlib>
+#include <malloc.h>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,9 +26,39 @@ struct PspVertex {
     float x, y, z;
 };
 
+template <typename T, std::size_t Alignment>
+struct PspAlignedAllocator {
+    using value_type = T;
+
+    PspAlignedAllocator() noexcept = default;
+    template <typename U>
+    PspAlignedAllocator(const PspAlignedAllocator<U, Alignment>&) noexcept {}
+
+    T* allocate(std::size_t count) {
+        if (count > static_cast<std::size_t>(-1) / sizeof(T)) throw std::bad_alloc();
+        const std::size_t bytes = count * sizeof(T);
+        void* memory = memalign(Alignment, bytes ? bytes : Alignment);
+        if (!memory) throw std::bad_alloc();
+        return static_cast<T*>(memory);
+    }
+
+    void deallocate(T* memory, std::size_t) noexcept { std::free(memory); }
+
+    template <typename U>
+    struct rebind { using other = PspAlignedAllocator<U, Alignment>; };
+};
+
+template <typename T, typename U, std::size_t Alignment>
+constexpr bool operator==(const PspAlignedAllocator<T, Alignment>&,
+                          const PspAlignedAllocator<U, Alignment>&) noexcept { return true; }
+template <typename T, typename U, std::size_t Alignment>
+constexpr bool operator!=(const PspAlignedAllocator<T, Alignment>&,
+                          const PspAlignedAllocator<U, Alignment>&) noexcept { return false; }
+
 class pspPrimBuffer final : public pddiPrimBuffer {
 public:
     explicit pspPrimBuffer(const pddiPrimBufferDesc& desc);
+    ~pspPrimBuffer() override;
 
     void SetVertexData(const void* data, u32 count) override;
     void SetIndices(const u16* indices, u32 count) override;
@@ -34,16 +68,26 @@ public:
 
     const PspVertex* GetVertices() const { return vertices.data(); }
     const u16* GetIndices() const { return indices.data(); }
-    float GetTPage(u16 index) const { return tpages[index]; }
-    float GetCba(u16 index) const { return cbas[index]; }
+    // Direct indexed submissions borrow the persistent vertex array until the
+    // current GU list is fenced. These hooks keep mutation/destruction from
+    // racing the asynchronous GE read.
+    void PrepareForMutation();
+    void MarkDirectSubmission();
+    float GetTPage(u16 index) const {
+        return index < tpages.size() ? tpages[index] : -1.0f;
+    }
+    float GetCba(u16 index) const {
+        return index < cbas.size() ? cbas[index] : 0.0f;
+    }
 
 private:
     pddiPrimType primType;
     u32 vertexFormat;
-    std::vector<PspVertex> vertices;
+    std::vector<PspVertex, PspAlignedAllocator<PspVertex, 16>> vertices;
     std::vector<float> tpages;
     std::vector<float> cbas;
     std::vector<u16> indices;
+    u32 directSubmissionSerial = 0;
 };
 
 class pspTexture final : public pddiTexture {
@@ -65,6 +109,7 @@ public:
     int GetStorageHeight() const { return storageHeight; }
     const u16* GetPixels() const { return pixels; }
     bool IsValid() const { return pixels != nullptr; }
+    std::size_t GetAllocatedBytes() const { return allocatedBytes; }
 
 private:
     int width = 0;
@@ -75,6 +120,7 @@ private:
     int storageHeight = 0;
     pddiFilterMode filterMode = PDDI_FILTER_NONE;
     u16* pixels = nullptr;
+    std::size_t allocatedBytes = 0;
     bool dirty = true;
 };
 
@@ -214,6 +260,9 @@ public:
     u32 CreateVRAMTexture(int w, int h, const u16* data) override;
     void DestroyVRAMTexture(u32 handle) override;
     void UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) override;
+    void UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
+                                 const u16* data, int x, int y,
+                                 int w, int h) override;
     void SetRealTextureMode(bool enabled) override { realTextureMode = enabled; }
     bool IsRealTextureModeEnabled() const override { return realTextureMode; }
     void SetRealTextureRect(float, float, float, float) override {}
@@ -230,15 +279,27 @@ public:
     void SetShadowDebugMode(int) override {}
 
     void ApplyShader(const pspShader* shader);
+    // Native PSX background sprite: reuse indexed pages, no RGBA heap copy.
+    void DrawVRAMQuad(u32 handle, u16 tpage, u16 cba,
+                      float x, float y, float w, float h,
+                      float u0, float v0, float u1, float v1, pddiColour color);
 
 private:
+    friend class pspDisplay;
+    friend class pspPrimBuffer;
+    friend class pspTexture;
     struct VramImage { u16* pixels = nullptr; int width = 0; int height = 0; };
     struct PageCache {
         u16* pixels = nullptr;
+        void* gpuPixels = nullptr;
         u32 handle = 0;
         u16 tpage = 0;
-        u16 cba = 0;
+        bool zeroKey = false;
+        u32 format = 0;
         u32 age = 0;
+        // Invalidation clears the key, but must retain both storage and this
+        // pin until the GE has consumed the submission that references them.
+        bool inFlight = false;
     };
 
     pspDisplay* display = nullptr;
@@ -255,20 +316,59 @@ private:
     bool realTextureMode = false;
     bool worldMirror = false;
     bool zBufferEnabled = true;
+    bool polygonOffsetEnabled = false;
+    u32 polygonOffset = 0;
     pddiCullMode cullMode = PDDI_CULL_NORMAL;
     pddiBlendMode blendMode = PDDI_BLEND_NONE;
     std::array<VramImage, 8> vramImages{};
-    std::array<PageCache, 8> pageCache{};
-    // Dynamic world geometry can submit more vertices than the GU display
-    // list can safely reserve for a whole frame. Keep one aligned, reusable
-    // staging batch in normal RAM and submit it in triangle-aligned chunks.
-    alignas(16) std::array<PspVertex, 8192> expandedVertices{};
+    // A decoded 256x256 PSX page is 128 KiB. Sixteen resident pages keep the
+    // active level inside the PSP user heap while avoiding render-path
+    // allocations; a larger cache starves streamed BLK geometry during load.
+    static constexpr u32 kPageCacheCapacity = 16;
+    std::array<PageCache, kPageCacheCapacity> pageCache{};
+    // These fixed arenas belong to the current GU submission. On saturation
+    // finish/sync the list before recycling; normal draws need no allocation
+    // or CPU/GE fence. Both expanded and indexed geometry use this storage.
+    static constexpr u32 kFrameVertexCapacity = 65536;
+    alignas(16) std::array<PspVertex, kFrameVertexCapacity> frameVertices{};
+    u32 frameVertexUsed = 0;
+    // Native GU indexed draws keep the source vertex once per prim buffer and
+    // submit a compact u16 index stream for each material run. The arena
+    // remains submission-owned because the GE reads it asynchronously after the
+    // CPU returns from sceGuDrawArray().
+    static constexpr u32 kFrameIndexCapacity = 131072;
+    alignas(16) std::array<u16, kFrameIndexCapacity> frameIndices{};
+    u32 frameIndexUsed = 0;
+    // Native indexed batches use local indices so each GU submission is
+    // self-contained.  The stamp table avoids clearing 65K entries for every
+    // material run while keeping the remap allocation-free.
+    static constexpr u32 kNativeRemapCapacity = 65536;
+    std::array<u16, kNativeRemapCapacity> nativeRemap{};
+    std::array<u32, kNativeRemapCapacity> nativeRemapStamp{};
+    std::array<u16, kNativeRemapCapacity> nativeRemapSource{};
+    u32 nativeRemapGeneration = 1;
+    // CLUT uploads are also asynchronous.  A per-page palette was mutable and
+    // could be changed by the next material before the GE consumed the prior
+    // sceGuClutLoad command; keep every palette in a submission immutable.
+    // The gameplay scene binds just under 500 material palettes per frame.
+    // Keep one complete frame in immutable RAM so CLUT pressure does not
+    // force a mid-frame Finish/Sync fence and stall the CPU every frame.
+    static constexpr u32 kFramePaletteCapacity = 512;
+    alignas(16) std::array<u16, kFramePaletteCapacity * 256> framePalettes{};
+    u32 framePaletteUsed = 0;
     u32 cacheAge = 1;
+    bool listOpen = false;
 
+    void FinishList();
+    void FlushList();
+    void EnsureListSpace(std::size_t payloadBytes = 0);
+    void EnsureDrawSpace(u32 vertexCount, u32 indexCount);
+    void* AllocateListMemory(std::size_t bytes);
+    void InvalidatePages(u32 handle);
     void Setup3DState();
     void Setup2DState();
-    void BindPage(float tpage, float cba);
-    u16* GetDecodedPage(u32 handle, u16 tpage, u16 cba);
+    void BindPage(float tpage, float cba, bool wordZeroKey = false);
+    PageCache* GetDecodedPage(u32 handle, u16 tpage);
     VramImage* GetVram(u32 handle);
     void Draw2D(const PspVertex* vertices, int count, pddiTexture* texture);
 };

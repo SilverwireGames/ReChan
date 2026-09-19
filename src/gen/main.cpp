@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
             p3d::io::SetPspDevice("ef0:");
         }
     }
-#if !defined(NDEBUG)
+#if !defined(NDEBUG) || defined(PSP_GU_DIAGNOSTIC) || defined(PSP_STAGE_DIAGNOSTIC)
     Log::Get().Init("PSP_LOG.TXT");
 #endif
 #endif
@@ -337,7 +337,7 @@ int main(int argc, char** argv) {
     PspPerf::Trace("main: game open");
 #endif
 
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && !defined(PSP_PERF_SOAK)
     // The profile EBOOT is intended for unattended PPSSPP/hardware captures.
     // Seed the first playable level and use the existing title auto-start path
     // so the measured window contains real Play frames rather than title/menu
@@ -361,6 +361,10 @@ int main(int argc, char** argv) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     u32 pspPlayTraceFrames = 0;
 #endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+    GameState pspLastObservedState = static_cast<GameState>(-1);
+    u32 pspStateTransitionProbe = 0;
+#endif
 
     while (!p3d::display->ShouldClose()) {
         f64 frameStart = Time::GetTimeInSeconds();
@@ -368,6 +372,15 @@ int main(int argc, char** argv) {
         f32 realDt = (f32)(frameStart - prevTime);
         prevTime = frameStart;
         g_time->Tick(realDt);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+        if (game.GetState() != pspLastObservedState && pspStateTransitionProbe < 24u) {
+            Log::Get().LogMessage("[PSP State] transition #%lu state=%d prev=%d",
+                static_cast<unsigned long>(pspStateTransitionProbe++),
+                static_cast<int>(game.GetState()),
+                static_cast<int>(game.GetPrevState()));
+            pspLastObservedState = game.GetState();
+        }
+#endif
 #if HIGH_FPS_PLAY_PRESENTATION
         const GameState curState = game.GetState();
         if (curState == GameState::EndLevelLoop) {
@@ -385,7 +398,20 @@ int main(int argc, char** argv) {
 
         ++rFrameCount;
         ++rFrameCount60;
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        static u32 pspTaskProbeFrames = 0;
+        const bool probePspTasks = game.GetState() == GameState::Play && pspTaskProbeFrames < 4;
+        if (probePspTasks) {
+            LOG("[PSP Frame] before frame tasks frame=%lu", static_cast<unsigned long>(rFrameCount));
+        }
+#endif
         rDoTaskList(&rFrameTaskList, static_cast<u32>(rFrameCount));
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspTasks) {
+            LOG("[PSP Frame] after frame tasks frame=%lu", static_cast<unsigned long>(rFrameCount));
+            ++pspTaskProbeFrames;
+        }
+#endif
 
         p3d::display->PollEvents();
 
@@ -418,6 +444,24 @@ int main(int argc, char** argv) {
 
         const GameState stateBeforeStep = game.GetState();
         const f64 stepT0 = Time::GetTimeInSeconds();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+        static u32 pspStageMainPlayFrames = 0;
+        const bool pspStageMainProbe = stateBeforeStep == GameState::Play
+            && pspStageMainPlayFrames < 8u;
+        if (pspStageMainProbe) {
+            Log::Get().LogMessage("[PSP Main Stage] before step frame=%lu play=%lu",
+                static_cast<unsigned long>(rFrameCount),
+                static_cast<unsigned long>(pspStageMainPlayFrames));
+        }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        static u32 pspPlayStepProbeFrames = 0;
+        const bool probePspPlayStep = stateBeforeStep == GameState::Play
+            && pspPlayStepProbeFrames < 4;
+        if (probePspPlayStep) {
+            LOG("[PSP Frame] before game step frame=%lu", static_cast<unsigned long>(rFrameCount));
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         const bool tracePspPlayFrame = stateBeforeStep == GameState::Play && pspPlayTraceFrames < 3;
         if (tracePspPlayFrame) {
@@ -427,6 +471,20 @@ int main(int argc, char** argv) {
         g_frameProfile.drawSubmitMs = 0.0f;
         g_frameProfile.swapMs = 0.0f;
         bool running = game.Step();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspStageMainProbe) {
+            Log::Get().LogMessage("[PSP Main Stage] after step frame=%lu state=%d running=%u",
+                static_cast<unsigned long>(rFrameCount),
+                static_cast<int>(game.GetState()), running ? 1u : 0u);
+        }
+#endif
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayStep) {
+            LOG("[PSP Frame] after game step frame=%lu state=%d running=%u",
+                static_cast<unsigned long>(rFrameCount),
+                static_cast<int>(game.GetState()), running ? 1u : 0u);
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         if (tracePspPlayFrame) {
             PspPerf::Trace("play: after Step");
@@ -457,7 +515,17 @@ int main(int argc, char** argv) {
             }
         }
         else {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (probePspPlayStep) {
+                LOG("[PSP Frame] before main tasks frame=%lu", static_cast<unsigned long>(rFrameCount));
+            }
+#endif
             rDoTaskList(&rMainTaskList, static_cast<u32>(rFrameCount60));
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+            if (probePspPlayStep) {
+                LOG("[PSP Frame] after main tasks frame=%lu", static_cast<unsigned long>(rFrameCount));
+            }
+#endif
         }
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         if (tracePspPlayFrame) {
@@ -469,9 +537,21 @@ int main(int argc, char** argv) {
         jcsUpdateDialogCD();
 
         g_time->WaitForFrameEnd(frameStart);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (probePspPlayStep) {
+            LOG("[PSP Frame] after wait frame=%lu", static_cast<unsigned long>(rFrameCount));
+            ++pspPlayStepProbeFrames;
+        }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
         if (tracePspPlayFrame) {
             PspPerf::Trace("play: after WaitForFrameEnd");
+        }
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+        if (pspStageMainProbe) {
+            Log::Get().LogMessage("[PSP Main Stage] after wait frame=%lu",
+                static_cast<unsigned long>(rFrameCount));
         }
 #endif
 #if defined(RC_PLATFORM_PSP)
@@ -489,6 +569,13 @@ int main(int argc, char** argv) {
             if (PspPerf::ShouldStop()) {
                 break;
             }
+#if defined(PSP_STAGE_DIAGNOSTIC)
+            if (pspStageMainProbe) {
+                Log::Get().LogMessage("[PSP Main Stage] after profile frame=%lu",
+                    static_cast<unsigned long>(rFrameCount));
+                ++pspStageMainPlayFrames;
+            }
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
             if (tracePspPlayFrame) {
                 PspPerf::Trace("play: after RecordFrame");
@@ -547,7 +634,7 @@ int main(int argc, char** argv) {
 #endif
 
     LOG("Clean shutdown");
-#if !defined(NDEBUG)
+#if !defined(NDEBUG) || defined(PSP_GU_DIAGNOSTIC)
     Log::Get().Shutdown();
 #endif
 

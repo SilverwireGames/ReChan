@@ -304,7 +304,30 @@ void Obstacle::Draw() {
         m->rotX = (u16)(drawOrient.x & 0xFFFF);
         m->rotY = (u16)(drawOrient.y & 0xFFFF);
         m->rotZ = (u16)(drawOrient.z & 0xFFFF);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        static u32 pspObstacleDrawProbe = 0;
+        const u32 pspObstacleDrawProbeId = pspObstacleDrawProbe++;
+        if (thingType == AITypes::TT_PLATFORM && pspObstacleDrawProbeId < 8u) {
+            LOG("[PSP Obstacle] platform draw begin #%lu thing=%p model=%p drawable=%p type=%ld",
+                static_cast<unsigned long>(pspObstacleDrawProbeId), static_cast<void*>(this),
+                static_cast<void*>(m), static_cast<void*>(m->drawable),
+                static_cast<long>(m->drawableType));
+            LOG("[PSP Obstacle] model dispatch begin #%lu model_word0=%08lX",
+                static_cast<unsigned long>(pspObstacleDrawProbeId),
+                static_cast<unsigned long>(reinterpret_cast<const u32*>(m)[0]));
+        }
+#else
+        const u32 pspObstacleDrawProbeId = 0u;
+#endif
         m->Show(0);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        if (thingType == AITypes::TT_PLATFORM && pspObstacleDrawProbeId < 8u) {
+            LOG("[PSP Obstacle] model dispatch done #%lu",
+                static_cast<unsigned long>(pspObstacleDrawProbeId));
+            LOG("[PSP Obstacle] platform draw done #%lu thing=%p",
+                static_cast<unsigned long>(pspObstacleDrawProbeId), static_cast<void*>(this));
+        }
+#endif
     }
 }
 

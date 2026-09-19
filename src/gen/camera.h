@@ -21,6 +21,13 @@ bool EvalCubic(s32* curValue, s32* accel, s32 target, s32 velocity, s32 time);
 
 class Camera {
 public:
+    // World coordinates span thousands of units. Near=1 collapses distant
+    // surfaces into the same values in the PSP's 16-bit depth buffer.
+#if defined(RC_PLATFORM_PSP)
+    static constexpr f32 kRenderNearPlane = 64.0f;
+#else
+    static constexpr f32 kRenderNearPlane = 1.0f;
+#endif
     Camera();
     ~Camera();
 

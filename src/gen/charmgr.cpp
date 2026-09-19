@@ -1686,9 +1686,16 @@ void CharacterManager::LoadAnimationBatch(u32 type, s32 animEnum, CharMgrCallbac
     // Read and process TexturePage for this animation
     s32 p3dSize = 0;
     u8* p3dBuf = cf->ReadResource(p3dIdx, &p3dSize);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[AnimLoad/PSP] resources type=%u enum=%d animBytes=%d texBytes=%d",
+        type, animEnum, animSize, p3dSize);
+#endif
     if (p3dBuf) {
         // PSX: AnimLoadCallback creates loaders, calls P3DLoad for textures
         P3DLoadTextures(p3dBuf, p3dSize, g_charNameTable[type]);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        LOG("[AnimLoad/PSP] textures done type=%u enum=%d", type, animEnum);
+#endif
     }
 
     // PSX decodes additional animation classes here; on the current host path,
@@ -1698,6 +1705,9 @@ void CharacterManager::LoadAnimationBatch(u32 type, s32 animEnum, CharMgrCallbac
         // ParseMulti handles single and multi-block (tSequenceAnim) payloads.
         // It takes ownership of animBuf on success; free it only on failure.
         void* parsed = TransformAnim::ParseMulti(animBuf, (u32)animSize);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        LOG("[AnimLoad/PSP] parse done type=%u enum=%d parsed=%p", type, animEnum, parsed);
+#endif
         if (parsed) {
             animPtrs[handleIdx] = parsed;
         }
@@ -1720,18 +1730,36 @@ void CharacterManager::LoadAnimationBatch(u32 type, s32 animEnum, CharMgrCallbac
     }
 
     if (p3dBuf) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        LOG("[AnimLoad/PSP] before free p3d type=%u enum=%d", type, animEnum);
+#endif
         std::free(p3dBuf);
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+        LOG("[AnimLoad/PSP] after free p3d type=%u enum=%d", type, animEnum);
+#endif
     }
 
     // Store handle in slot's anim table
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[AnimLoad/PSP] before store handle type=%u enum=%d handle=%d", type, animEnum, handleIdx);
+#endif
     if (animEnum >= 0 && animEnum < (s32)CharSlot::ANIM_TABLE_SIZE) {
         slot.animIndexTable[animEnum] = (u8)handleIdx;
     }
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[AnimLoad/PSP] after store handle type=%u enum=%d handle=%d", type, animEnum, handleIdx);
+#endif
 
     // Decrement initial refcount (PSX does this after callback)
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[AnimLoad/PSP] before refcount/callback type=%u enum=%d handle=%d", type, animEnum, handleIdx);
+#endif
     animRefCounts[handleIdx]--;
 
     if (callback) callback->Callback();
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    LOG("[AnimLoad/PSP] after refcount/callback type=%u enum=%d handle=%d", type, animEnum, handleIdx);
+#endif
 }
 
 // PSX: UnloadAnimation (hash overload) (CHARMGR.CPP:1740, 0x8003A7E8)

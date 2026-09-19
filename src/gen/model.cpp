@@ -847,7 +847,24 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspGeoDrawProbe = 0;
+    const u32 pspGeoDrawProbeId = pspGeoDrawProbe++;
+    const bool pspGeoProbe = pspGeoDrawProbeId < 64u;
+    if (pspGeoProbe) {
+        LOG("[PSP GeoDraw] begin #%lu geo=%p mesh=%p lighting=%d dyn=%lu",
+            static_cast<unsigned long>(pspGeoDrawProbeId), static_cast<void*>(geo),
+            static_cast<void*>(geo->meshBuffer), applyLighting ? 1 : 0,
+            static_cast<unsigned long>(geo->dynamicVertCount));
+    }
+#else
+    const bool pspGeoProbe = false;
+#endif
+
     p3d::context->SetCullMode(PDDI_CULL_NONE);
+    if (pspGeoProbe) {
+        LOG("[PSP GeoDraw] after cull");
+    }
 
     if (geo->usesSemiTrans) {
         pddiBlendMode blendMode = PDDI_BLEND_ALPHA;
@@ -859,6 +876,9 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         }
         p3d::context->SetBlendMode(blendMode);
     }
+    if (pspGeoProbe) {
+        LOG("[PSP GeoDraw] after blend");
+    }
 
 #if defined(RC_PLATFORM_PSP)
     std::vector<GeoRenderVertex>& litVerts = g_pspModelFrameScratch.litGeoVertices;
@@ -869,15 +889,24 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     if (applyLighting && BuildLitGeoVerts(geo, litVerts)) {
         geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
     }
+    if (pspGeoProbe) {
+        LOG("[PSP GeoDraw] after lit verts");
+    }
 
     DrawTexturedMesh(geo->meshBuffer
 #if REAL_TEXTURE_RENDERING
                       , &geo->realTexGroups
 #endif
                       );
+    if (pspGeoProbe) {
+        LOG("[PSP GeoDraw] after draw");
+    }
 
     if (!litVerts.empty()) {
         geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
+    }
+    if (pspGeoProbe) {
+        LOG("[PSP GeoDraw] after restore verts");
     }
 
     if (geo->usesSemiTrans) {
@@ -1421,7 +1450,26 @@ void DrawableGeo::Display(u32 flags) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspDrawableGeoProbe = 0;
+    const u32 pspDrawableGeoProbeId = pspDrawableGeoProbe++;
+    const bool pspDrawableProbe = pspDrawableGeoProbeId < 32u;
+    if (pspDrawableProbe) {
+        LOG("[PSP DrawableGeo] begin #%lu original=%p mesh=%p flags=%08lX",
+            static_cast<unsigned long>(pspDrawableGeoProbeId),
+            static_cast<void*>(original), static_cast<void*>(original->meshBuffer),
+            static_cast<unsigned long>(flags));
+    }
+#endif
+
     DrawGeoPartMesh(original, (flags & kDisplayFlagApplyGeoLighting) != 0u);
+
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    if (pspDrawableProbe) {
+        LOG("[PSP DrawableGeo] done #%lu",
+            static_cast<unsigned long>(pspDrawableGeoProbeId));
+    }
+#endif
 }
 
 DrawableETree::DrawableETree(OriginalETree* orig) {
@@ -2152,6 +2200,17 @@ GModel::~GModel() {
 }
 
 void GModel::Show(u32 flags) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspGModelEntryProbe = 0;
+    const u32 pspGModelEntryProbeId = pspGModelEntryProbe++;
+    if (pspGModelEntryProbeId < 16u) {
+        LOG("[PSP GModel] entry #%lu model=%p vword=%08lX drawable=%p back=%p flags=%08lX",
+            static_cast<unsigned long>(pspGModelEntryProbeId), static_cast<void*>(this),
+            static_cast<unsigned long>(reinterpret_cast<const u32*>(this)[0]),
+            static_cast<void*>(drawable), static_cast<void*>(backPtr),
+            static_cast<unsigned long>(flags));
+    }
+#endif
     MARKFUNCTION(0x8006EA7C);
 
     modelFlags &= ~0x30;
@@ -2160,7 +2219,37 @@ void GModel::Show(u32 flags) {
         return;
     }
 
-    if (g_environmentManager) {
+#if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
+    static u32 pspGModelProbe = 0;
+    const u32 pspGModelProbeId = pspGModelProbe++;
+    const bool pspProbe = backPtr->thingType == 201u && pspGModelProbeId < 12u;
+    if (pspProbe) {
+        LOG("[PSP GModel] begin #%lu model=%p drawable=%p ambient=%p hw=%p count=%ld flags=%08lX",
+            static_cast<unsigned long>(pspGModelProbeId), static_cast<void*>(this),
+            static_cast<void*>(drawable), static_cast<void*>(ambientLight), hwLights,
+            static_cast<long>(hwLightCount), static_cast<unsigned long>(flags));
+    }
+#else
+    const bool pspProbe = false;
+#endif
+
+#if defined(RC_PLATFORM_PSP)
+    const bool pspSkipLocalLights = backPtr->thingType == 201u;
+#else
+    const bool pspSkipLocalLights = false;
+#endif
+
+    // Most PSP geometry models (platforms, props and collision scenery) do
+    // not own a local ambient/hardware light. Avoid walking the full lighting
+    // volume graph for those objects: besides being wasted work, the legacy
+    // linked-list lighting data can be transient while a level is streaming.
+    // Models that actually carry light state still use the original path.
+#if defined(RC_PLATFORM_PSP)
+    const bool needsModelLighting = false;
+#else
+    const bool needsModelLighting = true;
+#endif
+    if (g_environmentManager && needsModelLighting && !pspSkipLocalLights) {
         const u16 thingType = backPtr->thingType;
         const bool inGatedTypeRange = (thingType >= 400u && thingType < 474u);
         const bool forceLighting = (*(reinterpret_cast<const u8*>(backPtr) + 113u) != 0u);
@@ -2168,9 +2257,12 @@ void GModel::Show(u32 flags) {
             g_environmentManager->lighting.DoModelLighting(backPtr);
         }
     }
+    if (pspProbe) {
+        LOG("[PSP GModel] after lighting");
+    }
 
     bool addedHwLights[3] = { false, false, false };
-    if (g_environmentManager && hwLights && hwLightCount > 0) {
+    if (g_environmentManager && !pspSkipLocalLights && hwLights && hwLightCount > 0) {
         HardwareLight* modelLights = static_cast<HardwareLight*>(hwLights);
         const s32 lightCount = (hwLightCount < 3) ? hwLightCount : 3;
 
@@ -2189,8 +2281,13 @@ void GModel::Show(u32 flags) {
         }
     }
 
-    if (ambientLight) {
+    if (!pspSkipLocalLights && ambientLight) {
         static_cast<AmbientLight*>(ambientLight)->SetPortToLight();
+    }
+
+    if (pspProbe) {
+        LOG("[PSP GModel] after lights ambient=%p hw=%p count=%ld",
+            static_cast<void*>(ambientLight), hwLights, static_cast<long>(hwLightCount));
     }
 
     modelFlags |= 0x50;
@@ -2227,7 +2324,11 @@ void GModel::Show(u32 flags) {
     const Mat4 savedWorld = p3d::context->GetWorldMatrix();
     p3d::context->SetWorldMatrix(world);
 
-    const bool applyGeoLighting = ambientLight || (hwLights && hwLightCount > 0);
+    if (pspProbe) {
+        LOG("[PSP GModel] after world matrix");
+    }
+
+    const bool applyGeoLighting = !pspSkipLocalLights && (ambientLight || (hwLights && hwLightCount > 0));
     const u32 displayFlags = applyGeoLighting ? (flags | kDisplayFlagApplyGeoLighting) : flags;
 
 #if MODERN_GRAPHICS
@@ -2237,7 +2338,7 @@ void GModel::Show(u32 flags) {
             ShadowCSM::DrawCasterIntoCascades(drawable, displayFlags);
         }
 
-        if (ambientLight) {
+        if (!pspSkipLocalLights && ambientLight) {
             RestoreWorldAmbientLightToPort();
         }
         if (g_environmentManager) {
@@ -2260,6 +2361,9 @@ void GModel::Show(u32 flags) {
     }
 #endif
     drawable->Display(displayFlags);
+    if (pspProbe) {
+        LOG("[PSP GModel] after drawable display");
+    }
 #if MODERN_GRAPHICS
     if (receiveMappedShadows) {
         p3d::context->SetReceiveShadows(false);
@@ -2267,11 +2371,11 @@ void GModel::Show(u32 flags) {
     }
 #endif
 
-    if (ambientLight) {
+    if (!pspSkipLocalLights && ambientLight) {
         RestoreWorldAmbientLightToPort();
     }
 
-    if (g_environmentManager) {
+    if (g_environmentManager && !pspSkipLocalLights) {
         for (s32 slot = 0; slot < 3; slot++) {
             if (addedHwLights[slot]) {
                 g_environmentManager->lighting.RemoveLightFromPort(slot);

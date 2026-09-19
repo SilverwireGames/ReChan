@@ -276,6 +276,23 @@ public:
     // wasteful and, on tighter GPU memory budgets, can exhaust the
     // allocator; a no-op safety net if handle is 0.
     virtual void UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) = 0;
+    // Updates a dirty rectangle of a raw PSX VRAM texture. The source points
+    // to the full row-major VRAM image, allowing narrow animated uploads to
+    // avoid copying and invalidating the entire 1024x512 texture. Backends
+    // that do not need this optimization keep the default no-op; the PSP
+    // backend overrides it because its decoded page cache is explicit.
+    virtual void UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
+                                         const u16* data, int x, int y,
+                                         int w, int h) {
+        (void)handle;
+        (void)textureW;
+        (void)textureH;
+        (void)data;
+        (void)x;
+        (void)y;
+        (void)w;
+        (void)h;
+    }
 
     // Real-texture rendering: an alternate 3D texturing path that samples a
     // real 2D texture (bound via SetTexture) instead of the PSX VRAM atlas.
