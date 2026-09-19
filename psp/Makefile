@@ -74,9 +74,34 @@ COMMON_FLAGS = $(DEFINES) -std=gnu++17 -G0 -ffunction-sections -fdata-sections \
 CFLAGS += $(COMMON_FLAGS)
 CXXFLAGS += $(COMMON_FLAGS)
 ifeq ($(BUILD_MODE),debug)
-CXXFLAGS += -O0 -g3 -DPSP_PERF_TELEMETRY
+CXXFLAGS += -O0 -g3 -DPSP_PERF_TELEMETRY -DPSP_TRACE_TELEMETRY
+else ifeq ($(BUILD_MODE),diagnostic)
+# Keep the diagnostic binary representative of the non-logging renderer:
+# NDEBUG removes the broad draw probes and PSP_TRACE_TELEMETRY is deliberately
+# omitted because synchronous Memory Stick writes perturb the GE scheduling.
+# PSP_GU_DIAGNOSTIC enables only the bounded markers around the suspect GU
+# submission path.
+CXXFLAGS += -O0 -g3 -DNDEBUG -DPSP_PERF_TELEMETRY -DPSP_GU_DIAGNOSTIC
+else ifeq ($(BUILD_MODE),diagnostic-opt)
+# Keep the bounded GU markers, but compile the renderer at the same speed as
+# the profile build.  This isolates genuine PSP/PPSSPP stalls from the cost of
+# the O0 diagnostic binary.  The extra perf checkpoints are intentionally
+# limited to the first few frames and are not part of shipping builds.
+CXXFLAGS += -O3 -g3 -DNDEBUG -DPSP_PERF_TELEMETRY -DPSP_GU_DIAGNOSTIC -DPSP_PERF_DIAGNOSTIC
+else ifeq ($(BUILD_MODE),stage-opt)
+# High-level stage markers only. Unlike GU diagnostics this does not log every
+# material/primitive, so it remains useful for locating a frame stall without
+# changing the renderer's scheduling characteristics.
+CXXFLAGS += -O3 -g3 -DNDEBUG -DPSP_PERF_TELEMETRY -DPSP_STAGE_DIAGNOSTIC
 else ifeq ($(BUILD_MODE),profile)
 CXXFLAGS += -O3 -DNDEBUG -DPSP_PERF_TELEMETRY
+else ifeq ($(BUILD_MODE),soak)
+# Manual normal boot and unbounded session; sample RAM without gameplay I/O.
+CXXFLAGS += -O3 -DNDEBUG -DPSP_PERF_TELEMETRY -DPSP_PERF_SOAK
+else ifeq ($(BUILD_MODE),usb-debug)
+# PSPLINK: retain release optimization and normal boot, with ELF symbols.
+# No synchronous trace/probe logging while measuring on real hardware.
+CXXFLAGS += -O3 -g3 -DNDEBUG -DPSP_PERF_TELEMETRY -DPSP_PERF_SOAK
 else ifeq ($(BUILD_MODE),shipping)
 CXXFLAGS += -Os -DNDEBUG
 else

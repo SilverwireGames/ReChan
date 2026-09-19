@@ -32,6 +32,9 @@ switch/libp3d/lib/
 psp/*.elf
 psp/*.PBP
 psp/*.SFO
+/dist/RECHAN/
+/dist/psp/
+/dist/psp-debug/
 
 # Vision Master workflow / local agent tooling (do not commit)
 .visionmaster/

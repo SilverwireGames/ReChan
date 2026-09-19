@@ -3,8 +3,8 @@ set -eu
 
 mode="${1:-release}"
 case "$mode" in
-    debug|profile|release|shipping) ;;
-    *) echo "usage: $0 [debug|profile|release|shipping]" >&2; exit 2 ;;
+    debug|profile|soak|release|shipping) ;;
+    *) echo "usage: $0 [debug|profile|soak|release|shipping]" >&2; exit 2 ;;
 esac
 
 if [ -z "${PSPDEV:-}" ] || [ ! -x "${PSPDEV}/bin/psp-g++" ]; then
