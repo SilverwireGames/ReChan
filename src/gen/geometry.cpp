@@ -9,6 +9,9 @@
 #include "pddi/pddidev.h"
 #include "pc/log.h"
 #include "psp/psp_perf.h"
+#if defined(RC_PLATFORM_PSP) && defined(PSP_NORMAL_LIGHT_CACHE)
+#include "psp/psp_normal_light_cache.h"
+#endif
 #if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #endif
@@ -1843,6 +1846,7 @@ pddiPrimBuffer* BuildPrimBufferFromRawPrimGeom(const u8* primData, u32 primSize
 }
 
 u32 RP_XformVertsLitCBF_CL(tPrimGeom* geometry, STreeJoint* joint, u32* fastCache, u16* scratch) {
+    PspPerf::ScopeTimer lightTimer(PspPerf::RendererCounter::SkinLightUs);
     MARKFUNCTION(0x80084F14);
 
     if (!geometry || !joint || !geometry->GetVertexList()) {
@@ -1874,6 +1878,9 @@ u32 RP_XformVertsLitCBF_CL(tPrimGeom* geometry, STreeJoint* joint, u32* fastCach
 
     const u32 startIndex = joint->primGeomStartIdx;
     const u32 endIndex = startIndex + joint->primGeomCount;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_NORMAL_LIGHT_CACHE)
+    PspNormalLightCache normalColours;
+#endif
     for (u32 vertexIndex = startIndex; vertexIndex < endIndex; vertexIndex++) {
         const u8* vertex = vertexList + vertexIndex * 8;
         if (scratch) {
@@ -1885,7 +1892,23 @@ u32 RP_XformVertsLitCBF_CL(tPrimGeom* geometry, STreeJoint* joint, u32* fastCach
             u8 litR = 0;
             u8 litG = 0;
             u8 litB = 0;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_NORMAL_LIGHT_CACHE)
+            bool hit = false;
+            const u32 colour = normalColours.Get(normalIndex, [&](u8 index) {
+                u8 r = 0, g = 0, b = 0;
+                ComputePsxLitColourFromNormalIndex(index, jointRotation, &r, &g, &b);
+                return static_cast<u32>(r) | (static_cast<u32>(g) << 8)
+                    | (static_cast<u32>(b) << 16);
+            }, hit);
+            litR = static_cast<u8>(colour);
+            litG = static_cast<u8>(colour >> 8);
+            litB = static_cast<u8>(colour >> 16);
+            PspPerf::CountRenderer(hit ? PspPerf::RendererCounter::LightCacheHits
+                : PspPerf::RendererCounter::LightEvaluations);
+#else
             ComputePsxLitColourFromNormalIndex(normalIndex, jointRotation, &litR, &litG, &litB);
+            PspPerf::CountRenderer(PspPerf::RendererCounter::LightEvaluations);
+#endif
             scratch[vertexIndex * 2 + 0] = static_cast<u16>((litG << 8) | litR);
             scratch[vertexIndex * 2 + 1] = static_cast<u16>(litB);
         }

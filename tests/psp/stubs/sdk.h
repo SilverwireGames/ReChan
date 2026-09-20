@@ -8,6 +8,14 @@
 #include <cstdio>
 #include <vector>
 
+inline uint64_t sceKernelGetSystemTimeWide() {
+    static uint64_t timeUs = 1000000;
+    return ++timeUs;
+}
+inline unsigned int sceKernelGetSystemTimeLow() {
+    return static_cast<unsigned int>(sceKernelGetSystemTimeWide());
+}
+
 // A delayed-consumption GE model: every RAM source must still contain its
 // submitted bytes at sync. It also checks real list/transfer/count limits.
 namespace FakeGe {
@@ -154,7 +162,9 @@ inline void sceGuDrawArray(int primitive, int format, int count, const void* ind
     unsigned int vertexCount = count;
     const auto* ids = static_cast<const uint16_t*>(indices);
     if (indexed) {
-        FakeGe::require(ids && (reinterpret_cast<uintptr_t>(ids) & 15) == 0, "unaligned indices");
+        // Match the production word-alignment guard for persistent ranges;
+        // the 16-byte texture/CLUT DMA rule is not an index-stream rule.
+        FakeGe::require(ids && (reinterpret_cast<uintptr_t>(ids) & 3) == 0, "unaligned indices");
         FakeGe::read(ids, count * sizeof(uint16_t));
         vertexCount = *std::max_element(ids, ids + count) + 1u;
     }

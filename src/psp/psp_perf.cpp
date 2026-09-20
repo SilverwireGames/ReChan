@@ -28,6 +28,7 @@ void Mark(RuntimeStage stage, u32 value, u32 detail) {
 #include <limits>
 #include <malloc.h>
 #include <string>
+#include <pspkernel.h>
 
 #if defined(PSP_TRACE_TELEMETRY)
 #include <pspiofilemgr.h>
@@ -78,6 +79,7 @@ MetricRing g_submittedVertices;
 MetricRing g_pageCacheMisses;
 std::array<u64, static_cast<u32>(PspPerf::RendererCounter::Count)> g_rendererTotals{};
 u32 g_totalFrames = 0;
+u64 g_runStartUs = 0;
 u32 g_currentDrawCalls = 0;
 u32 g_currentSubmittedVertices = 0;
 u32 g_currentPageCacheMisses = 0;
@@ -175,10 +177,19 @@ static double FramesPerSecond(u32 averageUs) {
 namespace PspPerf {
 
 void WriteReport();
-void WriteReportTo(const char* path);
 u32 g_rendererCounters[static_cast<u32>(RendererCounter::Count)] = {};
 
+ScopeTimer::ScopeTimer(RendererCounter counter)
+    : counter(counter), start(sceKernelGetSystemTimeLow()) {}
+
+void ScopeTimer::Stop() {
+    if (!active) return;
+    CountRenderer(counter, sceKernelGetSystemTimeLow() - start);
+    active = false;
+}
+
 void Reset() {
+    g_runStartUs = sceKernelGetSystemTimeWide();
     g_rendererTotals.fill(0);
     std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
     g_frame.Reset();
@@ -353,10 +364,9 @@ void WriteReport() {
     WriteReportTo("PSP_PERF.TXT");
 }
 
-void WriteReportTo(const char* path) {
+void WriteReportTo(const char* path, u32 scenario, s32 level) {
     // Keep enough room for the complete profile, including every renderer
-    // counter. This is written outside the measured frame path; the former
-    // 2048-byte buffer silently truncated counters as the schema grew.
+    // counter. Formatting happens only after the measurement window.
     char report[4096] = {};
     const u32 averageFrameUs = g_frame.Average();
     const u32 p50FrameUs = Percentile(g_frame, 50);
@@ -467,13 +477,31 @@ void WriteReportTo(const char* path) {
         static_cast<unsigned long>(g_audioMusicMixedFrames.load(std::memory_order_relaxed)),
         static_cast<unsigned long>(g_audioWorkerErrors.load(std::memory_order_relaxed)));
 
+    const std::size_t metadataOffset = std::strlen(report);
+    std::snprintf(report + metadataOffset, sizeof(report) - metadataOffset,
+        "schema_version=2\nbuild_stamp=%s %s\nrun_start_us=%llu\n"
+        "report_uptime_us=%llu\nscenario=%lu\nlevel=%ld\npalette_path=%s\n",
+        __DATE__, __TIME__, static_cast<unsigned long long>(g_runStartUs),
+        static_cast<unsigned long long>(sceKernelGetSystemTimeWide()),
+        static_cast<unsigned long>(scenario), static_cast<long>(level),
+#if defined(PSP_PALETTE_REFERENCE)
+        "reference"
+#else
+        "sequential"
+#endif
+    );
     static constexpr const char* rendererNames[] = {
         "page_binds_avg", "gu_state_writes_avg", "list_flushes_avg",
         "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg",
         "geometry_builds_avg", "geometry_cache_hits_avg",
         "geometry_dynamic_patches_avg", "geometry_dynamic_patch_vertices_avg",
-        "opaque_queued_draws_avg", "opaque_queue_flushes_avg"
+        "opaque_queued_draws_avg", "opaque_queue_flushes_avg",
+        "ge_sync_avg_us", "vblank_avg_us", "palette_entries_avg",
+        "entities_avg_us", "blocks_avg_us", "submit_avg_us", "skin_prepare_avg_us",
+        "skin_light_avg_us", "vertex_pack_avg_us", "light_evaluations_avg", "light_cache_hits_avg"
     };
+    static_assert(sizeof(rendererNames) / sizeof(rendererNames[0])
+        == static_cast<u32>(RendererCounter::Count), "renderer schema mismatch");
     for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
         const std::size_t length = std::strlen(report);
         // Retain fractional averages: e.g. 599 flushes in 600 frames must
@@ -606,7 +634,7 @@ void RecordAudioMusicMix(u32) {}
 void RecordAudioWorkerError() {}
 bool ShouldStop() { return false; }
 void WriteReport() {}
-void WriteReportTo(const char*) {}
+void WriteReportTo(const char*, u32, s32) {}
 void WriteState(const char*, s32, s32, s32) {}
 void GetSnapshot(Snapshot* out) { if (out) *out = {}; }
 void Trace(const char*) {}

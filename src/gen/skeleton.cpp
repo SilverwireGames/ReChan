@@ -3,6 +3,9 @@
 #include "gen/geometry.h"
 #include "gen/skeleton.h"
 #include "gen/model.h"
+#if defined(RC_PLATFORM_PSP)
+#include "psp/psp_packet_lookup.h"
+#endif
 #include "gen/game.h"
 #include "gen/world.h"
 #include "p3d/byteread.h"
@@ -1220,6 +1223,10 @@ void BuildPerJointMeshes(OriginalSTree* original, const u8* primGeomData, u32 pr
         memcpy(sd->primPacketSize, primPacketSize.data(), sd->numPrims * sizeof(u8));
     }
     original->skinData = sd;
+#if defined(RC_PLATFORM_PSP)
+    sd->pspPacketRangesOrdered = PspPacketLookup::IsOrdered(
+        sd->primPacketOffset, sd->primPacketSize, sd->numPrims);
+#endif
 
     // Build initial mesh from current joint transforms
     Mat4* jointMatrices = new Mat4[skeleton->numJoints];

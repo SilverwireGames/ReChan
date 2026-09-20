@@ -24,6 +24,14 @@ int main() {
         "libc growth must be visible even when kernel free space is unchanged");
     for (int i = 0; i < 720; ++i) {
         PspPerf::BeginFrame();
+        {
+            PspPerf::ScopeTimer timer(PspPerf::RendererCounter::SubmitUs);
+            timer.Stop();
+            timer.Stop(); // Explicit stop and destructor must not double count.
+        }
+        PspPerf::CountRenderer(PspPerf::RendererCounter::GeSyncUs, 1100);
+        PspPerf::CountRenderer(PspPerf::RendererCounter::VblankUs, 3900);
+        PspPerf::CountRenderer(PspPerf::RendererCounter::PaletteEntries, 4096);
         PspPerf::RecordFrame(20000, 3, 12, 5);
     }
     require(reportWrites == 0, "measurement performed gameplay file I/O");
@@ -37,5 +45,17 @@ int main() {
     PspPerf::WriteReport();
     require(reportWrites == 1 && lastReport.find("libc_used=1536") != std::string::npos,
         "shutdown report lost allocator metrics");
+    PspPerf::WriteReportTo("PSP_PERF_S02_L02.TXT", 2, 2);
+    require(lastReport.find("schema_version=2\nbuild_stamp=") != std::string::npos
+        && lastReport.find("run_start_us=1000001\n") != std::string::npos
+        && lastReport.find("scenario=2\nlevel=2\n") != std::string::npos,
+        "report must identify the build, run and scenario");
+    require(lastReport.find("ge_sync_avg_us=1100.000") != std::string::npos
+        && lastReport.find("vblank_avg_us=3900.000") != std::string::npos
+        && lastReport.find("palette_entries_avg=4096.000") != std::string::npos,
+        "report lost or truncated renderer counters");
+    require(lastReport.find("submit_avg_us=1.000") != std::string::npos
+        && lastReport.find("light_cache_hits_avg=0.000") != std::string::npos,
+        "scope timer double-counted or detailed report was truncated");
     std::puts("PASS: bounded sampling, separate allocator metrics, no gameplay I/O");
 }

@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 #include <memory>
+#include <limits>
 #define private public
 #include "pddi/psp/psprender.h"
 #undef private
@@ -21,6 +22,26 @@ void Trace(const char*) {}
 using FakeGe::require;
 
 int main() {
+    // Signed intermediate conversion must preserve saturation and fractional
+    // truncation, not just the 256 quantized PSX channel values.
+    for (int i = -4096; i <= 12288; ++i) {
+        const float value = static_cast<float>(i) / 4096.0f;
+        const auto reference = static_cast<u8>(std::clamp(value, 0.0f, 1.0f) * 255.0f);
+        require(ToPspVertexByte(value) == reference, "signed colour conversion changed output");
+    }
+    s16 packedUv = 0;
+    for (int i = -32768; i <= 32767; ++i) {
+        require(PackIntegralTexCoord(static_cast<float>(i), &packedUv)
+            && packedUv == i, "integral UV packing changed");
+        require(!PackIntegralTexCoord(static_cast<float>(i) + 0.5f, &packedUv),
+            "fractional UV must use float vertices");
+    }
+    for (float value : { -32769.0f, 32768.0f,
+            std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::infinity(),
+            -std::numeric_limits<float>::infinity() }) {
+        require(!PackIntegralTexCoord(value, &packedUv), "invalid UV accepted");
+    }
     require(MakeColor4444(0xffffffffu) == 0xffffu, "sprite white lost opacity");
     require(MakeColor4444(0x12345678u) == 0x1357u, "sprite RGBA channels crossed");
     require(MakeColor4444(0x00ffffffu) == 0x0fffu, "transparent sprite gained opacity");
@@ -113,6 +134,33 @@ int main() {
     auto* direct = ctx.GetDecodedPage(handle, 0x100);
     require((direct->pixels[2] & 0x8000) == 0 && (direct->pixels[3] & 0x8000), "direct zero word key");
     display.SwapBuffers();
+    // Exercise production CLUT conversion with every 16-bit colour and all
+    // key modes, including a T8 palette that wraps at the right row edge.
+    const auto savedImage = image;
+    for (unsigned int y = 0; y < 256; ++y) {
+        for (unsigned int x = 0; x < 1024; ++x)
+            image[y * 1024 + x] = static_cast<u16>(y * 256 + (x & 255));
+    }
+    ctx.UpdateVRAMTexture(handle, 1024, 512, image.data());
+    ctx.BeginFrame();
+    for (unsigned int mode = 0; mode < 3; ++mode) {
+        ctx.SetBlendMode(mode == 1 ? PDDI_BLEND_ALPHA : PDDI_BLEND_NONE);
+        for (unsigned int y = 0; y < 256; ++y) {
+            const unsigned int cba = (y << 6) | 63;
+            ctx.BindPage(0x82, static_cast<float>(cba), mode == 2);
+            const auto* actual = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+            for (unsigned int i = 0; i < 256; ++i) {
+                const u16 word = image[y * 1024 + ((1008 + i) % 1024)];
+                const bool keyed = mode == 2 ? word == 0
+                    : (mode == 1 ? i == 0 : (word & 0x7fff) == 0x7c1f);
+                require(actual[i] == ConvertPsxTexelToGu5551(word, keyed),
+                    "CLUT conversion changed a colour or transparency key");
+            }
+        }
+    }
+    ctx.FinishList();
+    image = savedImage;
+    ctx.UpdateVRAMTexture(handle, 1024, 512, image.data());
     // Two heavy frames reproduce the old fallback list overflow. Native
     // remapping must advance by 3 local vertices, not 20000 source vertices.
     pspPrimBuffer buffer({PDDI_PRIM_TRIANGLES, PDDI_V_POSITION, 20000, 3});

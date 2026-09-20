@@ -5017,6 +5017,7 @@ static u32 s_pspWorldRenderProbeCalls = 0;
 #endif
 
 static void DrawEntityList(ccList& list, u16 blockNum, u32 vramHandle) {
+    PspPerf::ScopeTimer entityTimer(PspPerf::RendererCounter::EntitiesUs);
     MARKFUNCTION(0x8002B224);
     for (ccMinNode* n = list.head; n; n = n->next) {
         Thing* thing = static_cast<Thing*>(n);
@@ -5354,7 +5355,10 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
             PspPerf::Trace("world render: block geometry begin");
     PspPerf::Mark(PspPerf::RuntimeStage::WorldGeometryBegin);
 #endif
-            entry.block->Draw(&localPos);
+            {
+                PspPerf::ScopeTimer blockTimer(PspPerf::RendererCounter::BlocksUs);
+                entry.block->Draw(&localPos);
+            }
 #if defined(PSP_STAGE_DIAGNOSTIC)
             if (pspStageWorldCall < 4u && i < 8u) {
                 Log::Get().LogMessage("[PSP Stage] geometry done call=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned>(bn));

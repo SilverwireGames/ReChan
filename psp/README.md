@@ -29,6 +29,30 @@ docker run --platform linux/amd64 --rm \
 The generated `EBOOT.PBP` and `rechan.elf` are written to this directory by
 the PSPSDK build system.
 
+### Build QA v0.1 limpa
+
+Para a entrega QA, use `release` sem definir `PSP_AUTO_START_PHASE1`,
+`PSP_PERF_TELEMETRY`, `PSP_PERF_SOAK`, `PSP_GU_DIAGNOSTIC` ou qualquer outra
+flag de benchmark. Essa configuração mantém o fluxo normal do jogo, não
+desenha overlay e não escreve relatórios de desempenho.
+
+No servidor remoto, depois de enviar o commit:
+
+```sh
+ssh dev@192.168.18.24 'docker run --rm --platform linux/amd64 \
+  -v /tmp/rechan-psp-build:/work -w /work/psp \
+  ghcr.io/pspdev/pspdev:latest sh -c '\''export PSPDEV=/usr/local/pspdev \
+  PSPSDK=/usr/local/pspdev/psp/sdk PATH=/usr/local/pspdev/bin:$PATH; \
+  make -B -j12 BUILD_MODE=release BUILD_PRX=1 \
+  DEFINES="-DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE \
+  -DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY \
+  -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_SORT_OPAQUE_MATERIALS"'\'''
+```
+
+O `rechan.prx` gerado pode ser exposto pelo `host0:` e iniciado com
+`ldstart host0:/rechan.prx`. O EBOOT deve ser usado para instalar a versão
+QA no Memory Stick; não misture o EBOOT QA com a pasta de dados de benchmark.
+
 ## PSP real, PSPLINK e benchmark
 
 Aplicativos necessários no computador:
@@ -143,6 +167,34 @@ servida pelo `usbhostfs_pc`; o renderer grava os relatórios de gameplay em
 `ms0:`. Não atribuir todo o tempo de `draw` à GPU: no PSP ele inclui CPU,
 submissão e esperas internas da GU.
 
+Desde o schema 2, cada relatório inclui `build_stamp`, `run_start_us`,
+`report_uptime_us`, `scenario` e `level`. Aguarde os sete arquivos da mesma
+execução: um arquivo que já existe no Memory Stick pode pertencer à build
+anterior. Copie cada comando separadamente e confira os metadados, não apenas
+o nome ou a data do arquivo. O relógio do console pode estar desatualizado.
+Não use hífen nos nomes de destino do `pspsh`.
+Durante uma medição de aceitação, não consultar/copiar/capturar via PSPLink:
+essas operações usam recursos do próprio console. Aguarde a rodada completa
+e só então recolha os sete arquivos. Em repetição da mesma build, confira
+também que `run_start_us` mudou em relação à coleta anterior.
+
+Para validar uma coleta copiada como `CURRENT_S01.TXT` ... `CURRENT_S07.TXT`:
+
+```sh
+node scripts/check_psp_benchmark.mjs dist/psp-debug/host CURRENT "Sep 20 2026 16:15:04"
+node --test tests/psp/benchmark_reports.test.mjs
+```
+
+Substitua o carimbo pelo da build que você acabou de compilar; não pelo
+primeiro relatório encontrado. O verificador rejeita cenários ausentes,
+builds/execuções misturadas, janelas incompletas e contadores truncados.
+`ge_sync_avg_us` mede o tempo dentro de `sceGuSync`; `vblank_avg_us` mede
+`sceDisplayWaitVblankStart`. Ambos são partes dos tempos já existentes, não
+custos adicionais a somar ao frame. Os relógios extras só existem em builds
+com telemetria. `palette_entries_avg` conta cores convertidas, não paletas
+distintas. `PSP_PALETTE_REFERENCE` permite recompilar o percurso antigo de
+conversão para comparação; não é uma baseline de todas as otimizações.
+
 See https://pspdev.github.io/debugging.html for the upstream protocol and setup.
 
 For a clean optimized measurement build, use `profile` instead of `release`:
@@ -173,6 +225,34 @@ the fractional remainder, with at most one logic tick per presented frame.
 
 Host regression checks include `sh scripts/test_psp_renderer.sh`,
 `sh scripts/test_psp_perf.sh`, and `sh scripts/test_psp_frame_pacing.sh`.
+
+Character CPU changes additionally require `sh scripts/test_psp_lighting.sh`:
+it compares production lighting for every normal index and exact skin
+transforms, including cache collisions, joint/input changes and frame resets,
+under ASan/UBSan. Experimental caches require `PSP_SKIN_TRANSFORM_CACHE`
+and/or `PSP_NORMAL_LIGHT_CACHE`; both are OFF by default after the physical
+seven-scene trial failed to improve overall skin preparation. The former
+costs 8,224 static RAM bytes, the latter 1,056 temporary bytes per callback.
+Neither allocation exists in the default path. Keep the original calculations
+unless a controlled physical A/B establishes a benefit. No geometry, AI or
+lighting is omitted.
+
+Suit CLUT animation uses binary packet lookup on PSP after a one-time
+load-time check that packet ranges are ordered and disjoint. This replaces
+the per-offset full primitive scan without reordering draws or changing
+palette application. Irregular packet ranges retain the original first-match
+scan; `PSP_SUIT_LOOKUP_REFERENCE` forces that reference path for A/B. The
+lighting test also checks 62,000 packet offsets, gaps, empty packets and the
+fallback guards. The lookup uses existing immutable packet metadata, with
+no extra heap or VRAM buffer.
+
+Profile reports split CPU draw work into `entities_avg_us`, `blocks_avg_us`,
+`submit_avg_us`, `skin_prepare_avg_us`, `skin_light_avg_us` and
+`vertex_pack_avg_us`. These scopes are **inclusive and nested**: do not sum
+them or label them GPU timings. For example, skin preparation includes its
+light and vertex packing work. Timers are absent outside telemetry builds;
+compare builds with identical instrumentation, full rebuild (`-B`), the
+same seven scenarios, and no PSPLink queries during measurement.
 
 Package an extracted asset tree with:
 

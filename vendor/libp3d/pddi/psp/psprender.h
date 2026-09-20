@@ -439,8 +439,10 @@ private:
     // allocations; a larger cache starves streamed BLK geometry during load.
     static constexpr u32 kPageCacheCapacity = 16;
     std::array<PageCache, kPageCacheCapacity> pageCache{};
+#if defined(PSP_OPAQUE_RENDER_QUEUE)
     static constexpr u32 kOpaqueQueueCapacity = 256;
     std::array<QueuedOpaqueDraw, kOpaqueQueueCapacity> opaqueQueue{};
+#endif
     u32 opaqueQueueCount = 0;
     bool replayingOpaqueQueue = false;
     // These fixed arenas belong to the current GU submission. On saturation

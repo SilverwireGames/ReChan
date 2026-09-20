@@ -237,7 +237,10 @@ static u8 ToPspVertexByte(float value) {
     // GU vertex channels cannot represent the shared shader's gain above 1.
     // Saturate it continuously: changing scale at 1 halves a channel exactly
     // when the CPU lighting makes it brighter (128/128 -> 129/128).
-    return static_cast<u8>(std::clamp(value, 0.0f, 1.0f) * 255.0f);
+    // Allegrex converts floats to signed words directly. Converting straight
+    // to an unsigned byte makes GCC emit the general >=2^31 unsigned path,
+    // despite this value being clamped to 0..255.
+    return static_cast<u8>(static_cast<s32>(std::clamp(value, 0.0f, 1.0f) * 255.0f));
 }
 
 static u32 MakeGeometryColor(float r, float g, float b) {
@@ -245,6 +248,16 @@ static u32 MakeGeometryColor(float r, float g, float b) {
         | (static_cast<u32>(ToPspVertexByte(g)) << 8)
         | (static_cast<u32>(ToPspVertexByte(b)) << 16)
         | 0xFF000000u;
+}
+
+static bool PackIntegralTexCoord(float value, s16* out) {
+    // Ordered bounds reject NaN/Inf before conversion. Truncation is exact
+    // for integral UVs; the round trip rejects fractional coordinates.
+    if (!(value >= -32768.0f && value <= 32767.0f)) return false;
+    const s16 packed = static_cast<s16>(value);
+    if (static_cast<float>(packed) != value) return false;
+    *out = packed;
+    return true;
 }
 
 static u32 MakeColor(float r, float g, float b, float a = 1.0f) {
@@ -414,21 +427,11 @@ void pspPrimBuffer::RebuildPackedVertices() {
         return;
     }
 
-    const auto packTexCoord = [](float value, s16* out) {
-        if (!std::isfinite(value)) return false;
-        const float rounded = std::round(value);
-        if (value != rounded || rounded < -32768.0f || rounded > 32767.0f) {
-            return false;
-        }
-        *out = static_cast<s16>(rounded);
-        return true;
-    };
-
     // Validate before reserving so real-texture buffers with fractional UVs
     // do not retain a needless second vertex array after falling back.
     for (const PspVertex& source : vertices) {
         s16 u = 0, v = 0;
-        if (!packTexCoord(source.u, &u) || !packTexCoord(source.v, &v)) {
+        if (!PackIntegralTexCoord(source.u, &u) || !PackIntegralTexCoord(source.v, &v)) {
             return;
         }
     }
@@ -440,8 +443,9 @@ void pspPrimBuffer::RebuildPackedVertices() {
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const PspVertex& source = vertices[i];
         PspPackedVertex& target = packedVertices[i];
-        target.u = static_cast<s16>(std::lround(source.u));
-        target.v = static_cast<s16>(std::lround(source.v));
+        // The validation pass established exact integral, in-range values.
+        target.u = static_cast<s16>(source.u);
+        target.v = static_cast<s16>(source.v);
         target.color = source.color;
         target.x = source.x;
         target.y = source.y;
@@ -480,6 +484,7 @@ void pspPrimBuffer::MarkDirectSubmission() {
 
 bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
                                          bool uvIsIntegral) {
+    PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
     // Model skinning supplies the canonical position/colour/UV/tpage/CBA
     // layout.  Keep this fast path deliberately strict; unexpected formats
     // fall back to SetVertexData rather than silently changing semantics.
@@ -514,8 +519,8 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
             && cba <= 65535.0f;
         materialValid[i] = materialIsValid ? 1u : 0u;
         materialKeys[i] = materialIsValid
-            ? (static_cast<u32>(static_cast<u16>(tpage)) << 16)
-                | static_cast<u16>(cba)
+            ? (static_cast<u32>(static_cast<s32>(tpage)) << 16)
+                | static_cast<u32>(static_cast<s32>(cba))
             : 0u;
 
         if (!packedUvValid) continue;
@@ -531,17 +536,11 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
             v = static_cast<s16>(target.v);
         }
         else {
-            const float roundedU = std::round(target.u);
-            const float roundedV = std::round(target.v);
-            if (!std::isfinite(target.u) || !std::isfinite(target.v)
-                || target.u != roundedU || target.v != roundedV
-                || roundedU < -32768.0f || roundedU > 32767.0f
-                || roundedV < -32768.0f || roundedV > 32767.0f) {
+            if (!PackIntegralTexCoord(target.u, &u)
+                || !PackIntegralTexCoord(target.v, &v)) {
                 packedUvValid = false;
                 continue;
             }
-            u = static_cast<s16>(roundedU);
-            v = static_cast<s16>(roundedV);
         }
         PspPackedVertex& packed = packedVertices[i];
         packed.u = u;
@@ -563,6 +562,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
 }
 
 void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
+    PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
     if (!data) return;
     if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
         stagedIndexedVertices = true;
@@ -619,8 +619,8 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
             && std::isfinite(cba) && cba >= 0.0f && cba <= 65535.0f;
         materialValid[i] = materialIsValid ? 1u : 0u;
         materialKeys[i] = materialIsValid
-            ? (static_cast<u32>(static_cast<u16>(tpage)) << 16)
-                | static_cast<u16>(cba)
+            ? (static_cast<u32>(static_cast<s32>(tpage)) << 16)
+                | static_cast<u32>(static_cast<s32>(cba))
             : 0u;
     }
     WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
@@ -997,7 +997,14 @@ void pspDisplay::SwapBuffers() {
     g_activeContext->EndFrame();
     g_activeContext->FinishList();
     sceGuSwapBuffers();
+#if defined(PSP_PERF_TELEMETRY)
+    const u32 vblankStart = sceKernelGetSystemTimeLow();
+#endif
     sceDisplayWaitVblankStart();
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::CountRenderer(PspPerf::RendererCounter::VblankUs,
+        sceKernelGetSystemTimeLow() - vblankStart);
+#endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP Frame] after swap");
 #endif
@@ -1285,7 +1292,14 @@ void pspContext::FinishList() {
     PspPerf::Mark(PspPerf::RuntimeStage::FinishDone);
     CheckDisplayListGuard("finish");
     PspPerf::Mark(PspPerf::RuntimeStage::SyncBegin);
+#if defined(PSP_PERF_TELEMETRY)
+    const u32 syncStart = sceKernelGetSystemTimeLow();
+#endif
     sceGuSync(0, 0);
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::CountRenderer(PspPerf::RendererCounter::GeSyncUs,
+        sceKernelGetSystemTimeLow() - syncStart);
+#endif
     PspPerf::Mark(PspPerf::RuntimeStage::SyncDone);
     listOpen = false;
     // TEX_SYNC only orders GE transfers; only this CPU/GE fence retires RAM
@@ -2155,11 +2169,24 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
             const u16* paletteSource = image->pixels
                 + (clutY % static_cast<u32>(image->height)) * image->width;
             u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
+            PspPerf::CountRenderer(PspPerf::RendererCounter::PaletteEntries, paletteSize);
+#if defined(PSP_PALETTE_REFERENCE)
             for (u32 i = 0; i < paletteSize; ++i) {
                 const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
                 palette[i] = ConvertPsxTexelToGu5551(word,
                     wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
             }
+#else
+            // Advance along the source row instead of dividing once per color.
+            // Keep row wrapping for nonstandard widths and right-edge CLUTs.
+            u32 sourceX = clutX % static_cast<u32>(image->width);
+            for (u32 i = 0; i < paletteSize; ++i) {
+                const u16 word = paletteSource[sourceX];
+                palette[i] = ConvertPsxTexelToGu5551(word,
+                    wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+                if (++sourceX == static_cast<u32>(image->width)) sourceX = 0;
+            }
+#endif
             WritebackDcacheRange(palette,
                 static_cast<std::size_t>(paletteSize) * sizeof(u16));
             GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
@@ -2205,6 +2232,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
 }
 
 void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 indexCount) {
+    PspPerf::ScopeTimer submitTimer(PspPerf::RendererCounter::SubmitUs);
     PspPerf::Mark(PspPerf::RuntimeStage::PrimBegin, indexOffset, indexCount);
     // This device only manufactures pspPrimBuffer instances, and every
     // buffer reaching this context comes from that same pspDevice. Avoiding

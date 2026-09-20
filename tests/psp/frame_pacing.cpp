@@ -4,7 +4,6 @@
 #include <cmath>
 
 // Clock/sleep aren't used by the fixed-step regression below.
-static uint64_t sceKernelGetSystemTimeWide() { return 0; }
 static void sceKernelDelayThread(unsigned int) {}
 #include "../../src/gen/time.cpp"
 

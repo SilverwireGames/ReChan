@@ -4,12 +4,15 @@
 
 namespace PspPerf {
 
-// Main-thread counters only: no allocations, clocks or I/O on a draw.
+// Main-thread counters only: increments do not allocate, read clocks or do I/O.
+// Optional ScopeTimer instrumentation below reads the clock in profile builds.
 enum class RendererCounter : u32 {
     PageBinds, GuStateWrites, ListFlushes, StagingBytes, StagingCopies,
     MatrixUploads, ClutLoads, GeometryBuilds, GeometryCacheHits,
     GeometryDynamicPatches, GeometryDynamicPatchVertices, OpaqueQueuedDraws,
-    OpaqueQueueFlushes,
+    OpaqueQueueFlushes, GeSyncUs, VblankUs, PaletteEntries,
+    EntitiesUs, BlocksUs, SubmitUs, SkinPrepareUs, SkinLightUs, VertexPackUs,
+    LightEvaluations, LightCacheHits,
     Count
 };
 
@@ -42,6 +45,26 @@ inline void CountRenderer(RendererCounter counter, u32 amount = 1) {
 #else
 inline void CountRenderer(RendererCounter, u32 = 1) {}
 #endif
+
+// Inclusive main-thread scopes; nested categories must not be summed.
+// Compiles away in release/desktop builds and never performs I/O.
+class ScopeTimer {
+public:
+#if defined(PSP_PERF_TELEMETRY)
+    explicit ScopeTimer(RendererCounter counter);
+    ~ScopeTimer() { Stop(); }
+    void Stop();
+private:
+    RendererCounter counter;
+    u32 start;
+    bool active = true;
+#else
+    explicit ScopeTimer(RendererCounter) {}
+    void Stop() {}
+#endif
+    ScopeTimer(const ScopeTimer&) = delete;
+    ScopeTimer& operator=(const ScopeTimer&) = delete;
+};
 
 // Optional RAM-only breadcrumbs. Read g_runtimeMarkers with the debugger;
 // never perform file I/O, allocation or a clock syscall from a draw marker.
@@ -83,7 +106,7 @@ void RecordAudioMusicMix(u32 mixedFrames);
 void RecordAudioWorkerError();
 bool ShouldStop();
 void WriteReport();
-void WriteReportTo(const char* path);
+void WriteReportTo(const char* path, u32 scenario = 0, s32 level = -1);
 // Transition-only breadcrumb. Unlike frame telemetry, this performs I/O only
 // at level/benchmark state boundaries and is safe to inspect over PSPLINK.
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex);

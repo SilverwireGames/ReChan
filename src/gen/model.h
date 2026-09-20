@@ -65,6 +65,9 @@ struct SkinData {
     u32 numPrims = 0;
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
+#if defined(RC_PLATFORM_PSP)
+    bool pspPacketRangesOrdered = false;
+#endif
 
     ~SkinData() {
         delete[] verts;
@@ -514,4 +517,3 @@ public:
     // Only loops when mode == 0 (normal animation playback).
     void HandleLoop(AnimStructure* anim) override;
 };
-

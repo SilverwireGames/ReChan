@@ -1,4 +1,11 @@
 #include "gen/model.h"
+#include "psp/psp_perf.h"
+#if defined(RC_PLATFORM_PSP)
+#include "psp/psp_packet_lookup.h"
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_SKIN_TRANSFORM_CACHE)
+#include "psp/psp_skin_transform_cache.h"
+#endif
 #include <cstdio>
 #include <set>
 #include "gen/animmgr.h"
@@ -52,6 +59,9 @@ namespace {
 // every draw. This is intentionally split by use so nested mesh draws cannot
 // invalidate another scratch buffer.
 struct PspModelFrameScratch {
+#if defined(PSP_SKIN_TRANSFORM_CACHE)
+    PspSkinTransformCache transforms;
+#endif
     std::vector<Mat4> jointMatrices;
     std::vector<Mat4> attackJointMatrices;
     std::vector<Mat4> partJointMatrices;
@@ -698,7 +708,17 @@ static void ApplyClutListSuitFrameToVerts(const ClutAnimData* clutAnim,
         u32 matchedOffsets = 0;
         for (s32 offsetIndex = 0; offsetIndex < clutAnim->numOffsets; offsetIndex++) {
             const u32 packetOffset = static_cast<u32>(clutAnim->offsets[offsetIndex]);
-            for (u32 primIndex = 0; primIndex < skin->numPrims; primIndex++) {
+            u32 firstPrim = 0;
+            u32 endPrim = skin->numPrims;
+#if defined(RC_PLATFORM_PSP) && !defined(PSP_SUIT_LOOKUP_REFERENCE)
+            if (skin->pspPacketRangesOrdered) {
+                firstPrim = static_cast<u32>(PspPacketLookup::Find(
+                    skin->primPacketOffset, skin->primPacketSize,
+                    skin->numPrims, packetOffset));
+                endPrim = firstPrim < skin->numPrims ? firstPrim + 1u : firstPrim;
+            }
+#endif
+            for (u32 primIndex = firstPrim; primIndex < endPrim; primIndex++) {
                 const u32 packetBase = skin->primPacketOffset[primIndex];
                 const u32 packetSize = static_cast<u32>(skin->primPacketSize[primIndex]);
                 if (packetSize == 0 || packetOffset < packetBase || packetOffset >= (packetBase + packetSize)) {
@@ -1145,6 +1165,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
 
     // Per-frame CPU skinning
     if (skel && skin && skin->numVerts > 0 && skel->joints && skinnedBuffer) {
+        PspPerf::ScopeTimer skinTimer(PspPerf::RendererCounter::SkinPrepareUs);
 #if defined(RC_PLATFORM_PSP)
         std::vector<Mat4>& jointMatrices = g_pspModelFrameScratch.jointMatrices;
         ResizeRetainedScratch(jointMatrices, skel->numJoints);
@@ -1279,6 +1300,9 @@ void DrawableSTree::Display(u32 /*flags*/) {
 #if defined(RC_PLATFORM_PSP)
         std::vector<f32>& vertData = g_pspModelFrameScratch.skinVertexData;
         ResizeRetainedScratch(vertData, skin->numVerts * 10u);
+#if defined(PSP_SKIN_TRANSFORM_CACHE)
+        g_pspModelFrameScratch.transforms.Begin();
+#endif
 #else
         std::vector<f32> vertData(skin->numVerts * 10);
 #endif
@@ -1286,7 +1310,12 @@ void DrawableSTree::Display(u32 /*flags*/) {
             const SkinVertex& sv = skin->verts[i];
             const Mat4& m = jointMatrices[sv.jointIdx];
             f32 wx, wy, wz;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_SKIN_TRANSFORM_CACHE)
+            g_pspModelFrameScratch.transforms.Transform(
+                sv.sourceIndex, sv.jointIdx, m, sv.lx, sv.ly, sv.lz, wx, wy, wz);
+#else
             Mat4TransformPoint(m, sv.lx, sv.ly, sv.lz, wx, wy, wz);
+#endif
 
             f32 litR = sv.r;
             f32 litG = sv.g;
@@ -1348,6 +1377,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
             skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
         }
         const bool skinBlendApplied = applySkinBlendState(skin);
+        skinTimer.Stop();
         DrawTexturedMesh(skinnedBuffer
 #if REAL_TEXTURE_RENDERING
                           , &renderSource->realTexGroups

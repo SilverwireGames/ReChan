@@ -211,7 +211,7 @@ void OnBenchmarkFrameRecorded() {
             static_cast<unsigned long>(s_scenarioIndex + 1u),
             static_cast<long>(kScenarios[s_scenarioIndex].levelId));
 #endif
-        PspPerf::WriteReportTo(path);
+        PspPerf::WriteReportTo(path, s_scenarioIndex + 1u, s_activeLevelId);
         LOG("[PSP Bench] scenario %lu complete: levelId=%ld frames=%lu report=%s",
             static_cast<unsigned long>(s_scenarioIndex + 1u),
             static_cast<long>(kScenarios[s_scenarioIndex].levelId),
