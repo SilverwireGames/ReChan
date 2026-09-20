@@ -1444,8 +1444,21 @@ static bool IsValidWEffectPoolPointer(const void* pointer) {
 #endif
 }
 
+static s32 WEffectRegistryCountSafe() {
+    if (g_wEffectRegistryCount < 0 || g_wEffectRegistryCount > kWEffectRegistryCapacity) {
+        return 0;
+    }
+
+    return g_wEffectRegistryCount;
+}
+
 static bool WEffectRegistryContains(const Effects* effect) {
-    for (s32 i = 0; i < g_wEffectRegistryCount; i++) {
+    if (!IsValidWEffectPoolPointer(effect)) {
+        return false;
+    }
+
+    const s32 registryCount = WEffectRegistryCountSafe();
+    for (s32 i = 0; i < registryCount; i++) {
         if (g_wEffectRegistry[i] == effect) {
             return true;
         }
@@ -1455,7 +1468,7 @@ static bool WEffectRegistryContains(const Effects* effect) {
 }
 
 static void WEffectRegistryAdd(Effects* effect) {
-    if (!effect || WEffectRegistryContains(effect)) {
+    if (!IsValidWEffectPoolPointer(effect) || WEffectRegistryContains(effect)) {
         return;
     }
 
@@ -1478,7 +1491,7 @@ static void WEffectRegistryRemove(const Effects* effect) {
 }
 
 static bool WEffectPoolContains(const Effects* effect) {
-    if (!effect) {
+    if (!IsValidWEffectPoolPointer(effect)) {
         return false;
     }
 
@@ -1500,6 +1513,10 @@ static bool WEffectPoolContains(const Effects* effect) {
 }
 
 static bool WEffectPoolIsSane() {
+    if (WEffectRegistryCountSafe() != g_wEffectRegistryCount) {
+        return false;
+    }
+
     if (!g_wEffectPool.head || !g_wEffectPool.tail) {
         return g_wEffectPool.head == nullptr && g_wEffectPool.tail == nullptr;
     }
@@ -1527,7 +1544,8 @@ static void WEffectPoolRebuild() {
     g_wEffectPool.head = nullptr;
     g_wEffectPool.tail = nullptr;
 
-    for (s32 i = 0; i < g_wEffectRegistryCount; i++) {
+    const s32 registryCount = WEffectRegistryCountSafe();
+    for (s32 i = 0; i < registryCount; i++) {
         Effects* effect = g_wEffectRegistry[i];
         if (!effect || !IsValidWEffectPoolPointer(effect)) {
             continue;
@@ -1547,6 +1565,16 @@ static void WEffectPoolRebuild() {
 }
 
 static void WEffectPoolEnsureSane() {
+    if (WEffectRegistryCountSafe() != g_wEffectRegistryCount) {
+        for (s32 i = 0; i < kWEffectRegistryCapacity; i++) {
+            g_wEffectRegistry[i] = nullptr;
+        }
+        g_wEffectRegistryCount = 0;
+        g_wEffectPool.head = nullptr;
+        g_wEffectPool.tail = nullptr;
+        return;
+    }
+
     if (!WEffectPoolIsSane()) {
         WEffectPoolRebuild();
     }
@@ -1581,11 +1609,14 @@ static bool WEffectPoolLinksAreValid(const Effects* effect) {
 }
 
 static void WEffectPoolAdd(Effects* effect) {
-    if (!effect) {
+    if (!IsValidWEffectPoolPointer(effect) || !WEffectRegistryContains(effect)) {
         return;
     }
 
     WEffectPoolEnsureSane();
+    if (!WEffectPoolIsSane()) {
+        return;
+    }
     if (effect->inEffectsList) {
         Effects_RemoveEffect(effect);
     }
@@ -1595,11 +1626,14 @@ static void WEffectPoolAdd(Effects* effect) {
 }
 
 static void WEffectPoolRemove(Effects* effect) {
-    if (!effect) {
+    if (!IsValidWEffectPoolPointer(effect) || !WEffectRegistryContains(effect)) {
         return;
     }
 
     WEffectPoolEnsureSane();
+    if (!WEffectPoolIsSane()) {
+        return;
+    }
     if (!WEffectPoolContains(effect)) {
         return;
     }
