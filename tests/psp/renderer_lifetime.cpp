@@ -70,6 +70,15 @@ int main() {
 #ifndef PSP_DISABLE_STATIC_PAGE_UPLOAD
     require(FakeGe::copyFormats == std::array<int, 3>{1, 1, 1}, "all upload depths covered");
 #endif
+    // Different CBA metadata can still reference identical converted colors.
+    // The second bind must keep the resident GE CLUT instead of submitting a
+    // redundant palette load.
+    ctx.SetBlendMode(PDDI_BLEND_NONE);
+    ctx.BindPage(2, 0);
+    const int clutsBeforeEquivalent = FakeGe::cluts;
+    ctx.BindPage(2, 64);
+    require(FakeGe::cluts == clutsBeforeEquivalent,
+        "equivalent palette was redundantly loaded");
     // Invalidate after submission: no early slot release, RAM overwrite or
     // stale hit, even when the same texture is destroyed/recreated mid-list.
     const void* oldGpu = t4->gpuPixels;
@@ -105,10 +114,11 @@ int main() {
     image[0] = 0x1234; image[1] = 0x7c1f; image[2] = 0x0000; image[3] = 0x8000;
     ctx.UpdateVRAMTexture(handle, 1024, 512, image.data());
     ctx.SetBlendMode(PDDI_BLEND_NONE); ctx.BindPage(2, 0);
-    auto* palette = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+    const auto* palette = ctx.lastClutPalette.data();
+    require(ctx.lastClutPaletteEntries == 16, "opaque CLUT snapshot size");
     require((palette[0] & 0x8000) && !(palette[1] & 0x8000) && (palette[2] & 0x8000), "opaque CLUT key");
     ctx.SetBlendMode(PDDI_BLEND_ALPHA); ctx.BindPage(2, 0);
-    palette = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+    palette = ctx.lastClutPalette.data();
     require(!(palette[0] & 0x8000) && (palette[1] & 0x8000) && (palette[2] & 0x8000), "blended CLUT key");
     auto* direct = ctx.GetDecodedPage(handle, 0x100);
     require((direct->pixels[2] & 0x8000) == 0 && (direct->pixels[3] & 0x8000), "direct zero word key");
@@ -217,7 +227,7 @@ int main() {
             pddiColour(255, 255, 255, 255));
         require(FakeGe::lastDrawTextured, "background lost its texture under pressure");
     }
-    palette = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+    palette = ctx.lastClutPalette.data();
     require((palette[0] & 0x8000) && (palette[1] & 0x8000)
         && !(palette[2] & 0x8000) && (palette[3] & 0x8000), "background zero-word key");
     const auto* background = static_cast<const PspVertex*>(FakeGe::lastVertices);

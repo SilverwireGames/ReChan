@@ -7,7 +7,7 @@ namespace PspPerf {
 // Main-thread counters only: no allocations, clocks or I/O on a draw.
 enum class RendererCounter : u32 {
     PageBinds, GuStateWrites, ListFlushes, StagingBytes, StagingCopies,
-    MatrixUploads, ClutLoads, Count
+    MatrixUploads, ClutLoads, ClutCacheHits, ClutLoadSkips, Count
 };
 
 struct Snapshot {

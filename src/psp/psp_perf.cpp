@@ -466,7 +466,8 @@ void WriteReportTo(const char* path) {
 
     static constexpr const char* rendererNames[] = {
         "page_binds_avg", "gu_state_writes_avg", "list_flushes_avg",
-        "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg"
+        "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg",
+        "clut_cache_hits_avg", "clut_load_skips_avg"
     };
     for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
         const std::size_t length = std::strlen(report);
@@ -482,6 +483,11 @@ void WriteReportTo(const char* path) {
 
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex) {
 #if defined(PSP_BENCH_STATE_IO)
+    // Effect population has its own high-volume breadcrumb calls.  They are
+    // useful only in a dedicated effect investigation and otherwise obscure
+    // the level-transition state that this opt-in diagnostic is meant to
+    // expose (and would cause avoidable Memory Stick traffic during load).
+    if (state && std::strncmp(state, "weffect_", 8) == 0) return;
     char report[192] = {};
     std::snprintf(report, sizeof(report),
         "state=%s\nlevel_id=%ld\nlevel_index=%ld\ntarget_index=%ld\n",

@@ -1055,6 +1055,7 @@ pspContext::pspContext(pspDisplay* display) : display(display) {
         + sizeof(frameIndices)
 #endif
         + sizeof(framePalettes)
+        + sizeof(clutCache)
         + sizeof(nativeRemap) + sizeof(nativeRemapStamp) + sizeof(nativeRemapSource)));
     VramImage& psxVram = vramImages[0];
     psxVram.width = kVramWidth;
@@ -1097,6 +1098,7 @@ pspContext::~pspContext() {
         + sizeof(frameIndices)
 #endif
         + sizeof(framePalettes)
+        + sizeof(clutCache)
         + sizeof(nativeRemap) + sizeof(nativeRemapStamp) + sizeof(nativeRemapSource)));
     if (g_activeContext == this) g_activeContext = nullptr;
 }
@@ -1158,6 +1160,7 @@ void pspContext::FinishList() {
     // TEX_SYNC only orders GE transfers; only this CPU/GE fence retires RAM
     // sources, texture slots, CLUT snapshots and the command list itself.
     for (auto& cache : pageCache) cache.inFlight = false;
+    for (auto& cache : clutCache) cache.inFlight = false;
     frameVertexUsed = frameIndexUsed = framePaletteUsed = 0;
     ++g_submissionSerial;
     if (g_submissionSerial == 0) g_submissionSerial = 1;
@@ -1669,6 +1672,9 @@ void pspContext::InvalidatePages(u32 handle) {
     if (clutBindingValid && lastClutHandle == handle) {
         clutBindingValid = false;
     }
+    for (auto& cache : clutCache) {
+        if (cache.valid && cache.handle == handle) cache.valid = false;
+    }
     for (auto& cache : pageCache) {
         if (cache.handle == handle) cache.handle = 0;
     }
@@ -2013,17 +2019,82 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
         if (!reuseClut) {
             const u16* paletteSource = image->pixels
                 + (clutY % static_cast<u32>(image->height)) * image->width;
-            u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
-            for (u32 i = 0; i < paletteSize; ++i) {
-                const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
-                palette[i] = ConvertPsxTexelToGu5551(word,
-                    wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+            ClutCacheEntry* cached = nullptr;
+            ClutCacheEntry* replacement = nullptr;
+            u32 oldestAge = 0xffffffffu;
+            for (auto& entry : clutCache) {
+                if (entry.valid && entry.handle == vramHandle && entry.cba == cba
+                    && entry.depth == depth && entry.entries == paletteSize
+                    && entry.wordZeroKey == wordZeroKey
+                    && entry.blend == blendUsesZeroKey) {
+                    cached = &entry;
+                    break;
+                }
+                if (!entry.inFlight && (!entry.valid || entry.age < oldestAge)) {
+                    replacement = &entry;
+                    oldestAge = entry.valid ? entry.age : 0;
+                }
             }
-            WritebackDcacheRange(palette,
-                static_cast<std::size_t>(paletteSize) * sizeof(u16));
-            GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
-            sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
-            PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+
+            const u16* palette = nullptr;
+            if (cached) {
+                PspPerf::CountRenderer(PspPerf::RendererCounter::ClutCacheHits);
+                palette = cached->palette.data();
+                cached->age = clutCacheAge++;
+                if (clutCacheAge == 0) clutCacheAge = 1;
+            }
+            else if (replacement) {
+                replacement->handle = vramHandle;
+                replacement->cba = cba;
+                replacement->depth = static_cast<u8>(depth);
+                replacement->entries = static_cast<u16>(paletteSize);
+                replacement->wordZeroKey = wordZeroKey;
+                replacement->blend = blendUsesZeroKey;
+                replacement->valid = true;
+                replacement->age = clutCacheAge++;
+                if (clutCacheAge == 0) clutCacheAge = 1;
+                palette = replacement->palette.data();
+                for (u32 i = 0; i < paletteSize; ++i) {
+                    const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
+                    replacement->palette[i] = ConvertPsxTexelToGu5551(word,
+                        wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0
+                            : (word & 0x7fffu) == 0x7c1fu));
+                }
+            }
+            else {
+                // More unique palettes than the bounded cache can pin in one
+                // list. Retain the old per-submission fallback; it is safe
+                // and the existing capacity check will fence before reuse.
+                u16* const fallback = framePalettes.data() + framePaletteUsed++ * 256u;
+                for (u32 i = 0; i < paletteSize; ++i) {
+                    const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
+                    fallback[i] = ConvertPsxTexelToGu5551(word,
+                        wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0
+                            : (word & 0x7fffu) == 0x7c1fu));
+                }
+                palette = fallback;
+            }
+
+            const bool sameLoadedPalette = clutBindingValid
+                && lastClutPaletteEntries == paletteSize
+                && std::memcmp(lastClutPalette.data(), palette,
+                    static_cast<std::size_t>(paletteSize) * sizeof(u16)) == 0;
+            if (!sameLoadedPalette) {
+                WritebackDcacheRange(palette,
+                    static_cast<std::size_t>(paletteSize) * sizeof(u16));
+                GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
+                sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
+                PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+                std::memcpy(lastClutPalette.data(), palette,
+                    static_cast<std::size_t>(paletteSize) * sizeof(u16));
+                lastClutPaletteEntries = static_cast<u16>(paletteSize);
+                if (cached || replacement) {
+                    (cached ? cached : replacement)->inFlight = true;
+                }
+            }
+            else {
+                PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoadSkips);
+            }
             clutBindingValid = true;
             lastClutHandle = vramHandle;
             lastClutCba = cba;
