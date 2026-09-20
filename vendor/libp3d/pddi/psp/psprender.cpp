@@ -457,7 +457,8 @@ void pspPrimBuffer::MarkDirectSubmission() {
     directSubmissionSerial = g_submissionSerial;
 }
 
-bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count) {
+bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
+                                         bool uvIsIntegral) {
     // Model skinning supplies the canonical position/colour/UV/tpage/CBA
     // layout.  Keep this fast path deliberately strict; unexpected formats
     // fall back to SetVertexData rather than silently changing semantics.
@@ -499,17 +500,28 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count) {
         if (!packedUvValid) continue;
         s16 u = 0;
         s16 v = 0;
-        const float roundedU = std::round(target.u);
-        const float roundedV = std::round(target.v);
-        if (!std::isfinite(target.u) || !std::isfinite(target.v)
-            || target.u != roundedU || target.v != roundedV
-            || roundedU < -32768.0f || roundedU > 32767.0f
-            || roundedV < -32768.0f || roundedV > 32767.0f) {
-            packedUvValid = false;
-            continue;
+        if (uvIsIntegral) {
+            // The character skinning path sources UVs from u8 PSX packet
+            // fields and only changes material lanes during suit animation.
+            // Keep this contract local to that call site: it removes two
+            // round/isfinite pairs per vertex without weakening the generic
+            // real-texture/fractional-UV path below.
+            u = static_cast<s16>(target.u);
+            v = static_cast<s16>(target.v);
         }
-        u = static_cast<s16>(roundedU);
-        v = static_cast<s16>(roundedV);
+        else {
+            const float roundedU = std::round(target.u);
+            const float roundedV = std::round(target.v);
+            if (!std::isfinite(target.u) || !std::isfinite(target.v)
+                || target.u != roundedU || target.v != roundedV
+                || roundedU < -32768.0f || roundedU > 32767.0f
+                || roundedV < -32768.0f || roundedV > 32767.0f) {
+                packedUvValid = false;
+                continue;
+            }
+            u = static_cast<s16>(roundedU);
+            v = static_cast<s16>(roundedV);
+        }
         PspPackedVertex& packed = packedVertices[i];
         packed.u = u;
         packed.v = v;
@@ -711,11 +723,12 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* base) {
 }
 
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,
-                                         const void* data, u32 count) {
+                                         const void* data, u32 count,
+                                         bool uvIsIntegral) {
     if (!base) return false;
     auto* buffer = static_cast<pspPrimBuffer*>(base);
     buffer->PreferStagedIndexedVertices();
-    return buffer->SetDynamicVertexData(data, count);
+    return buffer->SetDynamicVertexData(data, count, uvIsIntegral);
 }
 
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,
@@ -1345,7 +1358,7 @@ void pspContext::DrawVRAMQuad(u32 handle, u16 tpage, u16 cba,
     SetBlendMode(PDDI_BLEND_ALPHA);
     // DecodePage's background semantics key zero words, including coloured
     // index zero and opaque STP black. Do not use the 3D index-zero key.
-    BindPage(tpage, cba, true);
+    BindPage(tpage, cba, true, false);
     SetPageTextureScale(false);
     // BindPage may fence/restart under cache pressure: allocate afterwards.
     auto* vertices = static_cast<PspVertex*>(AllocateListMemory(sizeof(PspVertex) * 6));
@@ -1905,7 +1918,8 @@ pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
     return target;
 }
 
-void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey) {
+void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
+                          bool packedUv) {
     const u16 tpage = static_cast<u16>(std::max(tpageFloat, 0.0f));
     const u16 cba = static_cast<u16>(std::max(cbaFloat, 0.0f));
     const bool zeroKey = wordZeroKey || blendMode != PDDI_BLEND_NONE;
@@ -2029,7 +2043,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey) {
     GuAmbientColor(0xffffffff);
     GuTexFilter(GU_NEAREST, GU_NEAREST);
     GuTexWrap(GU_REPEAT, GU_REPEAT);
-    SetPageTextureScale(false);
+    SetPageTextureScale(packedUv);
     GuEnable(GU_TEXTURE_2D);
     GuAlphaFunc(GU_GREATER, 0, 0xff);
     GuEnable(GU_ALPHA_TEST);
@@ -2275,7 +2289,8 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                 }
 #endif
                 BindPage(static_cast<float>(firstMaterialKey >> 16),
-                         static_cast<float>(firstMaterialKey & 0xffffu));
+                         static_cast<float>(firstMaterialKey & 0xffffu),
+                         false, usePackedVertices);
 #if defined(PSP_STAGE_DIAGNOSTIC)
                 if (pspStageProbe) {
                     Log::Get().LogMessage("[PSP GU Stage] after bind #%lu",

@@ -165,14 +165,14 @@ int main() {
     PreparePspPrimBufferForDynamicSubmission(&dynamicBuffer);
     ctx.BeginFrame();
     const int syncsBeforeDynamicRestore = FakeGe::syncs;
-    require(UpdatePspPrimBufferDynamicVertices(&dynamicBuffer, dynamicB.data(), 3),
+    require(UpdatePspPrimBufferDynamicVertices(&dynamicBuffer, dynamicB.data(), 3, true),
         "dynamic vertex fast path rejected canonical format");
     ctx.DrawPrimBuffer(&dynamicBuffer);
     require(dynamicBuffer.vertices[0].x == 2.0f
         && dynamicBuffer.vertices[0].u == 5.0f
         && dynamicBuffer.GetMaterialKey(0) == (2u << 16),
         "dynamic vertex fast path changed stable material data");
-    require(UpdatePspPrimBufferDynamicVertices(&dynamicBuffer, dynamicA.data(), 3),
+    require(UpdatePspPrimBufferDynamicVertices(&dynamicBuffer, dynamicA.data(), 3, true),
         "dynamic vertex restore failed");
     require(FakeGe::syncs == syncsBeforeDynamicRestore,
         "dynamic buffer restore fenced the GU list");

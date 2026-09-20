@@ -88,7 +88,8 @@ public:
     // list-owned staging path from the first frame so the restore cannot
     // force a mid-frame GE fence.
     void PreferStagedIndexedVertices() { preferStagedIndexedVertices = true; }
-    bool SetDynamicVertexData(const void* data, u32 count);
+    bool SetDynamicVertexData(const void* data, u32 count,
+                              bool uvIsIntegral = false);
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour);
@@ -146,7 +147,8 @@ private:
 // exposing the backend's storage layout to game code.
 void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
-                                        const void* data, u32 count);
+                                        const void* data, u32 count,
+                                        bool uvIsIntegral);
 
 class pspTexture final : public pddiTexture {
 public:
@@ -460,7 +462,8 @@ private:
     void InvalidatePages(u32 handle);
     void Setup3DState();
     void Setup2DState();
-    void BindPage(float tpage, float cba, bool wordZeroKey = false);
+    void BindPage(float tpage, float cba, bool wordZeroKey = false,
+                  bool packedUv = false);
     void SetPageTextureScale(bool packedUv);
     PageCache* GetDecodedPage(u32 handle, u16 tpage);
     VramImage* GetVram(u32 handle);

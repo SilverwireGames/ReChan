@@ -1338,7 +1338,8 @@ void DrawableSTree::Display(u32 /*flags*/) {
 
 #if defined(RC_PLATFORM_PSP)
         if (!UpdatePspPrimBufferDynamicVertices(skinnedBuffer,
-                                                vertData.data(), skin->numVerts))
+                                                vertData.data(), skin->numVerts,
+                                                true))
 #endif
         {
 #if defined(RC_PLATFORM_PSP)
