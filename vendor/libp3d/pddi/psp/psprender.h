@@ -400,12 +400,6 @@ private:
     u8 lastClutDepth = 0;
     bool lastClutWordZeroKey = false;
     bool lastClutBlend = false;
-    u16 lastClutPaletteEntries = 0;
-    // Keep the exact palette currently resident in the GE.  Comparing the
-    // converted entries, rather than only the PSX VRAM key, lets materials
-    // with different CBA/zero-key metadata share an already loaded CLUT
-    // without relying on a hash (a collision would change visible pixels).
-    std::array<u16, 256> lastClutPalette{};
     bool worldMirror = false;
     bool zBufferEnabled = true;
     bool polygonOffsetEnabled = false;
@@ -457,24 +451,6 @@ private:
     static constexpr u32 kFramePaletteCapacity = 1024;
     alignas(16) std::array<u16, kFramePaletteCapacity * 256> framePalettes{};
     u32 framePaletteUsed = 0;
-    // A palette can be referenced by the GE after BindPage returns. Keep a
-    // bounded set of immutable converted snapshots so a later material can
-    // reuse the conversion without overwriting a source still in flight.
-    struct ClutCacheEntry {
-        u32 handle = 0;
-        u16 cba = 0;
-        u8 depth = 0;
-        u16 entries = 0;
-        bool wordZeroKey = false;
-        bool blend = false;
-        bool valid = false;
-        bool inFlight = false;
-        u32 age = 0;
-        alignas(16) std::array<u16, 256> palette{};
-    };
-    static constexpr u32 kClutCacheCapacity = 128;
-    std::array<ClutCacheEntry, kClutCacheCapacity> clutCache{};
-    u32 clutCacheAge = 1;
     u32 cacheAge = 1;
     bool listOpen = false;
 
