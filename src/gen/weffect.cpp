@@ -103,6 +103,40 @@ static bool IsValidFastDrawPointer(const void* pointer) {
 #endif
 }
 
+static bool IsLiveFastGeo(const OriginalGeo* geo) {
+    return IsValidFastDrawPointer(geo);
+}
+
+static bool IsUsableFastGeo(const OriginalGeo* geo) {
+    if (!IsLiveFastGeo(geo)
+        || !geo->dynamicVerts
+        || geo->dynamicVertCount == 0
+        || geo->dynamicVertCount > 0x100000u
+        || !geo->dynamicPrimStart
+        || !geo->dynamicPrimVertCount
+        || !geo->dynamicPrimCmd
+        || geo->dynamicPrimCount == 0
+        || geo->dynamicPrimCount > geo->dynamicVertCount) {
+        return false;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    if (!IsValidFastDrawPointer(geo->meshBuffer)
+        || !IsValidFastDrawPointer(geo->dynamicVerts)
+        || !IsValidFastDrawPointer(geo->dynamicPrimStart)
+        || !IsValidFastDrawPointer(geo->dynamicPrimVertCount)
+        || !IsValidFastDrawPointer(geo->dynamicPrimCmd)) {
+        return false;
+    }
+    if (geo->dynamicPrimPacketOffset
+        && !IsValidFastDrawPointer(geo->dynamicPrimPacketOffset)) {
+        return false;
+    }
+#endif
+
+    return true;
+}
+
 // Seam offset applied during block draw phase so direct-position effects
 // (WEffect, SpotLight, FWEffect, GEffect, LensFlare) depth-align with
 // block geometry that has already been shifted by OffsetToPreventSeams.
@@ -409,7 +443,7 @@ static bool IsTexturedDynPrimCmd(u8 primCmd) {
 }
 
 static u8 ResolveFastRenderPrimCmd(const OriginalGeo* geo) {
-    if (!geo || !geo->dynamicPrimCmd || geo->dynamicPrimCount == 0) {
+    if (!IsUsableFastGeo(geo)) {
         return 0;
     }
 
@@ -457,14 +491,7 @@ static bool PrimMatchesFastRenderClass(u8 fastPrimCmd, u8 primCmd) {
 }
 
 static bool CanApplyPerPrimTexSwap(const OriginalGeo* geo) {
-    return geo
-        && geo->meshBuffer
-        && geo->dynamicVerts
-        && geo->dynamicVertCount > 0
-        && geo->dynamicPrimStart
-        && geo->dynamicPrimVertCount
-        && geo->dynamicPrimCmd
-        && geo->dynamicPrimCount > 0;
+    return IsUsableFastGeo(geo);
 }
 
 static u32 GetDynGeoPrimPacketSizeFast(u8 primCmd) {
@@ -492,7 +519,7 @@ static bool ResolveWord0LaneVertexByPacketHalfOffset(const OriginalGeo* geo,
                                                       bool* outIsCbaLane,
                                                       u32* outVertexIndex)
 {
-    if (!geo || !outIsCbaLane || !outVertexIndex) {
+    if (!IsUsableFastGeo(geo) || !outIsCbaLane || !outVertexIndex) {
         return false;
     }
 
@@ -555,13 +582,7 @@ static bool ResolveFirstGeoFastWord0(const OriginalGeo* geo, u32* outWord0) {
         *outWord0 = 0;
     }
 
-    if (!geo
-        || !geo->dynamicVerts
-        || geo->dynamicVertCount == 0
-        || !geo->dynamicPrimStart
-        || !geo->dynamicPrimVertCount
-        || !geo->dynamicPrimCmd
-        || geo->dynamicPrimCount == 0) {
+    if (!IsUsableFastGeo(geo)) {
         return false;
     }
 
@@ -710,13 +731,7 @@ static bool ResolveFirstGeoPacketWord0(const OriginalGeo* geo, u32* outWord0) {
         *outWord0 = 0;
     }
 
-    if (!geo
-        || !geo->dynamicVerts
-        || geo->dynamicVertCount == 0
-        || !geo->dynamicPrimStart
-        || !geo->dynamicPrimVertCount
-        || !geo->dynamicPrimCmd
-        || geo->dynamicPrimCount == 0) {
+    if (!IsUsableFastGeo(geo)) {
         return false;
     }
 
@@ -727,7 +742,8 @@ static bool ResolveFirstGeoPacketWord0(const OriginalGeo* geo, u32* outWord0) {
 
         const u32 start = geo->dynamicPrimStart[primIndex];
         const u32 count = static_cast<u32>(geo->dynamicPrimVertCount[primIndex]);
-        if (count == 0 || start >= geo->dynamicVertCount) {
+        if (count == 0 || start >= geo->dynamicVertCount
+            || count > (geo->dynamicVertCount - start)) {
             return false;
         }
 
@@ -889,7 +905,10 @@ static bool ResolveFirstModelWord0(const Model* model, u32* outWord0) {
         *outWord0 = 0;
     }
 
-    if (!model || !model->drawable) {
+    if (!IsValidFastDrawPointer(model)
+        || !IsValidFastDrawPointer(model->drawable)
+        || model->drawableType < 1
+        || model->drawableType > 3) {
         return false;
     }
 
@@ -1066,7 +1085,11 @@ static bool ResolveFirstGeoFastWord1(const OriginalGeo* geo, u32* outColorWord) 
         *outColorWord = 0;
     }
 
-    if (geo && geo->dynamicColorList && geo->dynamicColorCount > 0) {
+    if (IsUsableFastGeo(geo) && geo->dynamicColorList && geo->dynamicColorCount > 0
+#if defined(RC_PLATFORM_PSP)
+        && IsValidFastDrawPointer(geo->dynamicColorList)
+#endif
+    ) {
         if (outColorWord) {
             *outColorWord = geo->dynamicColorList[0];
         }
@@ -4381,7 +4404,9 @@ bool ComEffect::IsFastDrawGeoCurrent() const {
     if (!IsValidFastDrawPointer(model)
         || !IsValidFastDrawPointer(model->drawable)
         || !IsValidFastDrawPointer(fastDrawGeo)
-        || fastDrawGeoIndex < 0) {
+        || fastDrawGeoIndex < 0
+        || model->drawableType < 1
+        || model->drawableType > 3) {
         return false;
     }
 
@@ -4423,8 +4448,7 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
     const Mat4 savedWorld = p3d::context->GetWorldMatrix();
     const Mat4& viewMatrix = p3d::context->GetViewMatrix();
     OriginalGeo* drawGeo = fastDrawGeo;
-    if (!drawGeo->dynamicVerts || drawGeo->dynamicVertCount == 0u || !drawGeo->dynamicPrimStart || !drawGeo->dynamicPrimVertCount
-        || !drawGeo->dynamicPrimCmd || drawGeo->dynamicPrimCount == 0u) {
+    if (!IsUsableFastGeo(drawGeo)) {
         return;
     }
 
@@ -4624,8 +4648,7 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
     const Mat4 savedWorld = p3d::context->GetWorldMatrix();
     const Mat4& viewMatrix = p3d::context->GetViewMatrix();
     OriginalGeo* drawGeo = fastDrawGeo;
-    if (!drawGeo->dynamicVerts || drawGeo->dynamicVertCount == 0u || !drawGeo->dynamicPrimStart || !drawGeo->dynamicPrimVertCount
-        || !drawGeo->dynamicPrimCmd || drawGeo->dynamicPrimCount == 0u) {
+    if (!IsUsableFastGeo(drawGeo)) {
         return;
     }
 
