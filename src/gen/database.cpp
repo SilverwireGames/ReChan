@@ -74,6 +74,18 @@ u32* DBRoot::Process(u32* data, const u32* end) {
         endBytes = reinterpret_cast<const u8*>(end);
     }
 
+    const u8* dataBytes = reinterpret_cast<const u8*>(data);
+    if (endBytes) {
+        // The fixed DBRoot header occupies eight words.  Reject truncated
+        // records before touching the u16/u32 fields below; on the PSP an
+        // invalid WDB cursor otherwise becomes an address exception while
+        // loading a level.
+        if (dataBytes > endBytes ||
+            static_cast<size_t>(endBytes - dataBytes) < (8u * sizeof(u32))) {
+            return const_cast<u32*>(end);
+        }
+    }
+
     u16* stream16 = reinterpret_cast<u16*>(data);
 
     // PSX reads type/subType as two u16 values, each in its own u32 slot.
@@ -101,17 +113,40 @@ u32* DBRoot::Process(u32* data, const u32* end) {
     memcpy(&count, stream16, sizeof(count));
     stream16 += 2;
 
+    u8* cursor = reinterpret_cast<u8*>(stream16);
+    if (endBytes) {
+        const size_t remaining = cursor <= endBytes
+            ? static_cast<size_t>(endBytes - cursor)
+            : 0u;
+        if (cursor > endBytes ||
+            count > remaining / (2u * sizeof(u32))) {
+            // Every attribute needs at least a header and a byte-count word.
+            // This also prevents a corrupt count from causing a huge PSP
+            // heap allocation before the record is rejected.
+            return const_cast<u32*>(end);
+        }
+    }
+
     attribCount = count;
     if (count > 0) {
         attribs = new DBAttrib[count]();
+        if (!attribs) {
+            attribCount = 0;
+            return const_cast<u32*>(end);
+        }
     }
 
-    // PSX walks attribute payloads by byte count (no u32 rounding).
-    u8* cursor = reinterpret_cast<u8*>(stream16);
+    // WDB records are word-based.  The payload length is expressed in bytes,
+    // but the next field starts on the following 32-bit boundary.  Keeping
+    // this padding is essential on the PSP, whose Allegrex core traps on
+    // unaligned lw instructions.  The previous byte-only advance produced
+    // cursors such as 0x...3B and corrupted DBPath child lists.
     u32 nameAttribs = 0;
 
     for (u32 i = 0; i < count; i++) {
-        if (endBytes && cursor + 8 > endBytes) {
+        if (endBytes &&
+            (cursor > endBytes ||
+             static_cast<size_t>(endBytes - cursor) < (2u * sizeof(u32)))) {
             cursor = const_cast<u8*>(endBytes);
             break;
         }
@@ -124,7 +159,9 @@ u32* DBRoot::Process(u32* data, const u32* end) {
         cursor += sizeof(dataSize);
 
         const u8* payload = cursor;
-        if (endBytes && payload + dataSize > endBytes) {
+        if (endBytes &&
+            (payload > endBytes ||
+             static_cast<size_t>(endBytes - payload) < dataSize)) {
             cursor = const_cast<u8*>(endBytes);
             break;
         }
@@ -185,7 +222,17 @@ u32* DBRoot::Process(u32* data, const u32* end) {
             }
         }
 
-        cursor += dataSize;
+        if (dataSize > (UINT32_MAX - 3u)) {
+            return endBytes ? const_cast<u32*>(end) : nullptr;
+        }
+
+        const u32 paddedSize = (dataSize + 3u) & ~3u;
+        if (endBytes &&
+            static_cast<size_t>(endBytes - cursor) < paddedSize) {
+            cursor = const_cast<u8*>(endBytes);
+            break;
+        }
+        cursor += paddedSize;
     }
 
     attribCount = count - nameAttribs;
