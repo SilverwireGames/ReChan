@@ -1439,7 +1439,7 @@ bool Game::gsInitState(Game* game) {
 #endif
 
     // PSX: ClearImage, DisplayTIM(gp[24]), StartLogo(655360), FillMeter(100)
-#if !CUSTOM_MENU
+#if !CUSTOM_MENU && !defined(RC_PLATFORM_PSP)
     DisplayTIM("RUNFIRST.TIM");
 #endif
     StartLogo("RUNFIRST.TIM");
@@ -2205,11 +2205,15 @@ bool Game::gsQueueLevelLoad(Game* game) {
 
     // PSX: DisplayTIM(gp[24]) - show loading screen background
 #if CUSTOM_MENU
+#if !defined(RC_PLATFORM_PSP)
     if (!g_feCustomMenuMgr) {
         DisplayTIM("RUNFIRST.TIM");
     }
+#endif
 #else
+#if !defined(RC_PLATFORM_PSP)
     DisplayTIM("RUNFIRST.TIM");
+#endif
 
     // PSX: ShowLoadingScreenText(gameMenu, levelId, petalTarget)
     if (g_gameMenu) {
@@ -2328,11 +2332,15 @@ bool Game::gsQueuePetalLoad(Game* game) {
 
     // PSX: DisplayTIM(gp[24])
 #if CUSTOM_MENU
+#if !defined(RC_PLATFORM_PSP)
     if (!g_feCustomMenuMgr) {
         DisplayTIM("RUNFIRST.TIM");
     }
+#endif
 #else
+#if !defined(RC_PLATFORM_PSP)
     DisplayTIM("RUNFIRST.TIM");
+#endif
 #endif
 
     // PSX: ShowLoadingScreenText(gameMenu, currentLevelIndex, targetPetalIndex)
