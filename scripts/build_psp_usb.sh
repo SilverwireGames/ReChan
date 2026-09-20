@@ -32,4 +32,5 @@ else
 fi
 cp "$build_root/psp/rechan.prx" "$output_root/rechan.prx"
 cp "$build_root/psp/rechan.elf" "$output_root/rechan.elf"
-printf 'PSPLINK executable and matching symbols: %s\n' "$output_root"
+cp "$build_root/psp/EBOOT.PBP" "$output_root/EBOOT.PBP"
+printf 'PSPLINK executable, EBOOT and matching symbols: %s\n' "$output_root"

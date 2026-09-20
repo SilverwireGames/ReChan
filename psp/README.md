@@ -29,19 +29,120 @@ docker run --platform linux/amd64 --rm \
 The generated `EBOOT.PBP` and `rechan.elf` are written to this directory by
 the PSPSDK build system.
 
-For real-hardware USB debugging through PSPLINK, run
-`sh scripts/build_psp_usb.sh` from the repository. This creates an isolated
-build in `build/psp-usb` and puts the unencrypted `rechan.prx` and matching
-symbol-bearing `rechan.elf` in `dist/psp-debug/host`. It preserves the tested
-release package and enables normal menus, optimized code and RAM-only
-telemetry. Optimizations can make source-level stepping skip or reorder lines.
+## PSP real, PSPLINK e benchmark
 
-Install PSPLINK on the console and keep the game's extracted assets at
-`PSP/GAME/RECHAN/data`. On this Mac the PSPDEV host tools live under
-`build/psp-usb-tools/pspdev`. In separate terminals run
-`sh scripts/psp_usb.sh usb`, `sh scripts/psp_usb.sh shell`, then enter
-`debug rechan.prx` in pspsh and run `sh scripts/psp_usb.sh gdb`.
-The USB service listens on loopback and exports only the `host` output folder.
+Aplicativos necessários no computador:
+
+- PSPSDK/PSPDev, instalado localmente ou pela imagem Docker
+  `ghcr.io/pspdev/pspdev:latest`;
+- Docker Desktop em Apple Silicon, usando `--platform linux/amd64`;
+- ferramentas host do PSPLINK: `usbhostfs_pc`, `pspsh`, `psp-gdb` e
+  `psp-nm`;
+- `ssh`/`scp` somente quando a compilação for delegada ao servidor remoto.
+
+No PSP são necessários um firmware com PSPLINK/Bootstrap funcional, cabo USB
+de dados e os assets extraídos em `ms0:/PSP/GAME/RECHAN/data`. Os assets e a
+imagem do jogo continuam sendo fornecidos somente pelo usuário.
+
+### Build USB local
+
+O build de teste é isolado em `build/psp-usb` e publica somente a versão mais
+recente em `dist/psp-debug/host`:
+
+```sh
+PSP_BUILD_JOBS=10 sh scripts/build_psp_usb.sh
+```
+
+O diretório de host contém `EBOOT.PBP`, `rechan.prx` e `rechan.elf`. O `EBOOT`
+é copiado pelo próprio script para não reaproveitar um pacote antigo. A build
+USB usa `-O3 -DNDEBUG`, `PSP_AUTO_START_PHASE1`, telemetria em RAM e o caminho
+VFPU GUM; ela é para diagnóstico/performance, não para distribuição final.
+
+### Build no servidor remoto
+
+Quando o host PSPDev remoto estiver disponível, envie somente o commit atual
+para um diretório temporário, compile com Docker e copie os três artefatos por
+SCP. Não documentar senhas no repositório; use chave SSH ou solicitação de
+senha do próprio `ssh`:
+
+```sh
+REMOTE=dev@192.168.18.24
+REMOTE_ROOT=/tmp/rechan-psp-build
+
+git archive --format=tar HEAD | ssh "$REMOTE" \
+  "mkdir -p '$REMOTE_ROOT' && tar -xf - -C '$REMOTE_ROOT'"
+ssh "$REMOTE" "rm -f '$REMOTE_ROOT/src/gen/psprender.cpp' '$REMOTE_ROOT/src/gen/psprender.h' '$REMOTE_ROOT/src/gen/psprender.o'"
+ssh "$REMOTE" "docker run --rm --platform linux/amd64 -e PSP_BUILD_JOBS=12 -v '$REMOTE_ROOT:/work' -w /work/psp ghcr.io/pspdev/pspdev:latest sh -c 'export PSPDEV=/usr/local/pspdev PSPSDK=/usr/local/pspdev/psp/sdk PATH=/usr/local/pspdev/bin:\$PATH; make -B -j12 BUILD_MODE=usb-debug BUILD_PRX=1 DEFINES=\"-DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_SORT_OPAQUE_MATERIALS -DPSP_AUTO_START_PHASE1\"'"
+scp "$REMOTE:$REMOTE_ROOT/psp/EBOOT.PBP" "$REMOTE:$REMOTE_ROOT/psp/rechan.prx" "$REMOTE:$REMOTE_ROOT/psp/rechan.elf" dist/psp-debug/host/
+shasum -a 256 dist/psp-debug/host/EBOOT.PBP dist/psp-debug/host/rechan.prx dist/psp-debug/host/rechan.elf
+```
+
+O host remoto validado fica em uma rede local; a senha nunca deve ser salva
+em scripts, README ou contexto.
+
+### Conexão e execução no PSPLink
+
+No diretório raiz do projeto, abra três terminais:
+
+```sh
+# Terminal 1 — manter ativo; aguardar “Found Sony PSP device” e “Connected”
+sh scripts/psp_usb.sh usb
+
+# Terminal 2 — comandos PSPLINK
+sh scripts/psp_usb.sh shell
+
+# Terminal 3 — somente se for depurar com GDB
+sh scripts/psp_usb.sh gdb
+```
+
+No shell `pspsh`, valide a ponte e inicie o PRX que está exposto pelo
+`host0:`:
+
+```text
+usbstat
+ls host0:/
+modlist
+ldstart host0:/rechan.prx
+scrshot host0:/psp-screen.bmp
+```
+
+`ldstart host0:/rechan.prx` é o procedimento validado para iniciar o jogo no
+Bootstrap atual. `modexec host0:/EBOOT.PBP` pode retornar sem iniciar o módulo
+nesse ambiente; o EBOOT continua sendo o pacote para instalação normal no
+Memory Stick.
+
+Para depuração, antes de abrir o terceiro terminal execute no segundo:
+
+```text
+debug rechan.prx
+```
+
+No GDB, use `continue`. Não pressione `Ctrl+C` durante uma coleta: nesta
+configuração isso já provocou uma exceção no thread GDBServer do PSPLINK,
+embora o jogo continuasse executando.
+
+### Relatórios e screenshots
+
+O benchmark não desenha overlay. Após a janela de 600 frames, os relatórios
+são gravados no Memory Stick em `ms0:/PSP/GAME/RECHAN/data/`:
+
+```text
+PSP_PERF_S01_L01.TXT ... PSP_PERF_S07_L07.TXT
+```
+
+Eles contêm FPS médio, p50/p95/p99, pior frame, frames acima de 16.684 ms,
+lógica, desenho, swap, draws, vértices, misses de página, RAM, VRAM e áudio.
+Para copiar um relatório do PSP para a pasta exposta pelo USBHostFS:
+
+```text
+cp ms0:/PSP/GAME/RECHAN/data/PSP_PERF_S01_L01.TXT host0:/PSP_PERF_S01_L01_CURRENT.TXT
+```
+
+O arquivo aparecerá em `dist/psp-debug/host/`. `host0:` é apenas a pasta
+servida pelo `usbhostfs_pc`; o renderer grava os relatórios de gameplay em
+`ms0:`. Não atribuir todo o tempo de `draw` à GPU: no PSP ele inclui CPU,
+submissão e esperas internas da GU.
+
 See https://pspdev.github.io/debugging.html for the upstream protocol and setup.
 
 For a clean optimized measurement build, use `profile` instead of `release`:
