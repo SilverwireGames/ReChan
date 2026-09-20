@@ -1169,6 +1169,11 @@ void pspContext::Clear(int flags) {
 }
 
 void pspContext::SetCullMode(pddiCullMode mode) {
+    // World/block rendering sets the same cull mode for every primitive
+    // buffer.  Once the 3D state is known to be current, avoid even the
+    // list-space probe and the cached GU calls.  A 2D pass clears this key,
+    // so the next 3D setter still re-emits the state when required.
+    if (gu3DStateReady && cullMode == mode) return;
     EnsureListSpace();
     cullMode = mode;
     if (mode == PDDI_CULL_NONE) GuDisable(GU_CULL_FACE);
@@ -1179,6 +1184,7 @@ void pspContext::SetCullMode(pddiCullMode mode) {
 }
 
 void pspContext::EnableZBuffer(bool enable) {
+    if (gu3DStateReady && zBufferEnabled == enable) return;
     EnsureListSpace();
     zBufferEnabled = enable;
     if (enable) GuEnable(GU_DEPTH_TEST);
@@ -1187,6 +1193,7 @@ void pspContext::EnableZBuffer(bool enable) {
 }
 
 void pspContext::SetBlendMode(pddiBlendMode mode) {
+    if (gu3DStateReady && blendMode == mode) return;
     EnsureListSpace();
     blendMode = mode;
     SetBlend(mode);
@@ -1194,19 +1201,22 @@ void pspContext::SetBlendMode(pddiBlendMode mode) {
 }
 
 void pspContext::SetPolygonOffset(bool enable, f32 factor, f32 units) {
-    EnsureListSpace();
     // PSP exposes one fixed depth offset rather than the desktop slope/factor
     // pair.  The PDDI shadow path supplies a positive units value, so preserve
     // that term and use factor only for callers that omit units.
-    polygonOffsetEnabled = enable;
-    if (!enable) {
-        polygonOffset = 0;
-    }
-    else {
+    u32 requestedOffset = 0;
+    if (enable) {
         const f32 requested = std::fabs(units) > 0.0f ? units : factor;
-        polygonOffset = static_cast<u32>(std::clamp(
+        requestedOffset = static_cast<u32>(std::clamp(
             static_cast<int>(std::lround(requested)), 0, 65535));
     }
+
+    if (gu3DStateReady && polygonOffsetEnabled == enable
+        && polygonOffset == requestedOffset) return;
+
+    EnsureListSpace();
+    polygonOffsetEnabled = enable;
+    polygonOffset = requestedOffset;
     GuDepthOffset(polygonOffsetEnabled ? polygonOffset : 0);
 }
 
