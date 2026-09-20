@@ -420,9 +420,9 @@ void Database::PreScan() {
 // Tag 2: DBVolume (84 bytes)
 // Tag 3: DBSphere (64 bytes)
 // Tag 4: DBLine (76 bytes)
-// Tag 5: reserved
-// Tag 6: DBPath (76 bytes)
-// Tag 7: DBMesh (64 bytes)
+// Tag 5: DBPath (76 bytes)
+// Tag 6: DBMesh (64 bytes)
+// Tag 7: reserved
 void Database::Scan(const u8* data, u32 size) {
     MARKFUNCTION(0x80038B48);
 
@@ -536,11 +536,6 @@ void Database::Scan(const u8* data, u32 size) {
             }
             case 5:
             {
-                // Reserved on PSX
-                break;
-            }
-            case 6:
-            {
                 // DBPath
                 if (stream + 9 > end) goto done;
                 DBPath* obj = new DBPath();
@@ -571,7 +566,7 @@ void Database::Scan(const u8* data, u32 size) {
                 pathList.AddNodeTail(obj);
                 break;
             }
-            case 7:
+            case 6:
             {
                 // DBMesh
                 if (stream + 9 > end) goto done;
