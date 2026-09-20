@@ -467,6 +467,11 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count) {
         return false;
     }
 
+    // Staged dynamic buffers are copied by DrawPrimBuffer into the current
+    // list before submission; the GE never reads these persistent arrays.
+    // Avoid flushing their CPU cache lines and keep the writeback for the
+    // direct indexed path, where the GE borrows the persistent storage.
+    const bool sourceWillBeStaged = UsesStagedIndexedVertices();
     PrepareForMutation();
     const float* source = static_cast<const float*>(data);
     bool packedUvValid = packedVerticesValid;
@@ -514,10 +519,12 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count) {
         packed.z = target.z;
     }
     packedVerticesValid = packedUvValid;
-    WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
-    if (packedVerticesValid) {
-        WritebackDcacheRange(packedVertices.data(),
-            sizeof(PspPackedVertex) * packedVertices.size());
+    if (!sourceWillBeStaged) {
+        WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+        if (packedVerticesValid) {
+            WritebackDcacheRange(packedVertices.data(),
+                sizeof(PspPackedVertex) * packedVertices.size());
+        }
     }
     return true;
 }
