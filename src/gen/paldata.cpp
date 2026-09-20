@@ -18,6 +18,24 @@ static u32 ReadU32Pal(const u8* p) {
     return static_cast<u32>(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
 }
 
+static bool IsValidPalettePointer(const void* pointer) {
+    if (!pointer) {
+        return false;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    // Palette streams and the clone upload buffer must live in user RAM. A
+    // stale stream from the previous level can otherwise look non-null and
+    // make the MIPS core read a KSEG/garbage address during RLE expansion.
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    return (address & 1u) == 0u
+        && address >= 0x08000000u
+        && address < 0x0C000000u;
+#else
+    return true;
+#endif
+}
+
 PaletteData::PaletteData() {
     MARKFUNCTION(0x8009CE34);
 }
@@ -59,6 +77,8 @@ bool LoadPaletteData(u16 chunkId, const u8* body, u32 bodySize,
         entry->frameOffset = 0;
         entry->frameIndex = 0;
         entry->writeCursor = nullptr;
+        entry->frameStreamSize = entry->permOffset;
+        entry->paletteLutCount = 0;
 
         g_paletteDataArray[g_paletteDataCount++] = entry;
         return true;
@@ -103,6 +123,7 @@ bool LoadPaletteData(u16 chunkId, const u8* body, u32 bodySize,
         }
 
         entry->paletteLut = reinterpret_cast<const u16*>(permBase + lutCursor);
+        entry->paletteLutCount = lutCount;
         lutCursor += lutBytes;
 
         const u8 lowPermOffset = static_cast<u8>(entry->permOffset);
@@ -155,6 +176,8 @@ PaletteData* PaletteData::Clone() const {
     clone->frameCount = frameCount;
     clone->permOffset = permOffset;
     clone->frameStream = frameStream;
+    clone->frameStreamSize = frameStreamSize;
+    clone->paletteLutCount = paletteLutCount;
 
     clone->frameIndex = 0;
     clone->frameOffset = 0;
@@ -197,7 +220,7 @@ s32 PaletteData::InitPalette() {
     frameIndex = 0;
     frameOffset = 0;
 
-    if (!writeCursorEnd) {
+    if (!IsValidPalettePointer(writeCursorEnd)) {
         writeCursor = nullptr;
         return 0;
     }
@@ -213,7 +236,9 @@ s32 PaletteData::NextFrame() {
         return 1;
     }
 
-    if (!frameStream) {
+    if (!IsValidPalettePointer(frameStream)
+        || frameStreamSize < 4
+        || frameOffset > frameStreamSize - 4) {
         return 1;
     }
 
@@ -225,6 +250,9 @@ s32 PaletteData::NextFrame() {
 
     const u32 currentOffset = frameOffset;
     const u16 frameBytes = ReadU16Pal(frameStream + currentOffset + 2);
+    if (static_cast<u32>(frameBytes) > frameStreamSize - currentOffset - 4u) {
+        return 1;
+    }
     frameIndex += 1;
     frameOffset = currentOffset + 4u + static_cast<u32>(frameBytes);
 
@@ -234,7 +262,14 @@ s32 PaletteData::NextFrame() {
 s32 PaletteData::Update() {
     MARKFUNCTION(0x8009D208);
 
-    if (!writeCursor || !frameStream || !paletteLut) {
+    if (!IsValidPalettePointer(writeCursor)
+        || !IsValidPalettePointer(writeCursorEnd)
+        || !IsValidPalettePointer(frameStream)
+        || !IsValidPalettePointer(paletteLut)
+        || frameStreamSize < 4
+        || frameOffset > frameStreamSize - 4
+        || paletteLutCount == 0
+        || paletteLutCount > 256) {
         return 0;
     }
 
@@ -242,13 +277,33 @@ s32 PaletteData::Update() {
     writeCursor = writeCursorEnd - 256;
 
     const u8* frame = frameStream + frameOffset;
+    const u32 framePayloadSize = static_cast<u32>(ReadU16Pal(frame + 2));
+    if (framePayloadSize > frameStreamSize - frameOffset - 4u) {
+        writeCursor = nullptr;
+        return 0;
+    }
+
     const u16 runCount = ReadU16Pal(frame + 0);
     const u16 alphaMask = (setupFlags == 1u) ? 0x8000u : 0u;
 
     const u8* runData = frame + 4;
+    u32 runOffset = 0;
     for (u32 run = 0; run < runCount; run++) {
+        if (runOffset + 2u > framePayloadSize) {
+            writeCursor = nullptr;
+            return 0;
+        }
+
         const u8 skip = *runData++;
         const u8 spanByte = *runData++;
+        runOffset += 2u;
+
+        if (static_cast<u32>(skip) > 256u
+            || static_cast<u32>(skip) + (spanByte ? static_cast<u32>(spanByte) : 256u) > 256u
+            || runOffset + (spanByte ? static_cast<u32>(spanByte) : 256u) > framePayloadSize) {
+            writeCursor = nullptr;
+            return 0;
+        }
 
         writeCursor += skip;
 
@@ -259,9 +314,14 @@ s32 PaletteData::Update() {
 
         for (u32 i = 0; i < span; i++) {
             const u8 paletteIndex = *runData++;
+            if (paletteIndex >= paletteLutCount) {
+                writeCursor = nullptr;
+                return 0;
+            }
             *writeCursor = static_cast<u16>(paletteLut[paletteIndex] | alphaMask);
             writeCursor += 1;
         }
+        runOffset += span;
     }
 
     writeCursor = writeCursorEnd;

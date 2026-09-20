@@ -39,6 +39,7 @@ inline std::array<unsigned char, 2 * 1024 * 1024> edram{};
 inline std::array<int, 3> copyFormats{};
 inline std::vector<uint64_t> drawSignatures;
 inline const void* lastVertices = nullptr;
+inline size_t lastStride = 0;
 inline bool lastDrawTextured = false;
 inline void emit(size_t bytes = 4) {
     require(open, "commands outside an open list");
@@ -135,7 +136,18 @@ inline void sceGuDrawArray(int primitive, int format, int count, const void* ind
     FakeGe::require((reinterpret_cast<uintptr_t>(vertices) & 15) == 0, "unaligned vertices");
     FakeGe::emit(24); ++FakeGe::draws;
     const bool indexed = (format & GU_INDEX_16BIT) != 0;
-    const size_t stride = (format & GU_TRANSFORM_2D) && (format & (3 << 7)) == GU_VERTEX_16BIT ? 12 : 24;
+    const int textureType = format & GU_TEXTURE_BITS;
+    const int colourType = format & GU_COLOR_BITS;
+    const int vertexType = format & GU_VERTEX_BITS;
+    const size_t textureBytes = textureType == GU_TEXTURE_8BIT ? 2
+        : (textureType == GU_TEXTURE_16BIT ? 4 : (textureType == GU_TEXTURE_32BITF ? 8 : 0));
+    const size_t colourBytes = colourType == GU_COLOR_5650 || colourType == GU_COLOR_5551
+        || colourType == GU_COLOR_4444 ? 2 : (colourType == GU_COLOR_8888 ? 4 : 0);
+    const size_t vertexBytes = vertexType == GU_VERTEX_8BIT ? 3
+        : (vertexType == GU_VERTEX_16BIT ? 6 : (vertexType == GU_VERTEX_32BITF ? 12 : 0));
+    const size_t stride = textureBytes + colourBytes + vertexBytes;
+    FakeGe::require(stride != 0, "unknown vertex stride");
+    FakeGe::lastStride = stride;
     unsigned int vertexCount = count;
     const auto* ids = static_cast<const uint16_t*>(indices);
     if (indexed) {

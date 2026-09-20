@@ -121,12 +121,18 @@ bool UpdateUVPrimData(int blockNum, tPrimGeom* geom) {
                     continue;
                 }
                 const u16 uvWord = static_cast<u16>(p3dReadU16LE(entry + 16 + wordIdx * 4) + uvData.uvCombined);
-                primList[primOffset + 0] = static_cast<u8>(uvWord & 0xFF);
-                primList[primOffset + 1] = static_cast<u8>((uvWord >> 8) & 0xFF);
+                const u8 nextU = static_cast<u8>(uvWord & 0xFF);
+                const u8 nextV = static_cast<u8>((uvWord >> 8) & 0xFF);
+                if (primList[primOffset + 0] != nextU) {
+                    primList[primOffset + 0] = nextU;
+                    updated = true;
+                }
+                if (primList[primOffset + 1] != nextV) {
+                    primList[primOffset + 1] = nextV;
+                    updated = true;
+                }
             }
         }
-
-        updated = true;
     }
 
     return updated;
@@ -438,10 +444,13 @@ bool UpdateCBVPrimData(int blockNum, tPrimGeom* geom) {
                 continue;
             }
             u32* primWord = reinterpret_cast<u32*>(primList + primOffset);
-            *primWord = (*primWord & 0xFF000000u) | cbvData.colourInfo[entryIdx]->GetColour();
+            const u32 nextWord = (*primWord & 0xFF000000u)
+                | cbvData.colourInfo[entryIdx]->GetColour();
+            if (*primWord != nextWord) {
+                *primWord = nextWord;
+                updated = true;
+            }
         }
-
-        updated = true;
     }
 
     return updated;
@@ -573,4 +582,3 @@ void TickAllUVPrimData() {
         }
     }
 }
-

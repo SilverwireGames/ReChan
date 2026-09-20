@@ -97,6 +97,7 @@ private:
     bool ApplyClutAnimFrame(ClutAnimData* clutAnimData, s32 frame);
     void ApplyUVListAnimFrame(const UVListAnim* uvAnim, s32 frame);
     bool ApplyMiscAnimFrame(MiscAnimNode* node, s32 frame, bool updateJoints);
+    bool IsFastDrawGeoCurrent() const;
     void FastZSortDisplayGCT3(u32 primCount);
     void FastZSortDisplayGCT4(u32 primCount);
 

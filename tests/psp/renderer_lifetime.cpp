@@ -121,6 +121,30 @@ int main() {
     buffer.vertices[2] = {0, 0, 0xffffffff, 2, 3, 4};
     u16 ids[] = {0, 1, 2}; buffer.SetIndices(ids, 3);
     ctx.SetProjectionMatrix(PerspectiveReversedZ(1.0f, 1.7f, 1.0f, 100.0f));
+
+    // Exercise the PSP page-backed compact UV stream. The positions remain
+    // float 3D coordinates; only UVs use the normalized 16-bit GU lane.
+    pspPrimBuffer packedBuffer({PDDI_PRIM_TRIANGLES,
+        PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, 3, 3});
+    const std::array<float, 30> packedData = {
+        0, 1, 2, 1, 1, 1, 5, 6, 2, 0,
+        1, 2, 3, 1, 1, 1, 15, 6, 2, 0,
+        2, 3, 4, 1, 1, 1, 5, 16, 2, 0,
+    };
+    packedBuffer.SetVertexData(packedData.data(), 3);
+    u16 packedIds[] = {0, 1, 2};
+    packedBuffer.SetIndices(packedIds, 3);
+    ctx.SetVRAMHandle(handle);
+    ctx.BeginFrame();
+    ctx.DrawPrimBuffer(&packedBuffer);
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
+    require(FakeGe::lastStride == sizeof(PspPackedVertex), "packed page vertices not submitted");
+#else
+    require(FakeGe::lastStride == sizeof(PspVertex), "fallback vertex format changed");
+#endif
+    // This probe is about the source stride, not the cross-variant hash.
+    FakeGe::drawSignatures.clear();
+    display.SwapBuffers();
     ctx.SetVRAMHandle(0);
     const auto primitivesBefore = FakeGe::primitives;
     for (int frame = 0; frame < 2; ++frame) {
@@ -194,7 +218,7 @@ int main() {
     }
     texture->SetData(16, 16, 32, 8, rgba.data()); // must fence live standalone texture
     display.SwapBuffers();
-    require(FakeGe::swaps == 8, "internal fence presented an extra frame");
+    require(FakeGe::swaps == 9, "internal fence presented an extra frame");
     require(FakeGe::clears == 0, "internal fence cleared the framebuffer");
     uint64_t signature = 0;
     for (auto value : FakeGe::drawSignatures) signature = signature * 31 + value;

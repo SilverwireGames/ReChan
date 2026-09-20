@@ -3338,17 +3338,30 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         return false;
     }
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    const auto writePspLoadState = [this](const char* state) {
+        PspPerf::WriteState(state, GetCurLevelID(),
+            static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+    };
+#endif
+
     g_wEffectChunkCount = 0;
     g_particleSystemChunkCount = 0;
     streamPath = lcfPath;
     streamEntries.clear();
     streamData.clear();
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_load_begin");
+ #endif
     // Characters and UI share this VRAM with the level. Their permanent
     // textures are loaded before this stream; TPG uploads must only replace
     // their own rectangles, as in LoadStream. PsxVRAM starts zero-initialized.
 
     p3d::io::FileHandle file;
     int64_t fileSize = 0;
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_dir_begin");
+ #endif
     LOG("[World] PSP stream directory open: %s", lcfPath.c_str());
     if (!OpenPspStreamDirectory(lcfPath, file, fileSize, streamEntries)) {
         LOG("[World] Failed to open/parse PSP stream: %s", lcfPath.c_str());
@@ -3358,6 +3371,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
     }
     LOG("[World] PSP stream directory ready: %u entries, %lld bytes",
         static_cast<u32>(streamEntries.size()), static_cast<long long>(fileSize));
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_dir_done");
+ #endif
     PspPerf::Trace("psp stream: directory ready");
 
     FillMeter(20);
@@ -3381,6 +3397,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
 #endif
     FillMeter(40);
     PspPerf::Trace("psp stream: tpg ready");
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_tpg_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] tpg ready entries=%lu free=%lu max=%lu",
         static_cast<unsigned long>(streamEntries.size()),
@@ -3418,6 +3437,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
 #endif
     }
     PspPerf::Trace("psp stream: permanent geometry ready");
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_rci_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] rci complete free=%lu max=%lu",
         static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
@@ -3430,6 +3452,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
         return false;
     }
     targetPetalIndex = petalIdx;
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_petal_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] petal range start=%lu end=%lu petal=%lu free=%lu max=%lu",
         static_cast<unsigned long>(petalStart), static_cast<unsigned long>(petalEnd),
@@ -3465,6 +3490,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
 #endif
     }
     PspPerf::Trace("psp stream: database ready");
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_wdb_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] database ready free=%lu max=%lu",
         static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
@@ -3500,7 +3528,13 @@ bool World::LoadPspStream(const std::string& lcfPath) {
 #endif
     }
     PspPerf::Trace("psp stream: petal geometry ready");
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_pci_done");
+ #endif
     RefreshVRAMTexture();
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_vram_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] petal geometry ready free=%lu max=%lu",
         static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
@@ -3513,6 +3547,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
     }
     blockMgr.LoadBlocksFunc(blockVolumes);
     PspPerf::Trace("psp stream: block metadata ready");
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_blocks_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] block metadata ready count=%lu free=%lu max=%lu",
         static_cast<unsigned long>(blockMgr.GetNumBlocks()),
@@ -3558,6 +3595,9 @@ bool World::LoadPspStream(const std::string& lcfPath) {
     PspPerf::Trace("psp stream: memory query done");
 #endif
     LOG("[World] PSP stream metadata load complete: blocks=%u", blockMgr.GetNumBlocks());
+ #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    writePspLoadState("psp_stream_done");
+ #endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] stream return blocks=%lu free=%lu max=%lu",
         static_cast<unsigned long>(blockMgr.GetNumBlocks()),
@@ -4058,6 +4098,11 @@ void World::LoadPermanent() {
 bool World::LoadLevelIndex(u32 levelIndex) {
     MARKFUNCTION(0x8004624C);
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_begin", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(levelIndex));
+#endif
+
     // PSX: clamp levelIndex to valid range
     if (levelCount > 0 && levelIndex >= (u32)levelCount)
         levelIndex = (u32)(levelCount - 1);
@@ -4081,8 +4126,21 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         targetPetalIndex = 0;
     }
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_setup", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
+
     // PSX: EstimateLoadTime, StartLogo, FillMeter(100)
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_logo_begin", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     StartLogo("RUNFIRST.TIM");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_logo_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // PSX: rSPrintf(v8, "%slev%02d.lcf", "RTARGET\\", levelList[levelIndex * 2])
     char levelPath[64];
@@ -4094,11 +4152,19 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         s32 soundLocation = (s32)petalSoundIDs[levelIndex][targetPetalIndex] - 1;
         rsEvent(RS_SET_LOCATION, soundLocation, 0, 0);
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_sound_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     if (!Load(levelPath)) {
         StopLogo();
         return false;
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_stream_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] LoadLevelIndex: stream load returned free=%lu max=%lu",
         static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
@@ -4107,6 +4173,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     PspPerf::Trace("level index: stream load returned");
 
     PumpLoadingScreen();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_pump_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] LoadLevelIndex: loading pump returned free=%lu max=%lu",
         static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
@@ -4128,6 +4198,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     if (g_cameraManager) {
         g_cameraManager->SetupPaths();
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_camera_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // PSX: Construct__5World (WORLD.CPP:1399, 0x80046E80)
     // On PSX this is a separate function called after LoadLevel.
@@ -4168,6 +4242,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     }
 
     ParticleSystem_InitParticleInfoMemory();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_effect_init_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // PSX: Populate__2AI(0) - spawn entities from WDB database
 #if defined(PSP_GU_DIAGNOSTIC)
@@ -4184,6 +4262,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
 #endif
     PspPerf::Trace("level index: ai populated");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_ai_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     LOG("[World] Construct: AI populate complete");
     FillMeter(85);
 
@@ -4208,6 +4290,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     LOG("[World] Construct: background load complete");
     BackG::InitBG();
     LOG("[World] Construct: background init complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_bg_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] Construct: after background free=%lu max=%lu",
         static_cast<unsigned long>(sceKernelTotalFreeMemSize()),
@@ -4237,6 +4323,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     LOG("[World] Construct: switches begin");
     ProcessSwitches();
     PspPerf::Trace("level index: switches processed");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_switches_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     LOG("[World] Construct: switches processed");
 
     // PSX: Close__8Database(0)
@@ -4303,6 +4393,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
 #endif
     PspPerf::Trace("level index: block population done");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_blocks_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     WEffect_PopulateWEffects();
 #if defined(PSP_GU_DIAGNOSTIC)
@@ -4311,8 +4405,24 @@ bool World::LoadLevelIndex(u32 levelIndex) {
         static_cast<unsigned long>(sceKernelMaxFreeMemSize()));
 #endif
     PspPerf::Trace("level index: effects populated");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_effects_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
+    // The underhood benchmark does not need one more loading-screen present
+    // after the world/effects are already constructed. On PPSSPP this final
+    // redraw can touch the previous level's loading texture while the new
+    // VRAM set is being committed, so leave the progress bar at its last safe
+    // value and proceed directly to gameplay setup.
+#else
     FillMeter(100);
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_meter_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     PspPerf::Trace("level index: meter complete");
 
     // PSX: if (IsValidBlockNumber(playerBlockNum) == 4096) -> reposition player
@@ -4331,6 +4441,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
             }
         }
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_player_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // PSX hub return flow: when current level ID == 7, apply saved return position
     if (levelList && currentLevelIndex < (u32)levelCount) {
@@ -4419,16 +4533,28 @@ bool World::LoadLevelIndex(u32 levelIndex) {
             }
         }
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_return_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     PspPerf::Trace("level index: return position complete");
 
     // PSX: gSyncLoadGroup(0); gSyncLoadGroup(1)
     SyncSwitchLoadGroup(0);
     SyncSwitchLoadGroup(1);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_sync_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     PspPerf::Trace("level index: sync groups complete");
 
     // PSX: rsEvent(5, 0, 0, 0) - start music for current location
     PspPerf::Trace("level index: music begin");
     rsEvent(RS_LEVEL_BEGIN, 0, 0, 0);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_music_done", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     PspPerf::Trace("level index: music done");
 
     // PSX: StopLogo after load completes
@@ -4438,6 +4564,10 @@ bool World::LoadLevelIndex(u32 levelIndex) {
     if (g_director) {
         g_director->SkipNextWideScreenEnterAnim();
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_index_complete", GetLevelIDFromIndex(levelIndex),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     PspPerf::Trace("level index: complete");
 #if defined(PSP_GU_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP LOAD] Construct: complete free=%lu max=%lu",
@@ -4448,13 +4578,22 @@ bool World::LoadLevelIndex(u32 levelIndex) {
 }
 
 bool World::Load(const std::string& lcfPath) {
-    Unload();
+    // The level-load state owns the teardown order and has already called
+    // Unload() plus UnloadLevelPart2() before entering LoadLevelIndex().
+    // Repeating Unload here is harmless for the first load but can invoke
+    // subsystem cleanup twice during a benchmark level transition, after
+    // the first teardown has already released its intrusive lists/resources.
 
     if (!g_blockManager) {
         ASSERT(false);
         return false;
     }
     BlockManager& blockMgr = *g_blockManager;
+
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_enter", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     g_wEffectChunkCount = 0;
     g_particleSystemChunkCount = 0;
@@ -4470,12 +4609,20 @@ bool World::Load(const std::string& lcfPath) {
     // optional vector and its temporary lifetime made large level streams
     // fragile under the PSP heap's limited/fragmented memory.
     p3d::io::FileHandle lcfFile;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_open_begin", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     LOG("[World] LCF open begin: %s", lcfPath.c_str());
     if (!lcfFile.Open(p3d::io::ResolvePath(lcfPath), p3d::io::FileHandle::Mode::Read)) {
         LOG("[World] Failed to open: %s", lcfPath.c_str());
         return false;
     }
     LOG("[World] LCF open complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_open_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     const int64_t lcfFileSize = lcfFile.Size();
     LOG("[World] LCF size: %lld", (long long)lcfFileSize);
     if (lcfFileSize <= 0 || lcfFileSize > INT32_MAX) {
@@ -4506,11 +4653,19 @@ bool World::Load(const std::string& lcfPath) {
         return false;
     }
     LOG("[World] LCF header parsed: %u entries", (u32)entries.size());
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_header_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // Load TPG textures into VRAM (PSX HandleTPGChunk)
     LOG("[World] TPG load begin");
     LoadTPGTextures(data, dataSize);
     LOG("[World] TPG load complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_tpg_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
     FillMeter(40);
 
 #if MOD_LOADER
@@ -4570,6 +4725,10 @@ bool World::Load(const std::string& lcfPath) {
     LOG("[World] RCI/RCP load begin");
     LoadGeoPairsInRange(this, entries, data, dataSize, 0, (u32)entries.size(), ".RCI", ".RCP", 1);
     LOG("[World] RCI/RCP load complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_rci_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // PSX petal-based loading: the LCF contains multiple WDB+BLK groups,
     // one per petal. Each petal starts with a .WDB entry followed by .BLK entries.
@@ -4621,6 +4780,10 @@ bool World::Load(const std::string& lcfPath) {
         g_database->Scan(data + entries[i].offset, entries[i].size);
     }
     LOG("[World] WDB scan complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_wdb_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 #if MOD_LOADER
     {
         char levelScope[16], parameterName[32];
@@ -4635,10 +4798,18 @@ bool World::Load(const std::string& lcfPath) {
     LOG("[World] PCI/PCP load begin");
     LoadGeoPairsInRange(this, entries, data, dataSize, petalStart, petalEnd, ".PCI", ".PCP", 2);
     LOG("[World] PCI/PCP load complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_geo_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     LOG("[World] VRAM refresh begin");
     RefreshVRAMTexture();
     LOG("[World] VRAM refresh complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_vram_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // Build block volume list from this petal's WDB
     std::vector<DBVolume*> blockVolumes;
@@ -4651,6 +4822,10 @@ bool World::Load(const std::string& lcfPath) {
     LOG("[World] block metadata init begin");
     blockMgr.LoadBlocksFunc(blockVolumes);
     LOG("[World] block metadata init complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_blocks_done", GetCurLevelID(),
+        static_cast<s32>(currentLevelIndex), static_cast<s32>(targetLevelIndex));
+#endif
 
     // PSX timing: BLK parse/load is performed later during Construct, after AI::Populate.
     // Keep only block metadata (LoadBlocksFunc) here and defer Parse() to preserve

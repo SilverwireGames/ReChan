@@ -17,6 +17,7 @@
 #include "pc/rechan_icon_embedded.h"
 #include "pc/textmgr.h"
 #include "gen/game.h"
+#include "gen/world.h"
 #include "gen/time.h"
 #include "gen/display.h"
 #include "gen/geometry.h"
@@ -337,14 +338,19 @@ int main(int argc, char** argv) {
     PspPerf::Trace("main: game open");
 #endif
 
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && !defined(PSP_PERF_SOAK)
-    // The profile EBOOT is intended for unattended PPSSPP/hardware captures.
-    // Seed the first playable level and use the existing title auto-start path
-    // so the measured window contains real Play frames rather than title/menu
-    // rendering.  This is compiled out of the release target.
+#if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
+    // The USB QA EBOOT starts from a deterministic playable checkpoint.  This
+    // is intentionally independent of PSP_PERF_SOAK: soak keeps the session
+    // alive, while this flag selects the scene used by the benchmark.  The
+    // shipping build does not define it and retains the normal boot flow.
+    // The level table is loaded by Game::gsInitState, which runs after this
+    // bootstrap call. Keep the sentinel/index simple here and resolve the
+    // stable phase ID in gsOpenFEState once GAME_LN.TXT is available.
     g_selectedLevel = 0;
     game.QueueTitleNewGameStart();
-    PspPerf::Trace("main: queued auto start");
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::Trace("main: queued phase1 auto start");
+#endif
 #endif
 
 #if MOD_LOADER
@@ -558,15 +564,25 @@ int main(int argc, char** argv) {
 #if defined(PSP_PERF_TELEMETRY)
         // Profile only the interactive game state. Boot, title and loading
         // have intentionally different costs and would hide the gameplay
-        // frame budget. Once 600 gameplay frames are collected, stop cleanly
-        // so an unattended PPSSPP run still emits PSP_PERF.TXT.
-        if (game.GetState() == GameState::Play) {
+        // frame budget. The PSP benchmark freezes each 600-frame scenario
+        // before moving to the next level; it never renders a measurement HUD.
+        if (game.GetState() == GameState::Play && !DebugUI::IsBenchmarkFinished()) {
             PspPerf::RecordFrame(
                 static_cast<u32>((Time::GetTimeInSeconds() - frameStart) * 1000000.0),
                 g_frameProfile.logicMs,
                 g_frameProfile.drawSubmitMs,
                 g_frameProfile.swapMs);
-            if (PspPerf::ShouldStop()) {
+#if defined(PSP_AUTO_START_PHASE1)
+            DebugUI::OnBenchmarkFrameRecorded();
+            const bool queuedNextBenchmarkScenario =
+                DebugUI::QueueNextBenchmarkScenario(&game);
+#else
+            constexpr bool queuedNextBenchmarkScenario = false;
+#endif
+            // A non-soak profile may still use the multi-scenario runner. Do
+            // not stop after a completed scenario when the next load was
+            // queued; stop only after the final report.
+            if (PspPerf::ShouldStop() && !queuedNextBenchmarkScenario) {
                 break;
             }
 #if defined(PSP_STAGE_DIAGNOSTIC)

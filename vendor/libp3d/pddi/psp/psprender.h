@@ -26,6 +26,18 @@ struct PspVertex {
     float x, y, z;
 };
 
+// PSX packet geometry is authored with byte UVs. Keep the UV lanes as native
+// 16-bit GU coordinates while retaining float positions: the latter avoids
+// changing the model-space scale used by the engine's 3D matrices. This is a
+// 20-byte stream instead of the regular 24-byte float stream and is valid for
+// page-backed PSX geometry whose UVs are integral.
+struct PspPackedVertex {
+    s16 u, v;
+    u32 color;
+    float x, y, z;
+};
+static_assert(sizeof(PspPackedVertex) == 20, "PSP packed vertex must match GU layout");
+
 template <typename T, std::size_t Alignment>
 struct PspAlignedAllocator {
     using value_type = T;
@@ -67,27 +79,60 @@ public:
     pddiPrimType GetPrimType() const override { return primType; }
 
     const PspVertex* GetVertices() const { return vertices.data(); }
+    const PspPackedVertex* GetPackedVertices() const { return packedVertices.data(); }
     const u16* GetIndices() const { return indices.data(); }
+    bool HasValidIndices() const { return indicesValid; }
+    bool HasPackedVertices() const { return packedVerticesValid; }
+    bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
+                                const u32* uvOffsets, const u32* colourOffsets,
+                                u32 count, bool updateUv, bool updateColour);
+    bool UsesStagedIndexedVertices() const;
     // Direct indexed submissions borrow the persistent vertex array until the
     // current GU list is fenced. These hooks keep mutation/destruction from
     // racing the asynchronous GE read.
     void PrepareForMutation();
     void MarkDirectSubmission();
-    float GetTPage(u16 index) const {
-        return index < tpages.size() ? tpages[index] : -1.0f;
+    bool HasMaterialKey(u16 index) const {
+        return index < materialValid.size() && materialValid[index] != 0;
     }
-    float GetCba(u16 index) const {
-        return index < cbas.size() ? cbas[index] : 0.0f;
+    u32 GetMaterialKey(u16 index) const {
+        return index < materialKeys.size() ? materialKeys[index] : 0u;
     }
 
 private:
     pddiPrimType primType;
     u32 vertexFormat;
     std::vector<PspVertex, PspAlignedAllocator<PspVertex, 16>> vertices;
-    std::vector<float> tpages;
-    std::vector<float> cbas;
-    std::vector<u16> indices;
+    std::vector<PspPackedVertex, PspAlignedAllocator<PspPackedVertex, 16>> packedVertices;
+    bool packedVerticesValid = false;
+    std::size_t packedVerticesAllocatedBytes = 0;
+    // Material lanes are supplied as float fields by the shared PDDI API,
+    // but PSP texture page/CLUT identifiers are 16-bit integers. Encode them
+    // once when the buffer is mutated instead of converting and validating
+    // them for every triangle on the frame path.
+    std::vector<u32> materialKeys;
+    std::vector<u8> materialValid;
+    // Native indexed GU draws can borrow this storage until the current
+    // display list is fenced. Keep it aligned so the common path can avoid
+    // copying every material run into sceGuGetMemory().
+    std::vector<u16, PspAlignedAllocator<u16, 16>> indices;
+    bool indicesValid = true;
     u32 directSubmissionSerial = 0;
+    // A buffer that is mutated after a direct indexed submission cannot keep
+    // borrowing its persistent vertex/index storage within the same GU list:
+    // the GE may still be reading it. Keep the promotion scoped to the
+    // submission generation; after the fence the persistent storage is safe
+    // to borrow directly again.
+    bool stagedIndexedVertices = false;
+    u32 stagedIndexedSerial = 0;
+    // If a buffer is mutated after a direct submission in the same list, a
+    // fence is required once to protect the GE. Remember that behavior so
+    // later frames stage this dynamic buffer from the start instead of
+    // repeating a costly Finish/Sync in the middle of every frame.
+    bool preferStagedIndexedVertices = false;
+
+    void RevalidateIndices();
+    void RebuildPackedVertices();
 };
 
 class pspTexture final : public pddiTexture {
@@ -228,7 +273,10 @@ public:
     const Mat4& GetWorldMatrix() const override { return world; }
     const Mat4& GetViewMatrix() const override { return view; }
     const Mat4& GetProjectionMatrix() const override { return projection; }
-    void SetWorldMirror(bool enable) override { worldMirror = enable; }
+    void SetWorldMirror(bool enable) override {
+        if (worldMirror != enable) gu3DStateReady = false;
+        worldMirror = enable;
+    }
     bool GetWorldMirror() const override { return worldMirror; }
 
     void SetCullMode(pddiCullMode mode) override;
@@ -254,9 +302,19 @@ public:
                          float x2, float y2, float r2, float g2, float b2, float a2,
                          float x3, float y3, float r3, float g3, float b3, float a3) override;
 
-    void SetTexture(pddiTexture* texture) override { currentTexture = texture; }
-    void SetVRAMHandle(u32 handle) override { vramHandle = handle; }
-    void SetTexInfoOverride(bool enabled, u32 word) override { texInfoOverride = enabled; texInfoWord = word; }
+    void SetTexture(pddiTexture* texture) override {
+        currentTexture = texture;
+        pageBindingValid = false;
+    }
+    void SetVRAMHandle(u32 handle) override {
+        if (vramHandle != handle) pageBindingValid = false;
+        vramHandle = handle;
+    }
+    void SetTexInfoOverride(bool enabled, u32 word) override {
+        if (texInfoOverride != enabled || texInfoWord != word) pageBindingValid = false;
+        texInfoOverride = enabled;
+        texInfoWord = word;
+    }
     u32 CreateVRAMTexture(int w, int h, const u16* data) override;
     void DestroyVRAMTexture(u32 handle) override;
     void UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) override;
@@ -314,12 +372,29 @@ private:
     bool texInfoOverride = false;
     u32 texInfoWord = 0;
     bool realTextureMode = false;
+    bool pageBindingValid = false;
+    bool pageTexScaleValid = false;
+    bool pageTexScalePacked = false;
+    u32 lastBoundHandle = 0;
+    u16 lastBoundTpage = 0;
+    u16 lastBoundCba = 0;
+    bool lastBoundZeroKey = false;
+    bool clutBindingValid = false;
+    u32 lastClutHandle = 0;
+    u16 lastClutCba = 0;
+    u8 lastClutDepth = 0;
+    bool lastClutWordZeroKey = false;
+    bool lastClutBlend = false;
     bool worldMirror = false;
     bool zBufferEnabled = true;
     bool polygonOffsetEnabled = false;
     u32 polygonOffset = 0;
     pddiCullMode cullMode = PDDI_CULL_NORMAL;
     pddiBlendMode blendMode = PDDI_BLEND_NONE;
+    // Setup3DState is a recovery barrier after 2D/overlay passes. Most 3D
+    // buffers already leave the same state active; avoid replaying the
+    // cached wrapper calls once that state is known to be valid.
+    bool gu3DStateReady = false;
     std::array<VramImage, 8> vramImages{};
     // A decoded 256x256 PSX page is 128 KiB. Sixteen resident pages keep the
     // active level inside the PSP user heap while avoiding render-path
@@ -330,14 +405,18 @@ private:
     // finish/sync the list before recycling; normal draws need no allocation
     // or CPU/GE fence. Both expanded and indexed geometry use this storage.
     static constexpr u32 kFrameVertexCapacity = 65536;
+#if !defined(PSP_ENABLE_NATIVE_INDEXED) || !defined(PSP_INDEXED_LIST_MEMORY)
     alignas(16) std::array<PspVertex, kFrameVertexCapacity> frameVertices{};
+#endif
     u32 frameVertexUsed = 0;
     // Native GU indexed draws keep the source vertex once per prim buffer and
     // submit a compact u16 index stream for each material run. The arena
     // remains submission-owned because the GE reads it asynchronously after the
     // CPU returns from sceGuDrawArray().
     static constexpr u32 kFrameIndexCapacity = 131072;
+#if !defined(PSP_INDEXED_LIST_MEMORY)
     alignas(16) std::array<u16, kFrameIndexCapacity> frameIndices{};
+#endif
     u32 frameIndexUsed = 0;
     // Native indexed batches use local indices so each GU submission is
     // self-contained.  The stamp table avoids clearing 65K entries for every
@@ -368,6 +447,7 @@ private:
     void Setup3DState();
     void Setup2DState();
     void BindPage(float tpage, float cba, bool wordZeroKey = false);
+    void SetPageTextureScale(bool packedUv);
     PageCache* GetDecodedPage(u32 handle, u16 tpage);
     VramImage* GetVram(u32 handle);
     void Draw2D(const PspVertex* vertices, int count, pddiTexture* texture);

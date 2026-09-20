@@ -1,8 +1,17 @@
 #pragma once
 
+class Camera;
+class Game;
+
 namespace DebugUI {
     void Init();
     void Draw();
+#if defined(RC_PLATFORM_PSP)
+    void UpdateBenchmarkCamera(Camera* camera);
+    void OnBenchmarkFrameRecorded();
+    bool IsBenchmarkFinished();
+    bool QueueNextBenchmarkScenario(Game* game);
+#endif
     bool IsEnabled();
     bool IsHumanoidDamageDisabled();
     bool ShouldBlockGameInput();

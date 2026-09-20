@@ -1,11 +1,284 @@
 #include "pc/debugui.h"
 
+#if defined(PSP_AUTO_START_PHASE1)
+#include "gen/camera.h"
+#include "gen/common.h"
+#include "gen/game.h"
+#include "gen/world.h"
+#include "p3d/context.h"
+#include "p3d/input.h"
+#include "pc/inputaction.h"
+#include "psp/psp_perf.h"
+
+#include <algorithm>
+#include <cstdio>
+
+namespace {
+
+constexpr u32 kWarmupFrames = 180;
+constexpr u32 kMeasurementFrames = 600;
+// Ten 60-frame segments make one complete route fit exactly inside the
+// 600-frame measurement window.
+constexpr u32 kSegmentFrames = 60;
+
+struct BenchmarkScenario {
+    s32 levelId;
+    const char* shortName;
+};
+
+// Keep the benchmark underhood-only and cover representative gameplay maps.
+// Level 7 is the hub/destination area used by the manual PSP baseline.
+static constexpr BenchmarkScenario kScenarios[] = {
+    { 1, "CHINATOWN" },
+    { 2, "WATERFRONT" },
+    { 3, "SEWER" },
+    { 4, "ROOF" },
+    { 5, "FACTORY" },
+    { 6, "TEMPLE" },
+    { 7, "HUB" },
+};
+
+struct RoutePoint {
+    s32 eyeX;
+    s32 eyeY;
+    s32 eyeZ;
+    s32 targetX;
+    s32 targetY;
+    s32 targetZ;
+};
+
+// Keep the camera close to the loaded checkpoint in every map. A large
+// world-space route was valid for phase 1 but could leave the resident block
+// set in another scenario, making the renderer walk geometry that was never
+// loaded. This local orbit still changes the visible material/depth mix while
+// keeping the benchmark deterministic and inside the active block.
+static constexpr RoutePoint kRoute[] = {
+    {    0,   0,    0,    0,   0,    0 },
+    {  192,   0,    0,  128,   0,    0 },
+    {  192,   0,  192,  128,   0,  128 },
+    {    0,   0,  256,    0,   0,  160 },
+    { -192,   0,  192, -128,   0,  128 },
+    { -192,   0,    0, -128,   0,    0 },
+    { -192,   0, -192, -128,   0, -128 },
+    {    0,   0, -256,    0,   0, -160 },
+    {  192,   0, -192,  128,   0, -128 },
+    {  192,   0,    0,  128,   0,    0 },
+    {    0,   0,    0,    0,   0,    0 },
+};
+
+static bool s_baseCaptured = false;
+static bool s_measurementStarted = false;
+static bool s_scenarioFinished = false;
+static bool s_allScenariosFinished = false;
+static bool s_transitionQueued = false;
+// Phase 1.1 is an interactive capture: the player walks through the first
+// door, stops in the two-enemy room, then arms the underhood benchmark with
+// L+R+START. This avoids guessing a checkpoint coordinate and guarantees the
+// measured population is the real room the QA pass is investigating.
+static bool s_phase11Active = false;
+static u32 s_scenarioIndex = 0;
+static s32 s_activeLevelId = -1;
+static u32 s_routeFrame = 0;
+static u32 s_measurementFrames = 0;
+static LVector s_baseEye = {};
+static LVector s_baseTarget = {};
+
+static s32 Lerp(s32 from, s32 to, u32 numerator, u32 denominator) {
+    return from + static_cast<s32>((static_cast<s64>(to - from) * numerator) / denominator);
+}
+
+} // namespace
+#endif
+
 namespace DebugUI {
+
 void Init() {}
+
+// Benchmark output is intentionally underhood-only. Drawing a large text HUD
+// changes the GU workload and makes the result less useful for optimization.
 void Draw() {}
+
+#if defined(RC_PLATFORM_PSP)
+void UpdateBenchmarkCamera(Camera* camera) {
+#if defined(PSP_AUTO_START_PHASE1)
+    if (!camera) return;
+
+    if (!g_game || !g_game->GetWorld()) return;
+    World* world = g_game->GetWorld();
+    const s32 levelId = world->GetCurLevelID();
+    if (levelId != s_activeLevelId) {
+        for (u32 i = 0; i < static_cast<u32>(sizeof(kScenarios) / sizeof(kScenarios[0])); ++i) {
+            if (kScenarios[i].levelId == levelId) {
+                s_scenarioIndex = i;
+                break;
+            }
+        }
+        s_activeLevelId = levelId;
+        s_baseCaptured = false;
+        s_measurementStarted = false;
+        s_scenarioFinished = false;
+        s_transitionQueued = false;
+        s_phase11Active = false;
+        s_routeFrame = 0;
+        s_measurementFrames = 0;
+        PspPerf::WriteState("play", levelId,
+            static_cast<s32>(world->GetCurrentLevelIndex()),
+            static_cast<s32>(world->GetTargetLevelIndex()));
+    }
+
+#if defined(PSP_BENCH_PHASE11_ONLY)
+    if (levelId != 1 || !p3d::input) {
+        camera->ClearBenchmarkMode();
+        return;
+    }
+    if (!s_phase11Active) {
+        camera->ClearBenchmarkMode();
+        const bool arm = p3d::input->IsGamepadButtonDown(GpBtn::LB)
+            && p3d::input->IsGamepadButtonDown(GpBtn::RB)
+            && p3d::input->IsGamepadButtonTriggered(GpBtn::Start);
+        if (!arm) return;
+
+        // Capture the exact post-door camera/player location supplied by the
+        // real PSP run. The first 180 frames are warm-up; only the following
+        // 600 frames are written to PSP_PERF_PHASE1_1.TXT.
+        s_phase11Active = true;
+        s_baseCaptured = false;
+        s_measurementStarted = false;
+        s_scenarioFinished = false;
+        s_routeFrame = 0;
+        s_measurementFrames = 0;
+        LOG("[PSP Bench] phase 1.1 armed at first-door room");
+    }
+#endif
+
+    if (s_allScenariosFinished || s_scenarioFinished) {
+        camera->ClearBenchmarkMode();
+        return;
+    }
+
+    if (!s_baseCaptured) {
+        s_baseEye = camera->GetPosition();
+        s_baseTarget = camera->GetTargetPos();
+        // A freshly loaded Play camera can still have a zero target before
+        // its first follow-path update. Aim at the scene ahead in that case.
+        if (s_baseTarget.x == 0 && s_baseTarget.y == 0 && s_baseTarget.z == 0) {
+            s_baseTarget = { s_baseEye.x, s_baseEye.y, s_baseEye.z + 1600 };
+        }
+        s_baseCaptured = true;
+    }
+
+    if (!s_measurementStarted && s_routeFrame == kWarmupFrames) {
+        PspPerf::BeginMeasurementWindow();
+        s_measurementStarted = true;
+        s_measurementFrames = 0;
+    }
+
+    constexpr u32 kPointCount = static_cast<u32>(sizeof(kRoute) / sizeof(kRoute[0]));
+    constexpr u32 kRouteFrames = (kPointCount - 1u) * kSegmentFrames;
+    const u32 routeFrame = kRouteFrames == 0 ? 0 : s_routeFrame % kRouteFrames;
+    const u32 point = routeFrame / kSegmentFrames;
+    const u32 segmentFrame = routeFrame % kSegmentFrames;
+    const RoutePoint& from = kRoute[point];
+    const RoutePoint& to = kRoute[point + 1u];
+
+    LVector eye = {
+        s_baseEye.x + Lerp(from.eyeX, to.eyeX, segmentFrame, kSegmentFrames),
+        s_baseEye.y + Lerp(from.eyeY, to.eyeY, segmentFrame, kSegmentFrames),
+        s_baseEye.z + Lerp(from.eyeZ, to.eyeZ, segmentFrame, kSegmentFrames),
+    };
+    LVector target = {
+        s_baseTarget.x + Lerp(from.targetX, to.targetX, segmentFrame, kSegmentFrames),
+        s_baseTarget.y + Lerp(from.targetY, to.targetY, segmentFrame, kSegmentFrames),
+        s_baseTarget.z + Lerp(from.targetZ, to.targetZ, segmentFrame, kSegmentFrames),
+    };
+    camera->SetBenchmarkPose(eye, target);
+    ++s_routeFrame;
+#else
+    (void)camera;
+#endif
+}
+
+void OnBenchmarkFrameRecorded() {
+#if defined(PSP_AUTO_START_PHASE1) && defined(PSP_PERF_TELEMETRY)
+    if (!s_measurementStarted || s_scenarioFinished) return;
+    ++s_measurementFrames;
+    if (s_measurementFrames >= kMeasurementFrames) {
+        char path[48] = {};
+#if defined(PSP_BENCH_PHASE11_ONLY)
+        std::snprintf(path, sizeof(path), "PSP_PERF_PHASE1_1.TXT");
+#else
+        std::snprintf(path, sizeof(path), "PSP_PERF_S%02lu_L%02ld.TXT",
+            static_cast<unsigned long>(s_scenarioIndex + 1u),
+            static_cast<long>(kScenarios[s_scenarioIndex].levelId));
+#endif
+        PspPerf::WriteReportTo(path);
+        LOG("[PSP Bench] scenario %lu complete: levelId=%ld frames=%lu report=%s",
+            static_cast<unsigned long>(s_scenarioIndex + 1u),
+            static_cast<long>(kScenarios[s_scenarioIndex].levelId),
+            static_cast<unsigned long>(s_measurementFrames),
+            path);
+        s_scenarioFinished = true;
+#if defined(PSP_BENCH_PHASE11_ONLY)
+        s_phase11Active = false;
+#endif
+        s_allScenariosFinished = s_scenarioIndex + 1u >=
+            static_cast<u32>(sizeof(kScenarios) / sizeof(kScenarios[0]));
+    }
+#endif
+}
+
+bool IsBenchmarkFinished() {
+#if defined(PSP_AUTO_START_PHASE1)
+    return s_scenarioFinished;
+#else
+    return false;
+#endif
+}
+
+bool QueueNextBenchmarkScenario(Game* game) {
+#if defined(PSP_AUTO_START_PHASE1)
+#if defined(PSP_BENCH_PHASE11_ONLY)
+    (void)game;
+    return false;
+#else
+    if (!game || !s_scenarioFinished || s_allScenariosFinished || s_transitionQueued) {
+        return false;
+    }
+
+    World* world = game->GetWorld();
+    if (!world) return false;
+
+    const u32 nextScenario = s_scenarioIndex + 1u;
+    const s32 nextLevelIndex = world->LevelIDToIndex(kScenarios[nextScenario].levelId);
+    world->SetTargetLevelPetal(static_cast<u32>(nextLevelIndex), 0);
+    world->ResetLevel();
+    g_selectedLevel = static_cast<s16>(nextLevelIndex);
+    s_transitionQueued = true;
+    PspPerf::WriteState("queue", kScenarios[nextScenario].levelId,
+        nextLevelIndex, static_cast<s32>(world->GetTargetLevelIndex()));
+    LOG("[PSP Bench] queue scenario %lu: levelId=%ld index=%ld",
+        static_cast<unsigned long>(nextScenario + 1u),
+        static_cast<long>(kScenarios[nextScenario].levelId),
+        static_cast<long>(nextLevelIndex));
+    game->SetState(GameState::QueueLevelLoad);
+    return true;
+#endif
+#else
+    (void)game;
+    return false;
+#endif
+}
+#endif
+
 bool IsEnabled() { return false; }
 bool IsHumanoidDamageDisabled() { return false; }
-bool ShouldBlockGameInput() { return false; }
+bool ShouldBlockGameInput() {
+#if defined(PSP_BENCH_PHASE11_ONLY)
+    return s_phase11Active;
+#else
+    return false;
+#endif
+}
 bool IsPlayerInputAllowed() { return true; }
 bool IsDebugCameraInputAllowed() { return false; }
 }

@@ -160,6 +160,13 @@ s32 Effects_DrawEffects(s32 blockNum) {
 s32 Effects_AddEffect(Effects* effect, s32 addToHead) {
     MARKFUNCTION(0x8004C9D8);
 
+    if (!effect) {
+        return 0;
+    }
+    if (effect->inEffectsList) {
+        return 1;
+    }
+
     ccMinNode* after = addToHead ? nullptr : g_effectsList.tail;
     g_effectsList.AddNode(after, effect);
     effect->inEffectsList = 1;
@@ -168,6 +175,10 @@ s32 Effects_AddEffect(Effects* effect, s32 addToHead) {
 
 Effects* Effects_RemoveEffect(Effects* effect) {
     MARKFUNCTION(0x8004CA28);
+
+    if (!effect || !effect->inEffectsList) {
+        return effect;
+    }
 
     g_effectsList.RemNode(effect);
     effect->inEffectsList = 0;

@@ -169,6 +169,7 @@ void Camera::Reset() {
 
     // Reset camera flags before selecting mode.
     flags = 0;
+    benchmarkMode = false;
 
     // Mode: Follow (PSX SetMode(1))
     SetMode(CAM_MODE_FOLLOW);
@@ -230,6 +231,12 @@ void Camera::BeginLogicStepHighFPS() {
 }
 
 void Camera::UpdateHighFPS() {
+#if defined(RC_PLATFORM_PSP)
+    if (benchmarkMode) {
+        Update();
+        return;
+    }
+#endif
 #if IMPROVED_DEBUG_CAM
     if (modeFunc == &Camera::DebugCam) {
         DebugCam();
@@ -361,12 +368,30 @@ void Camera::UpdateHighFPS() {
 }
 #endif
 
+void Camera::SetBenchmarkPose(const LVector& eye, const LVector& target) {
+    benchmarkMode = true;
+    position = eye;
+    curPos = eye;
+    prevPosition = eye;
+    targetPos = target;
+    prevTargetPos = target;
+    flags |= 0x02u;
+    LookAtTarget(&targetPos);
+}
+
 
 // Camera::Think (0x80047F28)
 // Per-frame entry point. Dispatches to current mode function, then Move + Shake.
 
 void Camera::Think() {
     MARKFUNCTION(0x80047F28);
+
+    if (benchmarkMode) {
+        // The benchmark writes an explicit pose after gameplay logic and
+        // before UpdateHighFPS(). Do not let follow-path interpolation
+        // replace that pose on the next frame.
+        return;
+    }
 
     if (cameraAnim == nullptr) {
         bool skipModeFunc = false;

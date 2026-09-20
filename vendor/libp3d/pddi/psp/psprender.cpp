@@ -287,11 +287,13 @@ static u16 ConvertPsxTexelToGu5551(u16 source, bool transparent) {
     return static_cast<u16>(rgb | (transparent ? 0u : 0x8000u));
 }
 
-static void LoadGumMatrix(int mode, const Mat4& source) {
+static bool LoadGumMatrix(int mode, const Mat4& source) {
     static std::array<Mat4, 4> uploaded{};
     static std::array<u32, 4> generations{};
     if (kCacheGuState && generations[mode] == g_matrixGeneration
-        && std::memcmp(uploaded[mode].Data(), source.Data(), sizeof(ScePspFMatrix4)) == 0) return;
+        && std::memcmp(uploaded[mode].Data(), source.Data(), sizeof(ScePspFMatrix4)) == 0) {
+        return false;
+    }
     uploaded[mode] = source;
     generations[mode] = g_matrixGeneration;
     PspPerf::CountRenderer(PspPerf::RendererCounter::MatrixUploads);
@@ -308,6 +310,7 @@ static void LoadGumMatrix(int mode, const Mat4& source) {
     }
     sceGumMatrixMode(mode);
     sceGumLoadMatrix(&matrix);
+    return true;
 }
 
 static void SetBlend(pddiBlendMode mode) {
@@ -374,13 +377,71 @@ static void Convert2DUvToTexels(PspVertex* vertices, int count, pddiTexture* tex
 pspPrimBuffer::pspPrimBuffer(const pddiPrimBufferDesc& desc)
     : primType(desc.primType), vertexFormat(desc.vertexFormat) {
     vertices.resize(desc.vertexCount);
-    tpages.resize(desc.vertexCount, -1.0f);
-    cbas.resize(desc.vertexCount, 0.0f);
+    materialKeys.resize(desc.vertexCount, 0u);
+    materialValid.resize(desc.vertexCount, 0u);
     indices.resize(desc.indexCount);
 }
 
 pspPrimBuffer::~pspPrimBuffer() {
     PrepareForMutation();
+    if (packedVerticesAllocatedBytes != 0) {
+        PspPerf::AddRendererMemory(-static_cast<s32>(packedVerticesAllocatedBytes));
+    }
+}
+
+void pspPrimBuffer::RebuildPackedVertices() {
+    packedVerticesValid = false;
+    if (vertices.empty()
+        || (vertexFormat & (PDDI_V_UV | PDDI_V_TEXINFO)) != (PDDI_V_UV | PDDI_V_TEXINFO)) {
+        return;
+    }
+
+    const auto packTexCoord = [](float value, s16* out) {
+        if (!std::isfinite(value)) return false;
+        const float rounded = std::round(value);
+        if (value != rounded || rounded < -32768.0f || rounded > 32767.0f) {
+            return false;
+        }
+        *out = static_cast<s16>(rounded);
+        return true;
+    };
+
+    // Validate before reserving so real-texture buffers with fractional UVs
+    // do not retain a needless second vertex array after falling back.
+    for (const PspVertex& source : vertices) {
+        s16 u = 0, v = 0;
+        if (!packTexCoord(source.u, &u) || !packTexCoord(source.v, &v)) {
+            return;
+        }
+    }
+
+    if (packedVertices.capacity() < vertices.size()) {
+        packedVertices.reserve(vertices.size());
+    }
+    packedVertices.resize(vertices.size());
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        const PspVertex& source = vertices[i];
+        PspPackedVertex& target = packedVertices[i];
+        target.u = static_cast<s16>(std::lround(source.u));
+        target.v = static_cast<s16>(std::lround(source.v));
+        target.color = source.color;
+        target.x = source.x;
+        target.y = source.y;
+        target.z = source.z;
+    }
+
+    const std::size_t allocatedBytes = packedVertices.capacity() * sizeof(PspPackedVertex);
+    if (allocatedBytes > packedVerticesAllocatedBytes) {
+        PspPerf::AddRendererMemory(static_cast<s32>(allocatedBytes - packedVerticesAllocatedBytes));
+    }
+    packedVerticesAllocatedBytes = allocatedBytes;
+    WritebackDcacheRange(packedVertices.data(), packedVertices.size() * sizeof(PspPackedVertex));
+    packedVerticesValid = true;
+}
+
+bool pspPrimBuffer::UsesStagedIndexedVertices() const {
+    return preferStagedIndexedVertices
+        || (stagedIndexedVertices && stagedIndexedSerial == g_submissionSerial);
 }
 
 void pspPrimBuffer::PrepareForMutation() {
@@ -397,6 +458,11 @@ void pspPrimBuffer::MarkDirectSubmission() {
 
 void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
     if (!data) return;
+    if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
+        stagedIndexedVertices = true;
+        stagedIndexedSerial = g_submissionSerial;
+        preferStagedIndexedVertices = true;
+    }
     PrepareForMutation();
 #if !defined(NDEBUG)
     static u32 setVertexProbe = 0;
@@ -408,8 +474,9 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
     }
 #endif
     vertices.resize(count);
-    tpages.resize(count, -1.0f);
-    cbas.resize(count, 0.0f);
+    materialKeys.resize(count, 0u);
+    materialValid.resize(count, 0u);
+    RevalidateIndices();
 #if !defined(NDEBUG)
     if (probe < 12u) LOG("[PSP Prim] vertex resized #%lu", static_cast<unsigned long>(probe));
 #endif
@@ -441,17 +508,93 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
             tpage = input[0]; cba = input[1];
         }
         vertices[i] = {u, v, MakeGeometryColor(r, g, b), x, y, z};
-        tpages[i] = tpage;
-        cbas[i] = cba;
+        const bool materialIsValid = hasTexInfo
+            && std::isfinite(tpage) && tpage >= 0.0f && tpage <= 65535.0f
+            && std::isfinite(cba) && cba >= 0.0f && cba <= 65535.0f;
+        materialValid[i] = materialIsValid ? 1u : 0u;
+        materialKeys[i] = materialIsValid
+            ? (static_cast<u32>(static_cast<u16>(tpage)) << 16)
+                | static_cast<u16>(cba)
+            : 0u;
     }
     WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    RebuildPackedVertices();
 #if !defined(NDEBUG)
     if (probe < 12u) LOG("[PSP Prim] vertex done #%lu", static_cast<unsigned long>(probe));
 #endif
 }
 
+bool pspPrimBuffer::PatchDynamicAttributes(const u8* rawData, u32 rawSize,
+                                           const u32* uvOffsets,
+                                           const u32* colourOffsets,
+                                           u32 count, bool updateUv,
+                                           bool updateColour) {
+    if (!rawData || count != vertices.size()
+        || (updateUv && !uvOffsets) || (updateColour && !colourOffsets)) {
+        return false;
+    }
+
+    constexpr u32 kInvalidOffset = 0xFFFFFFFFu;
+    // Validate the complete patch before touching the persistent vertex array.
+    // A failed map must fall back to a full rebuild rather than leave a mixed
+    // frame with only part of its animated attributes refreshed.
+    for (u32 i = 0; i < count; ++i) {
+        if (updateUv && uvOffsets[i] != kInvalidOffset
+            && (uvOffsets[i] + 1u >= rawSize)) {
+            return false;
+        }
+        if (updateColour && (colourOffsets[i] == kInvalidOffset
+            || colourOffsets[i] + 2u >= rawSize)) {
+            return false;
+        }
+    }
+
+    if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
+        stagedIndexedVertices = true;
+        stagedIndexedSerial = g_submissionSerial;
+        preferStagedIndexedVertices = true;
+    }
+    PrepareForMutation();
+    for (u32 i = 0; i < count; ++i) {
+        if (updateUv && uvOffsets[i] != kInvalidOffset) {
+            const u32 offset = uvOffsets[i];
+            vertices[i].u = static_cast<float>(rawData[offset + 0u]);
+            vertices[i].v = static_cast<float>(rawData[offset + 1u]);
+        }
+        if (updateColour) {
+            const u32 offset = colourOffsets[i];
+            vertices[i].color = MakeGeometryColor(
+                rawData[offset + 0u] / 128.0f,
+                rawData[offset + 1u] / 128.0f,
+                rawData[offset + 2u] / 128.0f);
+        }
+        if (packedVerticesValid) {
+            if (updateUv && uvOffsets[i] != kInvalidOffset) {
+                packedVertices[i].u = static_cast<s16>(std::clamp(
+                    static_cast<int>(std::lround(vertices[i].u)), -32768, 32767));
+                packedVertices[i].v = static_cast<s16>(std::clamp(
+                    static_cast<int>(std::lround(vertices[i].v)), -32768, 32767));
+            }
+            if (updateColour) {
+                packedVertices[i].color = vertices[i].color;
+            }
+        }
+    }
+    WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    if (packedVerticesValid) {
+        WritebackDcacheRange(packedVertices.data(),
+            sizeof(PspPackedVertex) * packedVertices.size());
+    }
+    return true;
+}
+
 void pspPrimBuffer::SetIndices(const u16* source, u32 count) {
     if (!source) return;
+    if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
+        stagedIndexedVertices = true;
+        stagedIndexedSerial = g_submissionSerial;
+        preferStagedIndexedVertices = true;
+    }
     PrepareForMutation();
 #if !defined(NDEBUG)
     static u32 setIndexProbe = 0;
@@ -468,9 +611,35 @@ void pspPrimBuffer::SetIndices(const u16* source, u32 count) {
     if (indices.capacity() < count) indices.reserve(count);
     indices.resize(count);
     std::copy(source, source + count, indices.begin());
+    RevalidateIndices();
+    // The GE reads the persistent index stream asynchronously after this
+    // method returns. Publish it once here; per-draw range write-backs are
+    // otherwise paid again for every material run in every frame.
+    WritebackDcacheRange(indices.data(), sizeof(u16) * indices.size());
 #if !defined(NDEBUG)
     if (probe < 12u) LOG("[PSP Prim] index done #%lu", static_cast<unsigned long>(probe));
 #endif
+}
+
+void pspPrimBuffer::RevalidateIndices() {
+    indicesValid = true;
+    const u32 vertexCount = static_cast<u32>(vertices.size());
+    for (const u16 index : indices) {
+        if (index >= vertexCount) {
+            indicesValid = false;
+            return;
+        }
+    }
+}
+
+bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,
+                                u32 rawSize, const u32* uvOffsets,
+                                const u32* colourOffsets, u32 vertexCount,
+                                bool updateUv, bool updateColour) {
+    if (!base) return false;
+    return static_cast<pspPrimBuffer*>(base)->PatchDynamicAttributes(
+        rawData, rawSize, uvOffsets, colourOffsets, vertexCount,
+        updateUv, updateColour);
 }
 
 pspTexture::~pspTexture() {
@@ -780,7 +949,13 @@ float pspGamepad::GetAxis(int axis) const {
 
 pspContext::pspContext(pspDisplay* display) : display(display) {
     PspPerf::AddRendererMemory(static_cast<s32>(sizeof(g_displayListStorage.words)
-        + sizeof(frameVertices) + sizeof(frameIndices) + sizeof(framePalettes)
+#if !defined(PSP_ENABLE_NATIVE_INDEXED) || !defined(PSP_INDEXED_LIST_MEMORY)
+        + sizeof(frameVertices)
+#endif
+#if !defined(PSP_INDEXED_LIST_MEMORY)
+        + sizeof(frameIndices)
+#endif
+        + sizeof(framePalettes)
         + sizeof(nativeRemap) + sizeof(nativeRemapStamp) + sizeof(nativeRemapSource)));
     VramImage& psxVram = vramImages[0];
     psxVram.width = kVramWidth;
@@ -816,7 +991,13 @@ pspContext::~pspContext() {
         cache = {};
     }
     PspPerf::AddRendererMemory(-static_cast<s32>(sizeof(g_displayListStorage.words)
-        + sizeof(frameVertices) + sizeof(frameIndices) + sizeof(framePalettes)
+#if !defined(PSP_ENABLE_NATIVE_INDEXED) || !defined(PSP_INDEXED_LIST_MEMORY)
+        + sizeof(frameVertices)
+#endif
+#if !defined(PSP_INDEXED_LIST_MEMORY)
+        + sizeof(frameIndices)
+#endif
+        + sizeof(framePalettes)
         + sizeof(nativeRemap) + sizeof(nativeRemapStamp) + sizeof(nativeRemapSource)));
     if (g_activeContext == this) g_activeContext = nullptr;
 }
@@ -833,6 +1014,13 @@ void pspContext::BeginFrame() {
     ResetDisplayListGuard();
     PspPerf::BeginFrame();
     ResetGuStateCache();
+    gu3DStateReady = false;
+    // A new direct list starts with a conservative texture key.  Keep the
+    // key alive across 3D primitive buffers within this frame; Setup3DState
+    // does not modify the texture registers, and invalidating it there turns
+    // every otherwise identical material into a full page/CLUT bind.
+    pageBindingValid = false;
+    pageTexScaleValid = false;
 #if defined(PSP_PERF_TELEMETRY)
     // Sample allocator/kernel state at most once per 60 presented frames.
     // Guard the arguments too: release must not execute diagnostic syscalls.
@@ -916,13 +1104,16 @@ void* pspContext::AllocateListMemory(std::size_t bytes) {
 }
 
 void pspContext::Setup3DState() {
+    if (gu3DStateReady) return;
     EnsureListSpace();
-    GuDisable(GU_TEXTURE_2D);
+    // DrawPrimBuffer/Draw2D explicitly invalidate this key when they change
+    // texture sources.  Preserve it here so consecutive 3D buffers can reuse
+    // the same GU page and CLUT without replaying all texture registers.
+    if (!pageBindingValid) GuDisable(GU_TEXTURE_2D);
     // 2D overlays and page rendering share the same GU state. Reset the
     // lighting/color-test state explicitly so a previous overlay cannot
     // multiply the next scene by a stale ambient or test value.
     GuDisable(GU_LIGHTING);
-    GuDisable(GU_ALPHA_TEST);
     GuDisable(GU_COLOR_TEST);
     GuDisable(GU_STENCIL_TEST);
     GuDisable(GU_COLOR_LOGIC_OP);
@@ -940,10 +1131,13 @@ void pspContext::Setup3DState() {
         case PDDI_CULL_INVERTED: GuEnable(GU_CULL_FACE); GuFrontFace(GU_CCW); break;
         case PDDI_CULL_NORMAL: default: GuEnable(GU_CULL_FACE); GuFrontFace(GU_CW); break;
     }
+    gu3DStateReady = true;
 }
 
 void pspContext::Setup2DState() {
     EnsureListSpace();
+    gu3DStateReady = false;
+    pageBindingValid = false;
     ++g_matrixGeneration; // These direct GUM writes replace all 3D matrices.
     GuDisable(GU_DEPTH_TEST);
     GuDisable(GU_CULL_FACE);
@@ -1028,6 +1222,21 @@ void pspContext::ApplyShader(const pspShader* shader) {
     if (shader) SetBlendMode(PDDI_BLEND_ALPHA);
 }
 
+void pspContext::SetPageTextureScale(bool packedUv) {
+    // GU 16-bit texture coordinates are normalized signed values. The PSX
+    // page path historically supplies float texels and scales them by 1/256;
+    // use the equivalent fixed-coordinate scale only while the compact UV
+    // stream is active. Include pageBindingValid because a 2D/real-texture
+    // pass may have changed GU state without changing this cache.
+    if (pageTexScaleValid && pageBindingValid && pageTexScalePacked == packedUv) {
+        return;
+    }
+    const float scale = packedUv ? (32767.0f / 256.0f) : (1.0f / 256.0f);
+    GuTexScale(scale, scale);
+    pageTexScaleValid = true;
+    pageTexScalePacked = packedUv;
+}
+
 void pspContext::DrawVRAMQuad(u32 handle, u16 tpage, u16 cba,
                               float x, float y, float w, float h,
                               float u0, float v0, float u1, float v1, pddiColour color) {
@@ -1041,6 +1250,7 @@ void pspContext::DrawVRAMQuad(u32 handle, u16 tpage, u16 cba,
     // DecodePage's background semantics key zero words, including coloured
     // index zero and opaque STP black. Do not use the 3D index-zero key.
     BindPage(tpage, cba, true);
+    SetPageTextureScale(false);
     // BindPage may fence/restart under cache pressure: allocate afterwards.
     auto* vertices = static_cast<PspVertex*>(AllocateListMemory(sizeof(PspVertex) * 6));
     if (vertices) {
@@ -1185,6 +1395,11 @@ void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
                        GU_TEXTURE_16BIT | GU_COLOR_4444 | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
                        spriteVertexCount, nullptr, sprites);
         PspPerf::RecordDrawSubmission(static_cast<u32>(spriteVertexCount));
+        // The next submission may be 3D and can use a different texture
+        // source.  Do not let the page-binding fast path inherit this 2D
+        // state when the caller does not rebuild the full GU state first.
+        pageBindingValid = false;
+        gu3DStateReady = false;
         return;
     }
     Draw2D(vertices, vertCount, tex);
@@ -1201,6 +1416,10 @@ void pspContext::Draw2D(const PspVertex* vertices, int count, pddiTexture* textu
                    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
                    count, nullptr, vertices);
     PspPerf::RecordDrawSubmission(static_cast<u32>(count));
+    // Draw2D changes the texture image/function state directly.  Invalidate
+    // the key used by BindPage before a subsequent 3D submission.
+    pageBindingValid = false;
+    gu3DStateReady = false;
 }
 
 void pspContext::DrawFilledCircle(pddiBaseShader* shader, float cx, float cy,
@@ -1338,6 +1557,9 @@ void pspContext::DestroyVRAMTexture(u32 handle) {
 }
 
 void pspContext::InvalidatePages(u32 handle) {
+    if (clutBindingValid && lastClutHandle == handle) {
+        clutBindingValid = false;
+    }
     for (auto& cache : pageCache) {
         if (cache.handle == handle) cache.handle = 0;
     }
@@ -1367,6 +1589,12 @@ void pspContext::UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
     const int maxY = static_cast<int>(std::min<int64_t>(textureH, static_cast<int64_t>(y) + h));
     if (minX >= maxX || minY >= maxY) {
         return;
+    }
+
+    // A region update may touch only the CLUT row and therefore leave the
+    // decoded page resident.  The GE palette is still stale in that case.
+    if (clutBindingValid && lastClutHandle == handle) {
+        clutBindingValid = false;
     }
 
     const size_t rowBytes = static_cast<size_t>(maxX - minX) * sizeof(u16);
@@ -1582,11 +1810,17 @@ pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
 }
 
 void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey) {
+    const u16 tpage = static_cast<u16>(std::max(tpageFloat, 0.0f));
+    const u16 cba = static_cast<u16>(std::max(cbaFloat, 0.0f));
+    const bool zeroKey = wordZeroKey || blendMode != PDDI_BLEND_NONE;
+    const bool samePage = pageBindingValid && lastBoundHandle == vramHandle
+        && lastBoundTpage == tpage && lastBoundZeroKey == zeroKey;
+    if (samePage && lastBoundCba == cba) {
+        return;
+    }
     PspPerf::CountRenderer(PspPerf::RendererCounter::PageBinds);
     EnsureListSpace();
     if (framePaletteUsed == kFramePaletteCapacity) FlushList();
-    const u16 tpage = static_cast<u16>(std::max(tpageFloat, 0.0f));
-    const u16 cba = static_cast<u16>(std::max(cbaFloat, 0.0f));
 #if defined(PSP_GU_DIAGNOSTIC)
     static u32 bindProbe = 0;
     const u32 bindId = bindProbe++;
@@ -1606,6 +1840,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey) {
     }
 #endif
     if (!page) {
+        pageBindingValid = false;
         GuDisable(GU_TEXTURE_2D);
         return;
     }
@@ -1644,6 +1879,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey) {
     if (page->format == GU_PSM_T4 || page->format == GU_PSM_T8) {
         VramImage* image = GetVram(vramHandle);
         if (!image) {
+            pageBindingValid = false;
             GuDisable(GU_TEXTURE_2D);
             return;
         }
@@ -1652,37 +1888,60 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey) {
         const u32 clutX = (cba & 0x3fu) * 16u;
         const u32 clutY = (cba >> 6) & 0x1ffu;
         const u32 paletteSize = depth == 0 ? 16u : 256u;
-        const u16* paletteSource = image->pixels
-            + (clutY % static_cast<u32>(image->height)) * image->width;
-        u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
-        const bool zeroKey = blendMode != PDDI_BLEND_NONE;
-        for (u32 i = 0; i < paletteSize; ++i) {
-            const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
-            palette[i] = ConvertPsxTexelToGu5551(word,
-                wordZeroKey ? word == 0 : (zeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+        const bool blendUsesZeroKey = blendMode != PDDI_BLEND_NONE;
+        const bool reuseClut = clutBindingValid
+            && lastClutHandle == vramHandle
+            && lastClutCba == cba
+            && lastClutDepth == depth
+            && lastClutWordZeroKey == wordZeroKey
+            && lastClutBlend == blendUsesZeroKey;
+        if (!reuseClut) {
+            const u16* paletteSource = image->pixels
+                + (clutY % static_cast<u32>(image->height)) * image->width;
+            u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
+            for (u32 i = 0; i < paletteSize; ++i) {
+                const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
+                palette[i] = ConvertPsxTexelToGu5551(word,
+                    wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+            }
+            WritebackDcacheRange(palette,
+                static_cast<std::size_t>(paletteSize) * sizeof(u16));
+            GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
+            sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
+            PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+            clutBindingValid = true;
+            lastClutHandle = vramHandle;
+            lastClutCba = cba;
+            lastClutDepth = static_cast<u8>(depth);
+            lastClutWordZeroKey = wordZeroKey;
+            lastClutBlend = blendUsesZeroKey;
         }
-        WritebackDcacheRange(palette,
-            static_cast<std::size_t>(paletteSize) * sizeof(u16));
-        GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
-        sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
-        PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
-        GuTexMode(page->format, 0, 0, 0);
-        sceGuTexImage(0, kPageSize, kPageSize, kPageSize,
-                      page->gpuPixels ? page->gpuPixels : page->pixels);
+        if (!samePage) {
+            GuTexMode(page->format, 0, 0, 0);
+            sceGuTexImage(0, kPageSize, kPageSize, kPageSize,
+                          page->gpuPixels ? page->gpuPixels : page->pixels);
+        }
     }
     else {
-        GuTexMode(GU_PSM_5551, 0, 0, 0);
-        sceGuTexImage(0, kPageSize, kPageSize, kPageSize,
-                      page->gpuPixels ? page->gpuPixels : page->pixels);
+        if (!samePage) {
+            GuTexMode(GU_PSM_5551, 0, 0, 0);
+            sceGuTexImage(0, kPageSize, kPageSize, kPageSize,
+                          page->gpuPixels ? page->gpuPixels : page->pixels);
+        }
     }
     GuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
     GuAmbientColor(0xffffffff);
     GuTexFilter(GU_NEAREST, GU_NEAREST);
     GuTexWrap(GU_REPEAT, GU_REPEAT);
-    GuTexScale(1.0f / 256.0f, 1.0f / 256.0f);
+    SetPageTextureScale(false);
     GuEnable(GU_TEXTURE_2D);
     GuAlphaFunc(GU_GREATER, 0, 0xff);
     GuEnable(GU_ALPHA_TEST);
+    pageBindingValid = true;
+    lastBoundHandle = vramHandle;
+    lastBoundTpage = tpage;
+    lastBoundCba = cba;
+    lastBoundZeroKey = zeroKey;
     PspPerf::Mark(PspPerf::RuntimeStage::BindDone, tpage, cba);
 #if defined(PSP_GU_DIAGNOSTIC)
     if (probe) PSP_GU_DIAG("[PSP GU DIAG] bind #%lu done", static_cast<unsigned long>(bindId));
@@ -1716,10 +1975,12 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu after state", static_cast<unsigned long>(primId));
 #endif
     PspPerf::Mark(PspPerf::RuntimeStage::MatrixBegin);
-    LoadGumMatrix(GU_PROJECTION, projection);
-    LoadGumMatrix(GU_VIEW, view);
-    LoadGumMatrix(GU_MODEL, world);
-    sceGumUpdateMatrix();
+    const bool projectionChanged = LoadGumMatrix(GU_PROJECTION, projection);
+    const bool viewChanged = LoadGumMatrix(GU_VIEW, view);
+    const bool worldChanged = LoadGumMatrix(GU_MODEL, world);
+    if (projectionChanged || viewChanged || worldChanged) {
+        sceGumUpdateMatrix();
+    }
     PspPerf::Mark(PspPerf::RuntimeStage::MatrixDone);
 #if defined(PSP_GU_DIAGNOSTIC)
     if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu after matrix", static_cast<unsigned long>(primId));
@@ -1740,21 +2001,24 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         return;
     }
 
-    // Material lookup uses the index as a vertex-side tpage/CBA key. Validate
-    // the complete range before touching either side array; previously the
-    // texture lookup happened before the later index validation, so one bad
-    // streamed index could read past tpages/cbas and leave the GE with a
-    // corrupt command stream.
+    // Index validity is established when the persistent buffer is mutated,
+    // outside the frame path. Diagnostic builds retain the full range check
+    // so malformed streamed data still produces a precise breadcrumb.
+    if (!buffer->HasValidIndices()) {
+#if defined(PSP_GU_DIAGNOSTIC)
+        PSP_GU_DIAG("[PSP GU DIAG] prim invalid index buffer=%p verts=%lu",
+            static_cast<void*>(buffer), static_cast<unsigned long>(vertexCount));
+#endif
+        return;
+    }
+#if defined(PSP_TRACE_TELEMETRY) || defined(PSP_DISABLE_RENDER_OPTIMIZATIONS)
     for (u32 cursor = start; cursor < end; ++cursor) {
         if (indices[cursor] >= vertexCount) {
-#if defined(PSP_GU_DIAGNOSTIC)
-            PSP_GU_DIAG("[PSP GU DIAG] prim #%lu invalid index cursor=%lu value=%u verts=%lu",
-                static_cast<unsigned long>(primId), static_cast<unsigned long>(cursor),
-                static_cast<unsigned>(indices[cursor]), static_cast<unsigned long>(vertexCount));
-#endif
+            PspPerf::Trace("gu draw: invalid indices dropped");
             return;
         }
     }
+#endif
 #if defined(PSP_GU_DIAGNOSTIC)
     if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu range valid start=%lu end=%lu",
         static_cast<unsigned long>(primId), static_cast<unsigned long>(start),
@@ -1788,8 +2052,26 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
 #endif
     const bool triangleStrip = buffer->GetPrimType() == PDDI_PRIM_TRISTRIP;
     const bool lineStrip = buffer->GetPrimType() == PDDI_PRIM_LINESTRIP;
-    const bool directIndexedVertices = blendMode != PDDI_BLEND_ALPHA
+    const bool directIndexedVertices = !buffer->UsesStagedIndexedVertices()
+        && blendMode != PDDI_BLEND_ALPHA
         && (reinterpret_cast<std::uintptr_t>(vertices) & 15u) == 0u;
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
+    // Restrict the compact stream to page-backed PSX geometry. Its UVs are
+    // integer texels; real-texture/glTF buffers commonly use fractional
+    // normalized coordinates and retain the float format.
+    const bool usePackedVertices = vramHandle != 0 && buffer->HasPackedVertices();
+#else
+    // The frame-arena variants do not have a packed arena yet.
+    const bool usePackedVertices = false;
+#endif
+#if defined(PSP_ENABLE_NATIVE_INDEXED)
+    const int nativeArrayFormat = (usePackedVertices ? GU_TEXTURE_16BIT : GU_TEXTURE_32BITF)
+        | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D;
+    const int nativeIndexedFormat = nativeArrayFormat | GU_INDEX_16BIT;
+    const void* nativeVertices = usePackedVertices
+        ? static_cast<const void*>(buffer->GetPackedVertices())
+        : static_cast<const void*>(vertices);
+#endif
 #if !defined(PSP_ENABLE_NATIVE_INDEXED)
     (void)directIndexedVertices;
 #endif
@@ -1800,13 +2082,23 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     while (start < end) {
         // Reserve before binding: a cache/CLUT miss may also fence the list,
         // but no pointer for this draw has been allocated yet.
-        EnsureDrawSpace(kDrawChunk, kDrawChunk);
 #if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
-        EnsureListSpace((directIndexedVertices ? sizeof(u16) : sizeof(PspVertex) + sizeof(u16))
-                        * kDrawChunk + 64u);
+        // BindPage performs the command-list capacity check immediately before
+        // writing its state. The list-backed native path has no frame arenas,
+        // so the old zero-payload EnsureDrawSpace() here only repeated the
+        // same sceGuCheckList() call.
+        if (framePaletteUsed == kFramePaletteCapacity) FlushList();
+#else
+        const u32 reservedCount = std::min(kDrawChunk, end - start);
+        EnsureDrawSpace(reservedCount, reservedCount);
 #endif
-        GuDisable(GU_ALPHA_TEST);
-
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
+        // Do not reserve for the complete remaining chunk here. The material
+        // scan below may split it into a tiny run; reserving the maximum
+        // before that scan caused false list-overflow flushes and a costly
+        // sceGuSync() even when the actual allocation was only a few vertices.
+        EnsureListSpace();
+#endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
         static u32 pspStageGuDrawProbe = 0;
         const u32 pspStageGuDrawId = pspStageGuDrawProbe++;
@@ -1825,39 +2117,35 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         u32 materialKey = 0;
         if (isTriangles && vramHandle && start + 2 < end) {
             const u16 firstIndex = indices[start];
-            const float firstTpage = texInfoOverride ? static_cast<float>(texInfoWord >> 16)
-                                                     : buffer->GetTPage(firstIndex);
-            const float firstCba = texInfoOverride ? static_cast<float>(texInfoWord & 0xffffu)
-                                                   : buffer->GetCba(firstIndex);
+            const bool firstMaterialValid = texInfoOverride || buffer->HasMaterialKey(firstIndex);
+            const u32 firstMaterialKey = texInfoOverride
+                ? texInfoWord : buffer->GetMaterialKey(firstIndex);
 #if defined(PSP_GU_DIAGNOSTIC)
             if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu material scan firstIndex=%u firstTpage=%f firstCba=%f",
                 static_cast<unsigned long>(primId), static_cast<unsigned>(firstIndex),
-                static_cast<double>(firstTpage), static_cast<double>(firstCba));
+                static_cast<double>(firstMaterialKey >> 16),
+                static_cast<double>(firstMaterialKey & 0xffffu));
 #endif
-            if (std::isfinite(firstTpage) && firstTpage >= 0.0f && firstTpage <= 65535.0f
-                && std::isfinite(firstCba) && firstCba >= 0.0f && firstCba <= 65535.0f) {
-                materialKey = (static_cast<u32>(static_cast<u16>(firstTpage)) << 16)
-                    | static_cast<u16>(firstCba);
-                for (u32 cursor = start + 3; cursor + 2 < runEnd; cursor += 3) {
+            if (firstMaterialValid) {
+                materialKey = firstMaterialKey;
+                if (!texInfoOverride) {
+                    for (u32 cursor = start + 3; cursor + 2 < runEnd; cursor += 3) {
 #if defined(PSP_GU_DIAGNOSTIC)
-                    if (probe && (cursor == start + 3 || cursor % 300u == 0u)) {
-                        PSP_GU_DIAG("[PSP GU DIAG] prim #%lu material scan cursor=%lu",
-                            static_cast<unsigned long>(primId), static_cast<unsigned long>(cursor));
-                    }
+                        if (probe && (cursor == start + 3 || cursor % 300u == 0u)) {
+                            PSP_GU_DIAG("[PSP GU DIAG] prim #%lu material scan cursor=%lu",
+                                static_cast<unsigned long>(primId), static_cast<unsigned long>(cursor));
+                        }
 #endif
-                    const u16 triIndex = indices[cursor];
-                    const float tpage = texInfoOverride ? firstTpage : buffer->GetTPage(triIndex);
-                    const float cba = texInfoOverride ? firstCba : buffer->GetCba(triIndex);
-                    if (!std::isfinite(tpage) || tpage < 0.0f || tpage > 65535.0f
-                        || !std::isfinite(cba) || cba < 0.0f || cba > 65535.0f) {
-                        runEnd = cursor;
-                        break;
-                    }
-                    const u32 key = (static_cast<u32>(static_cast<u16>(tpage)) << 16)
-                        | static_cast<u16>(cba);
-                    if (key != materialKey) {
-                        runEnd = cursor;
-                        break;
+                        const u16 triIndex = indices[cursor];
+                        if (!buffer->HasMaterialKey(triIndex)) {
+                            runEnd = cursor;
+                            break;
+                        }
+                        const u32 key = buffer->GetMaterialKey(triIndex);
+                        if (key != materialKey) {
+                            runEnd = cursor;
+                            break;
+                        }
                     }
                 }
 #if defined(PSP_GU_DIAGNOSTIC)
@@ -1873,7 +2161,8 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                         static_cast<unsigned>(static_cast<u16>(firstCba)));
                 }
 #endif
-                BindPage(firstTpage, firstCba);
+                BindPage(static_cast<float>(firstMaterialKey >> 16),
+                         static_cast<float>(firstMaterialKey & 0xffffu));
 #if defined(PSP_STAGE_DIAGNOSTIC)
                 if (pspStageProbe) {
                     Log::Get().LogMessage("[PSP GU Stage] after bind #%lu",
@@ -1885,15 +2174,19 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
 #endif
             }
             else {
-                GuDisable(GU_TEXTURE_2D);
+        GuDisable(GU_TEXTURE_2D);
+        GuDisable(GU_ALPHA_TEST);
             }
         }
         else if (currentTexture && realTextureMode) {
             ConfigureTexture(static_cast<pspTexture*>(currentTexture), false);
+            GuDisable(GU_ALPHA_TEST);
         }
         else {
             GuDisable(GU_TEXTURE_2D);
+            GuDisable(GU_ALPHA_TEST);
         }
+        if (vramHandle != 0) SetPageTextureScale(usePackedVertices);
 #if defined(PSP_GU_DIAGNOSTIC)
         if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu material setup done start=%lu runEnd=%lu",
             static_cast<unsigned long>(primId), static_cast<unsigned long>(start),
@@ -1960,9 +2253,11 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes, sizeof(PspVertex) * chunkCount);
         PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies);
         PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runEnd - start);
-        sceGumDrawArray(primitive,
-                        GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
-                        static_cast<int>(chunkCount), nullptr, fallbackVertices);
+        // The matrices were published once above DrawPrimBuffer(). The GUM
+        // wrapper repeats its dirty-matrix check for every material run.
+        sceGuDrawArray(primitive,
+                       GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
+                       static_cast<int>(chunkCount), nullptr, fallbackVertices);
         PspPerf::Mark(PspPerf::RuntimeStage::DrawDone, start, chunkCount);
         PspPerf::RecordDrawSubmission(chunkCount);
         start = nextChunk(runEnd);
@@ -1981,7 +2276,27 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         // and remap while retaining the compact path for alpha blending
         // (which rewrites vertex alpha) and unaligned allocations.
         if (directIndexedVertices) {
+#if defined(PSP_INDEXED_PERSISTENT_INDICES)
+            // The aligned allocator plus the fence in PrepareForMutation()
+            // make the source index stream safe for the GE. A run beginning
+            // on an odd u16 cannot be borrowed on PSP firmware that requires
+            // a word-aligned index pointer, so retain the staged fallback for
+            // that rare boundary.
+            if ((reinterpret_cast<std::uintptr_t>(indices + start) & 3u) == 0u) {
+                const u16* const guIndices = indices + start;
+                PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runCount);
+                sceGuDrawArray(primitive,
+                               nativeIndexedFormat,
+                               static_cast<int>(runCount), guIndices, nativeVertices);
+                buffer->MarkDirectSubmission();
+                PspPerf::Mark(PspPerf::RuntimeStage::DrawDone, start, runCount);
+                PspPerf::RecordDrawSubmission(runCount);
+                start = nextChunk(runEnd);
+                continue;
+            }
+#endif
 #if defined(PSP_INDEXED_LIST_MEMORY)
+            EnsureListSpace(sizeof(u16) * runCount + 64u);
             u16* guIndices = static_cast<u16*>(
                 AllocateListMemory(sizeof(u16) * runCount));
 #else
@@ -2002,10 +2317,9 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                 sizeof(u16) * runCount);
             PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies);
             PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runCount);
-            sceGumDrawArray(primitive,
-                            GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF
-                            | GU_INDEX_16BIT | GU_TRANSFORM_3D,
-                            static_cast<int>(runCount), guIndices, vertices);
+            sceGuDrawArray(primitive,
+                           nativeIndexedFormat,
+                           static_cast<int>(runCount), guIndices, nativeVertices);
             buffer->MarkDirectSubmission();
             PspPerf::Mark(PspPerf::RuntimeStage::DrawDone, start, runCount);
             PspPerf::RecordDrawSubmission(runCount);
@@ -2042,6 +2356,8 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
             if (!isTriangles) break;
             continue;
         }
+        const std::size_t vertexStride = usePackedVertices
+            ? sizeof(PspPackedVertex) : sizeof(PspVertex);
 #if defined(PSP_INDEXED_LIST_MEMORY)
         // Isolation path: sceGuGetMemory is the exact list-owned allocation
         // used by the PSPSDK samples.  The compact local stream keeps this
@@ -2056,12 +2372,13 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                 static_cast<unsigned long>(pspStageGuDrawId));
         }
 #endif
-        PspVertex* guVertices = static_cast<PspVertex*>(
-            AllocateListMemory(sizeof(PspVertex) * localVertexCount));
+        EnsureListSpace(vertexStride * localVertexCount
+                        + sizeof(u16) * runCount + 64u);
+        void* guVertices = AllocateListMemory(vertexStride * localVertexCount);
 #if defined(PSP_STAGE_DIAGNOSTIC)
         if (pspStageProbe) {
             Log::Get().LogMessage("[PSP GU Stage] list memory after vertices #%lu ptr=%p",
-                static_cast<unsigned long>(pspStageGuDrawId), static_cast<void*>(guVertices));
+                static_cast<unsigned long>(pspStageGuDrawId), guVertices);
             Log::Get().LogMessage("[PSP GU Stage] list memory before indices #%lu",
                 static_cast<unsigned long>(pspStageGuDrawId));
         }
@@ -2091,7 +2408,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         const u32 alignedIndexUsed = (frameIndexUsed + 7u) & ~7u;
         frameVertexUsed = alignedVertexUsed;
         frameIndexUsed = alignedIndexUsed;
-        PspVertex* guVertices = frameVertices.data() + frameVertexUsed;
+        void* guVertices = frameVertices.data() + frameVertexUsed;
 #if defined(PSP_GU_DIAGNOSTIC) || defined(PSP_STAGE_DIAGNOSTIC)
         const u32 stagedVertexBase = frameVertexUsed;
 #endif
@@ -2115,16 +2432,27 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
 #endif
         PspPerf::Trace("gu indexed: copy begin");
         for (u32 localIndex = 0; localIndex < localVertexCount; ++localIndex) {
-            guVertices[localIndex] = vertices[nativeRemapSource[localIndex]];
-            if (blendMode == PDDI_BLEND_ALPHA) {
-                guVertices[localIndex].color = (guVertices[localIndex].color & 0x00ffffffu) | 0x80000000u;
+            const u16 sourceIndex = nativeRemapSource[localIndex];
+            if (usePackedVertices) {
+                auto* packed = static_cast<PspPackedVertex*>(guVertices);
+                packed[localIndex] = buffer->GetPackedVertices()[sourceIndex];
+                if (blendMode == PDDI_BLEND_ALPHA) {
+                    packed[localIndex].color = (packed[localIndex].color & 0x00ffffffu) | 0x80000000u;
+                }
+            }
+            else {
+                auto* floats = static_cast<PspVertex*>(guVertices);
+                floats[localIndex] = vertices[sourceIndex];
+                if (blendMode == PDDI_BLEND_ALPHA) {
+                    floats[localIndex].color = (floats[localIndex].color & 0x00ffffffu) | 0x80000000u;
+                }
             }
         }
         for (u32 cursor = start; cursor < runEnd; ++cursor) {
             guIndices[cursor - start] = nativeRemap[indices[cursor]];
         }
         PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes,
-            sizeof(PspVertex) * localVertexCount + sizeof(u16) * runCount);
+            vertexStride * localVertexCount + sizeof(u16) * runCount);
         PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies, 2);
         PspPerf::Trace("gu indexed: copy done");
 #if defined(PSP_STAGE_DIAGNOSTIC)
@@ -2139,7 +2467,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
 #endif
         WritebackDcacheRange(
             guVertices,
-            sizeof(PspVertex) * localVertexCount);
+            vertexStride * localVertexCount);
         WritebackDcacheRange(
             guIndices,
             sizeof(u16) * runCount);
@@ -2183,10 +2511,9 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         // GUM publishes dirty matrices then delegates to GU; both streams
         // remain immutable until FinishList's sceGuSync completes.
         PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runEnd - start);
-        sceGumDrawArray(primitive,
-                        GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF
-                        | GU_INDEX_16BIT | GU_TRANSFORM_3D,
-                        static_cast<int>(runCount), guIndices, guVertices);
+        sceGuDrawArray(primitive,
+                       nativeIndexedFormat,
+                       static_cast<int>(runCount), guIndices, guVertices);
 #if defined(PSP_STAGE_DIAGNOSTIC)
         if (pspStageProbe) {
             Log::Get().LogMessage("[PSP GU Stage] indexed after draw #%lu",

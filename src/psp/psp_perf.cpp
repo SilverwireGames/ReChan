@@ -175,6 +175,7 @@ static double FramesPerSecond(u32 averageUs) {
 namespace PspPerf {
 
 void WriteReport();
+void WriteReportTo(const char* path);
 u32 g_rendererCounters[static_cast<u32>(RendererCounter::Count)] = {};
 
 void Reset() {
@@ -209,6 +210,22 @@ void Reset() {
     g_memory.minHeapMax = std::numeric_limits<u32>::max();
     g_memory.minVramUsed = std::numeric_limits<u32>::max();
     g_memory.minVramFree = std::numeric_limits<u32>::max();
+}
+
+void BeginMeasurementWindow() {
+    g_rendererTotals.fill(0);
+    std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
+    g_frame.Reset();
+    g_logic.Reset();
+    g_draw.Reset();
+    g_swap.Reset();
+    g_drawCalls.Reset();
+    g_submittedVertices.Reset();
+    g_pageCacheMisses.Reset();
+    g_totalFrames = 0;
+    g_currentDrawCalls = 0;
+    g_currentSubmittedVertices = 0;
+    g_currentPageCacheMisses = 0;
 }
 
 void BeginFrame() {
@@ -333,6 +350,10 @@ bool ShouldStop() {
 }
 
 void WriteReport() {
+    WriteReportTo("PSP_PERF.TXT");
+}
+
+void WriteReportTo(const char* path) {
     char report[2048] = {};
     const u32 averageFrameUs = g_frame.Average();
     const u32 p50FrameUs = Percentile(g_frame, 50);
@@ -455,7 +476,61 @@ void WriteReport() {
             rendererNames[i], g_totalFrames
                 ? static_cast<double>(g_rendererTotals[i]) / g_totalFrames : 0.0);
     }
-    p3d::io::WriteTextFile("PSP_PERF.TXT", std::string(report));
+    p3d::io::WriteTextFile(
+        path && path[0] ? path : "PSP_PERF.TXT", std::string(report));
+}
+
+void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex) {
+#if defined(PSP_BENCH_STATE_IO)
+    char report[192] = {};
+    std::snprintf(report, sizeof(report),
+        "state=%s\nlevel_id=%ld\nlevel_index=%ld\ntarget_index=%ld\n",
+        state && state[0] ? state : "unknown",
+        static_cast<long>(levelId),
+        static_cast<long>(levelIndex),
+        static_cast<long>(targetIndex));
+    p3d::io::WriteTextFile("PSP_BENCH_STATE.TXT", std::string(report));
+#else
+    // Detailed transition breadcrumbs are intentionally disabled in the
+    // benchmark build. DemandLoading() can call WEffect_PopulateWEffects()
+    // while the player crosses a block boundary; opening/truncating/writing
+    // a file for every effect makes that gameplay frame miss its budget on
+    // both real PSP hardware and PPSSPP. Define PSP_BENCH_STATE_IO only for
+    // a dedicated transition-debug build, never for performance measurement.
+    (void)state;
+    (void)levelId;
+    (void)levelIndex;
+    (void)targetIndex;
+#endif
+}
+
+void GetSnapshot(Snapshot* out) {
+    if (!out) return;
+    *out = {};
+    out->totalFrames = g_totalFrames;
+    out->windowFrames = static_cast<u32>(g_frame.count);
+    out->averageFrameUs = g_frame.Average();
+    out->p50FrameUs = Percentile(g_frame, 50);
+    out->p95FrameUs = Percentile(g_frame, 95);
+    out->p99FrameUs = Percentile(g_frame, 99);
+    out->maxFrameUs = g_frame.count == 0
+        ? 0u
+        : *std::max_element(g_frame.values.begin(), g_frame.values.begin() + g_frame.count);
+    out->overBudgetFrames = CountOverBudget();
+    out->logicAverageUs = g_logic.Average();
+    out->drawAverageUs = g_draw.Average();
+    out->swapAverageUs = g_swap.Average();
+    out->drawCallsAverage = g_drawCalls.Average();
+    out->submittedVerticesAverage = g_submittedVertices.Average();
+    out->pageCacheMissesAverage = g_pageCacheMisses.Average();
+    for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
+        out->rendererAverage[i] = g_totalFrames
+            ? static_cast<u32>(g_rendererTotals[i] / g_totalFrames) : 0u;
+    }
+    out->rendererMemoryBytes = g_rendererMemoryBytes;
+    out->audioMemoryBytes = g_audioMemoryBytes;
+    out->audioUnderruns = g_audioUnderruns.load(std::memory_order_relaxed);
+    out->audioWorkerErrors = g_audioWorkerErrors.load(std::memory_order_relaxed);
 }
 
 void Trace(const char* message) {
@@ -510,6 +585,7 @@ void Trace(const char* message) {
 namespace PspPerf {
 
 void Reset() {}
+void BeginMeasurementWindow() {}
 void BeginFrame() {}
 void RecordDrawSubmission(u32) {}
 void RecordPageCacheMiss() {}
@@ -524,6 +600,9 @@ void RecordAudioMusicMix(u32) {}
 void RecordAudioWorkerError() {}
 bool ShouldStop() { return false; }
 void WriteReport() {}
+void WriteReportTo(const char*) {}
+void WriteState(const char*, s32, s32, s32) {}
+void GetSnapshot(Snapshot* out) { if (out) *out = {}; }
 void Trace(const char*) {}
 
 } // namespace PspPerf

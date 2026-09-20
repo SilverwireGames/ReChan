@@ -33,6 +33,11 @@ public:
     u32 setupFlags = 0;
 
     const u16* paletteLut = nullptr;
+    // 0x8C01 places the LUT at permOffset bytes after frameStream. Keeping
+    // the parsed limits here lets the PSP-side RLE decoder reject malformed
+    // animation data before it reads past the permanent buffer.
+    u32 frameStreamSize = 0;
+    u32 paletteLutCount = 0;
 };
 
 // PSX: Load__11PaletteDataR10tReadChunkPPv (PALDATA.CPP:117, 0x8009CEA4)

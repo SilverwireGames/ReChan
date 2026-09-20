@@ -335,6 +335,16 @@ static u32 s_rpStreeLightStateTraceBudget = 16;
 static u32 s_rpStreeFixupColourProbeBudget = 24;
 static u32 s_rpStreeFixupIndexProbeBudget = 24;
 
+#if defined(RC_PLATFORM_PSP)
+// Converted geometry is intentionally capped. The cache removes repeated
+// PSX-packet decoding from the frame path without consuming unbounded PSP RAM
+// that should remain available for future effects and post-processing.
+static constexpr u32 kPspGeometryCacheBudgetBytes = 2u * 1024u * 1024u;
+static u32 s_pspGeometryCacheBytes = 0;
+static void ReleasePspPrimGeomCache(tPrimGeom* geom);
+static constexpr u32 kPspDynamicOffsetInvalid = 0xFFFFFFFFu;
+#endif
+
 static u8 ClampLitChannelToByte(s32 value) {
     if (value <= 0) {
         return 0;
@@ -447,6 +457,10 @@ void tGeometry::SetVertexList(const u8* verts) {
 tPrimGeom::~tPrimGeom() {
     MARKFUNCTION(0x800A14C4);
 
+#if defined(RC_PLATFORM_PSP)
+    ReleasePspPrimGeomCache(this);
+#endif
+
     delete[] ownedRawData;
     ownedRawData = nullptr;
     ownedRawSize = 0;
@@ -537,6 +551,9 @@ struct PspPrimGeomFrameScratch {
     std::vector<PrimGeomBuildLoopInfo> loops;
     std::vector<PrimGeomBuildVert> verts;
     std::vector<u16> indices;
+    std::vector<u32> materialOrder;
+    std::vector<u32> materialKeys;
+    std::vector<u16> groupedIndices;
     std::vector<u8> gmFogPrimitives;
     pddiPrimBuffer* buffer = nullptr;
 };
@@ -555,6 +572,15 @@ static void ReservePspPrimGeomScratch(PspPrimGeomFrameScratch* scratch, const tP
     if (scratch->loops.capacity() < loopCapacity) scratch->loops.reserve(loopCapacity);
     if (scratch->verts.capacity() < vertexCapacity) scratch->verts.reserve(vertexCapacity);
     if (scratch->indices.capacity() < indexCapacity) scratch->indices.reserve(indexCapacity);
+    if (scratch->materialOrder.capacity() < indexCapacity / 3u) {
+        scratch->materialOrder.reserve(indexCapacity / 3u);
+    }
+    if (scratch->materialKeys.capacity() < indexCapacity / 3u) {
+        scratch->materialKeys.reserve(indexCapacity / 3u);
+    }
+    if (scratch->groupedIndices.capacity() < indexCapacity) {
+        scratch->groupedIndices.reserve(indexCapacity);
+    }
 }
 #endif
 
@@ -564,6 +590,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                                                    bool* outUsesSemiTrans,
                                                    u8* outSemiTransMode,
                                                    bool reusePspFrameBuffer
+#if defined(RC_PLATFORM_PSP)
+                                                   , std::vector<u32>* outUvOffsets = nullptr
+                                                   , std::vector<u32>* outColourOffsets = nullptr
+#endif
 #if REAL_TEXTURE_RENDERING
                                                    , std::vector<RealTextureGroup>* outRealTexGroups = nullptr
 #endif
@@ -591,6 +621,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     const u8* verts = geom->GetVertexList();
     const u8* polys = geom->polyData;
     const u8* primStart = geom->primList;
+    const u8* const originalPrimStart = geom->primList;
+    const u32 originalPrimOffset = static_cast<u32>(originalPrimStart - geom->ownedRawData);
     const u8* primEnd = geom->ownedRawData + geom->ownedRawSize;
 
     if (!verts || !polys || !primStart || !geom->loopVertData || !geom->loopPrimData)
@@ -989,6 +1021,54 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         }
     }
 
+#if defined(RC_PLATFORM_PSP)
+    auto dynamicOffset = [&](const u8* packet, u32 byteOffset, bool colour) -> u32 {
+        if (colour && gmFogState && gmFogState->enabled) {
+            // GM fog is applied to a private packet copy. A raw CBV colour
+            // cannot be patched without reapplying fog, so force the safe
+            // rebuild path when that combination is active.
+            return kPspDynamicOffsetInvalid;
+        }
+
+        const u32 byteCount = colour ? 3u : 2u;
+        const u8* const rawBegin = geom->ownedRawData;
+        const u8* const rawEnd = rawBegin + geom->ownedRawSize;
+        const u8* const address = packet + byteOffset;
+        if (address >= rawBegin && address + byteCount <= rawEnd) {
+            return static_cast<u32>(address - rawBegin);
+        }
+
+        if (gmFogState && gmFogState->enabled && !gmFogPrimScratch.empty()) {
+            const u8* const scratchBegin = gmFogPrimScratch.data();
+            const u8* const scratchEnd = scratchBegin + gmFogPrimScratch.size();
+            if (packet >= scratchBegin && packet + byteOffset + byteCount <= scratchEnd) {
+                const u32 offset = originalPrimOffset
+                    + static_cast<u32>(packet - scratchBegin) + byteOffset;
+                if (offset + byteCount <= geom->ownedRawSize) return offset;
+            }
+        }
+        return kPspDynamicOffsetInvalid;
+    };
+    auto appendVertex = [&](const PrimGeomBuildVert& vertex, const u8* packet,
+                            int uvOffset, int colourOffset) {
+        vertBuf.push_back(vertex);
+        if (outUvOffsets) {
+            outUvOffsets->push_back(uvOffset >= 0
+                ? dynamicOffset(packet, static_cast<u32>(uvOffset), false)
+                : kPspDynamicOffsetInvalid);
+        }
+        if (outColourOffsets) {
+            outColourOffsets->push_back(colourOffset >= 0
+                ? dynamicOffset(packet, static_cast<u32>(colourOffset), true)
+                : kPspDynamicOffsetInvalid);
+        }
+    };
+#else
+    auto appendVertex = [&](const PrimGeomBuildVert& vertex, const u8*, int, int) {
+        vertBuf.push_back(vertex);
+    };
+#endif
+
     const u8* primCursor = primStart;
     u32 polyIdx = 0;
 
@@ -1095,8 +1175,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
 
             u16 base = static_cast<u16>(vertBuf.size());
-            vertBuf.push_back(v0); vertBuf.push_back(v1);
-            vertBuf.push_back(v2); vertBuf.push_back(v3);
+            appendVertex(v0, pkt, 12, 4);
+            appendVertex(v1, pkt, 24, 16);
+            appendVertex(v2, pkt, 36, 28);
+            appendVertex(v3, pkt, 48, 40);
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
             if (chooseQuadDiag02(v0, v1, v2, v3)) {
                 idxBuf.push_back(base); idxBuf.push_back(base + 2); idxBuf.push_back(base + 3);
@@ -1143,8 +1225,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
 
             u16 base = static_cast<u16>(vertBuf.size());
-            vertBuf.push_back(v0); vertBuf.push_back(v1);
-            vertBuf.push_back(v2); vertBuf.push_back(v3);
+            appendVertex(v0, pkt, 12, 4);
+            appendVertex(v1, pkt, 20, 4);
+            appendVertex(v2, pkt, 28, 4);
+            appendVertex(v3, pkt, 36, 4);
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
             if (chooseQuadDiag02(v0, v1, v2, v3)) {
                 idxBuf.push_back(base); idxBuf.push_back(base + 2); idxBuf.push_back(base + 3);
@@ -1185,8 +1269,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
 
             u16 base = static_cast<u16>(vertBuf.size());
-            vertBuf.push_back(v0); vertBuf.push_back(v1);
-            vertBuf.push_back(v2); vertBuf.push_back(v3);
+            appendVertex(v0, pkt, -1, 4);
+            appendVertex(v1, pkt, -1, 12);
+            appendVertex(v2, pkt, -1, 20);
+            appendVertex(v3, pkt, -1, 28);
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
             if (chooseQuadDiag02(v0, v1, v2, v3)) {
                 idxBuf.push_back(base); idxBuf.push_back(base + 2); idxBuf.push_back(base + 3);
@@ -1232,7 +1318,9 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
 
             u16 base = static_cast<u16>(vertBuf.size());
-            vertBuf.push_back(v0); vertBuf.push_back(v1); vertBuf.push_back(v2);
+            appendVertex(v0, pkt, 12, 4);
+            appendVertex(v1, pkt, 24, 16);
+            appendVertex(v2, pkt, 36, 28);
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
         }
         else if (cmdBase == 0x24) {
@@ -1270,7 +1358,9 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
 
             u16 base = static_cast<u16>(vertBuf.size());
-            vertBuf.push_back(v0); vertBuf.push_back(v1); vertBuf.push_back(v2);
+            appendVertex(v0, pkt, 12, 4);
+            appendVertex(v1, pkt, 20, 4);
+            appendVertex(v2, pkt, 28, 4);
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
         }
         else if (cmdBase == 0x30 || cmdBase == 0x20) {
@@ -1301,7 +1391,9 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
             }
 
             u16 base = static_cast<u16>(vertBuf.size());
-            vertBuf.push_back(v0); vertBuf.push_back(v1); vertBuf.push_back(v2);
+            appendVertex(v0, pkt, -1, 4);
+            appendVertex(v1, pkt, -1, 12);
+            appendVertex(v2, pkt, -1, 20);
             idxBuf.push_back(base); idxBuf.push_back(base + 1); idxBuf.push_back(base + 2);
         }
         else {
@@ -1409,6 +1501,51 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     }
 #endif
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_SORT_OPAQUE_MATERIALS)
+    // Opaque triangles do not depend on submission order for visibility: the
+    // GE depth test/write selects the nearest fragment. Grouping their index
+    // stream by (tpage, cba) therefore preserves the image while collapsing
+    // the material runs that currently cause one CLUT/page bind per draw.
+    // Keep semi-transparent packets in source order because blending is
+    // order-dependent.
+    if (!usesSemiTrans && idxBuf.size() >= 6u) {
+        std::vector<u32> localOrder;
+        std::vector<u32> localKeys;
+        std::vector<u16> localGroupedIndices;
+        std::vector<u32>& materialOrder = frameScratch
+            ? frameScratch->materialOrder : localOrder;
+        std::vector<u32>& materialKeys = frameScratch
+            ? frameScratch->materialKeys : localKeys;
+        std::vector<u16>& groupedIndices = frameScratch
+            ? frameScratch->groupedIndices : localGroupedIndices;
+        const u32 triangleCount = static_cast<u32>(idxBuf.size() / 3u);
+
+        materialOrder.resize(triangleCount);
+        materialKeys.resize(triangleCount);
+        for (u32 triangle = 0; triangle < triangleCount; ++triangle) {
+            materialOrder[triangle] = triangle;
+            const PrimGeomBuildVert& vertex = vertBuf[idxBuf[triangle * 3u]];
+            materialKeys[triangle] = (static_cast<u32>(static_cast<u16>(vertex.tpage)) << 16)
+                | static_cast<u16>(vertex.cba);
+        }
+
+        // Opaque geometry is depth-tested, so equal-key triangles do not need
+        // stable source order. Comparing the precomputed integer key avoids
+        // repeated float loads and conversions in the hot comparator.
+        std::sort(materialOrder.begin(), materialOrder.end(),
+            [&](u32 lhs, u32 rhs) { return materialKeys[lhs] < materialKeys[rhs]; });
+
+        groupedIndices.resize(idxBuf.size());
+        for (u32 sortedTriangle = 0; sortedTriangle < triangleCount; ++sortedTriangle) {
+            const u32 sourceTriangle = materialOrder[sortedTriangle];
+            groupedIndices[sortedTriangle * 3u + 0u] = idxBuf[sourceTriangle * 3u + 0u];
+            groupedIndices[sortedTriangle * 3u + 1u] = idxBuf[sourceTriangle * 3u + 1u];
+            groupedIndices[sortedTriangle * 3u + 2u] = idxBuf[sourceTriangle * 3u + 2u];
+        }
+        idxBuf.swap(groupedIndices);
+    }
+#endif
+
     // Create pddiPrimBuffer through the device abstraction
     u32 format = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
     pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format,
@@ -1461,6 +1598,162 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
 
     return buffer;
 }
+
+#if defined(RC_PLATFORM_PSP)
+static u32 EstimatePspPrimGeomCacheBytes(const tPrimGeom* geom) {
+    if (!geom) {
+        return 0;
+    }
+
+    // pspPrimBuffer stores a 24-byte native vertex plus two float material
+    // lanes per vertex, and a 16-bit index stream. A PSX quad may expand to
+    // four vertices and two triangles, so use that upper bound for admission.
+    const u64 vertexCount = static_cast<u64>(geom->numPolys) * 4u;
+    const u64 indexCount = static_cast<u64>(geom->numPolys) * 6u;
+    // Keep the two raw-packet offset maps resident beside the converted
+    // vertices so UV/CBV animation can patch attributes in place.
+    const u64 bytes = vertexCount * (32u + sizeof(u32) + sizeof(u32))
+        + indexCount * sizeof(u16) + 1024u;
+    return bytes > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<u32>(bytes);
+}
+
+static void ReleasePspPrimGeomCache(tPrimGeom* geom) {
+    if (!geom) {
+        return;
+    }
+
+    if (geom->pspCachedBuffer) {
+        geom->pspCachedBuffer->Release();
+        geom->pspCachedBuffer = nullptr;
+    }
+
+    if (geom->pspCachedBytes != 0) {
+        const u32 released = geom->pspCachedBytes;
+        s_pspGeometryCacheBytes = released > s_pspGeometryCacheBytes
+            ? 0u : s_pspGeometryCacheBytes - released;
+        PspPerf::AddRendererMemory(-static_cast<s32>(released));
+        geom->pspCachedBytes = 0;
+    }
+
+    geom->pspCachedUvOffsets.clear();
+    geom->pspCachedColourOffsets.clear();
+    geom->pspCachedFogEnabled = false;
+    geom->pspCachedFogNear = 0;
+    geom->pspCachedFogFar = 0;
+    geom->pspCachedFogColour = 0;
+    geom->pspCachedUsesSemiTrans = false;
+    geom->pspCachedSemiTransMode = 0;
+}
+
+void InvalidatePspPrimGeomCache(tPrimGeom* geom) {
+    ReleasePspPrimGeomCache(geom);
+}
+
+bool UpdatePspPrimGeomDynamicData(tPrimGeom* geom, bool uvUpdated, bool colourUpdated) {
+    if (!geom || !geom->pspCachedBuffer || (!uvUpdated && !colourUpdated)) {
+        return false;
+    }
+
+    // Fogged packets are built from a private transformed copy. A CBV update
+    // must go through the full builder so the fog colour is applied again.
+    if (colourUpdated && geom->pspCachedFogEnabled) {
+        return false;
+    }
+
+    const u32 vertexCount = geom->pspCachedBuffer->GetVertexCount();
+    if (vertexCount == 0
+        || geom->pspCachedUvOffsets.size() != vertexCount
+        || geom->pspCachedColourOffsets.size() != vertexCount
+        || !geom->ownedRawData || geom->ownedRawSize == 0) {
+        return false;
+    }
+
+    return UpdatePspPrimBufferDynamic(
+        geom->pspCachedBuffer,
+        geom->ownedRawData,
+        geom->ownedRawSize,
+        geom->pspCachedUvOffsets.data(),
+        geom->pspCachedColourOffsets.data(),
+        vertexCount,
+        uvUpdated,
+        colourUpdated);
+}
+
+static pddiPrimBuffer* GetOrBuildPspPrimGeomBuffer(tPrimGeom* geom,
+                                                    const LVector* drawPos,
+                                                    const GMFogState* gmFogState,
+                                                    bool* outUsesSemiTrans,
+                                                    u8* outSemiTransMode) {
+    if (!geom) {
+        return nullptr;
+    }
+
+    const bool fogEnabled = gmFogState && gmFogState->enabled;
+    const u16 fogNear = fogEnabled ? gmFogState->nearDist : 0;
+    const u16 fogFar = fogEnabled ? gmFogState->farDist : 0;
+    const u32 fogColour = fogEnabled ? gmFogState->colour : 0;
+
+    if (geom->pspCachedBuffer
+        && (geom->pspCachedFogEnabled != fogEnabled
+            || geom->pspCachedFogNear != fogNear
+            || geom->pspCachedFogFar != fogFar
+            || geom->pspCachedFogColour != fogColour)) {
+        ReleasePspPrimGeomCache(geom);
+    }
+
+    if (geom->pspCachedBuffer) {
+        if (outUsesSemiTrans) *outUsesSemiTrans = geom->pspCachedUsesSemiTrans;
+        if (outSemiTransMode) *outSemiTransMode = geom->pspCachedSemiTransMode;
+        return geom->pspCachedBuffer;
+    }
+
+    const u32 estimatedBytes = EstimatePspPrimGeomCacheBytes(geom);
+    const u32 usedBytes = std::min(s_pspGeometryCacheBytes, kPspGeometryCacheBudgetBytes);
+    const bool cacheable = estimatedBytes != 0
+        && estimatedBytes <= kPspGeometryCacheBudgetBytes - usedBytes;
+
+    bool usesSemiTrans = false;
+    u8 semiTransMode = 0;
+#if defined(RC_PLATFORM_PSP)
+    std::vector<u32> dynamicUvOffsets;
+    std::vector<u32> dynamicColourOffsets;
+#endif
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(
+        geom, drawPos, gmFogState, &usesSemiTrans, &semiTransMode, !cacheable
+#if defined(RC_PLATFORM_PSP)
+        , cacheable ? &dynamicUvOffsets : nullptr
+        , cacheable ? &dynamicColourOffsets : nullptr
+#endif
+    );
+    if (!buffer) {
+        return nullptr;
+    }
+
+    if (cacheable) {
+        geom->pspCachedBuffer = buffer;
+        geom->pspCachedBytes = estimatedBytes;
+#if defined(RC_PLATFORM_PSP)
+        if (dynamicUvOffsets.size() == buffer->GetVertexCount()
+            && dynamicColourOffsets.size() == buffer->GetVertexCount()) {
+            geom->pspCachedUvOffsets.swap(dynamicUvOffsets);
+            geom->pspCachedColourOffsets.swap(dynamicColourOffsets);
+        }
+#endif
+        geom->pspCachedFogEnabled = fogEnabled;
+        geom->pspCachedFogNear = fogNear;
+        geom->pspCachedFogFar = fogFar;
+        geom->pspCachedFogColour = fogColour;
+        geom->pspCachedUsesSemiTrans = usesSemiTrans;
+        geom->pspCachedSemiTransMode = semiTransMode;
+        s_pspGeometryCacheBytes += estimatedBytes;
+        PspPerf::AddRendererMemory(static_cast<s32>(estimatedBytes));
+    }
+
+    if (outUsesSemiTrans) *outUsesSemiTrans = usesSemiTrans;
+    if (outSemiTransMode) *outSemiTransMode = semiTransMode;
+    return buffer;
+}
+#endif
 
 static bool InitPrimGeomFromRawPrimData(tPrimGeom* geom, const u8* primData, u32 primSize) {
     if (!geom || !primData || primSize < 108) {
@@ -2003,7 +2296,12 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
     PspPerf::Trace("geometry clip: build begin");
+#if defined(RC_PLATFORM_PSP)
+    pddiPrimBuffer* buffer = GetOrBuildPspPrimGeomBuffer(
+        primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode);
+#else
     pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode, true);
+#endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
     if (pspClipId < 32u) {
         Log::Get().LogMessage("[PSP Clip] after build #%lu buffer=%p semi=%u mode=%u",
@@ -2096,7 +2394,12 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
     PspPerf::Trace("geometry fog: build begin");
+#if defined(RC_PLATFORM_PSP)
+    pddiPrimBuffer* buffer = GetOrBuildPspPrimGeomBuffer(
+        primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode);
+#else
     pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode, true);
+#endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
     if (pspFogId < 32u) {
         Log::Get().LogMessage("[PSP Fog] after build #%lu buffer=%p semi=%u mode=%u",

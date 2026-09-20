@@ -52,6 +52,23 @@ struct tPrimGeom : public tGeometry {
 	u8* ownedRawData = nullptr;
 	u32 ownedRawSize = 0;
 
+#if defined(RC_PLATFORM_PSP)
+	// PSP keeps a bounded converted buffer for static geometry.  The raw PSX
+	// packet data can still be changed by UV/CBV animation.  Keep byte-offset
+	// maps so the converted vertex attributes can be patched without rebuilding
+	// the topology, material order, or index stream.
+	pddiPrimBuffer* pspCachedBuffer = nullptr;
+	u32 pspCachedBytes = 0;
+	std::vector<u32> pspCachedUvOffsets;
+	std::vector<u32> pspCachedColourOffsets;
+	bool pspCachedFogEnabled = false;
+	u16 pspCachedFogNear = 0;
+	u16 pspCachedFogFar = 0;
+	u32 pspCachedFogColour = 0;
+	bool pspCachedUsesSemiTrans = false;
+	u8 pspCachedSemiTransMode = 0;
+#endif
+
 	~tPrimGeom();
 	tPrimGeom* Clone() const;
 	int Display(const LVector* drawPos = nullptr);
@@ -68,7 +85,17 @@ u8* RP_FixUpPolysCBF_CL(tPrimGeom* geometry, void* view, u32 loopIndex, u32 poly
 int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos = nullptr);
 int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 fogFar, u32 fogColour);
 pddiPrimBuffer* BuildUnculledPrimBufferFromPrimGeom(const tPrimGeom* geom);
+void InvalidatePspPrimGeomCache(tPrimGeom* geom);
+bool UpdatePspPrimGeomDynamicData(tPrimGeom* geom, bool uvUpdated, bool colourUpdated);
 void ShutdownPspGeometryFrameScratch();
+
+// PSP backend hook used by the geometry cache.  The raw PSX packet remains
+// the source of truth; the renderer only patches the converted PspVertex
+// attributes that are animated by UV/CBV data.
+bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* buffer, const u8* rawData,
+                                u32 rawSize, const u32* uvOffsets,
+                                const u32* colourOffsets, u32 vertexCount,
+                                bool updateUv, bool updateColour);
 
 // Legacy host bridge for non-block call sites that still consume a raw
 // pddiPrimBuffer instead of owning a reversed tPrimGeom object.

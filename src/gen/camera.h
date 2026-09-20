@@ -100,6 +100,12 @@ public:
         prevPosition = { x, y, z };
     }
 
+    // QA-only deterministic camera control. The benchmark owns the pose for
+    // the frame, bypassing follow-path interpolation and collision movement.
+    void SetBenchmarkPose(const LVector& eye, const LVector& target);
+    void ClearBenchmarkMode() { benchmarkMode = false; }
+    bool IsBenchmarkMode() const { return benchmarkMode; }
+
 private:
     // Mode dispatch functions
     void DebugCam();                           // 0x80048718 = mode 0
@@ -209,6 +215,9 @@ private:
 
     // +404: embedded tMatrixCamera (PSX: 56 bytes)
     tMatrixCamera p3dCamera;
+
+    // PSP benchmark path temporarily owns the camera pose.
+    bool benchmarkMode = false;
 
     // +460: async anim enum (0xFFFF = none)
     u16 asyncAnimEnum = 0xFFFF;

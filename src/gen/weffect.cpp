@@ -40,6 +40,7 @@
 #include "extra/shadowcsm.h"
 
 #if defined(RC_PLATFORM_PSP)
+#include "psp/psp_perf.h"
 namespace {
 
 struct PspFastSortedTri {
@@ -83,6 +84,24 @@ static ComEffect* g_wEffectComEffects[64] = {};
 static ComEffect* g_wEffectOwnedEffects[64] = {};
 static s32 g_wEffectComEffectCount = 0;
 static s32 g_wEffectOwnedCount = 0;
+
+static bool IsValidFastDrawPointer(const void* pointer) {
+    if (!pointer) {
+        return false;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    // OriginalGeo objects live in user RAM. A stale/corrupted fast-render
+    // slot can contain a KSEG address (the observed failure was 0x800D800E),
+    // which must never be dereferenced by the PSP user module.
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    return (address & 3u) == 0u
+        && address >= 0x08000000u
+        && address < 0x0C000000u;
+#else
+    return true;
+#endif
+}
 
 // Seam offset applied during block draw phase so direct-position effects
 // (WEffect, SpotLight, FWEffect, GEffect, LensFlare) depth-align with
@@ -1378,6 +1397,163 @@ static bool ApplyGeoPackedColourByOffset(OriginalGeo* geo, u32 colourWordOffset,
 
 static ccList g_wEffectPool;
 
+// The original effect pool is an intrusive list, so a duplicate insertion
+// can overwrite the links of a live effect without any immediate symptom.
+// Keep ownership metadata outside the PSX-compatible object layouts. This is
+// used only at pool transitions and lets us rebuild the pool if a bad link is
+// detected, instead of dereferencing a stale KSEG address on the PSP.
+static constexpr s32 kWEffectRegistryCapacity = 1024;
+static Effects* g_wEffectRegistry[kWEffectRegistryCapacity] = {};
+static s32 g_wEffectRegistryCount = 0;
+
+static bool IsValidWEffectPoolPointer(const void* pointer) {
+    if (!pointer) {
+        return false;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    return (address & 3u) == 0u
+        && address >= 0x08000000u
+        && address < 0x0C000000u;
+#else
+    return true;
+#endif
+}
+
+static bool WEffectRegistryContains(const Effects* effect) {
+    for (s32 i = 0; i < g_wEffectRegistryCount; i++) {
+        if (g_wEffectRegistry[i] == effect) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void WEffectRegistryAdd(Effects* effect) {
+    if (!effect || WEffectRegistryContains(effect)) {
+        return;
+    }
+
+    if (g_wEffectRegistryCount < kWEffectRegistryCapacity) {
+        g_wEffectRegistry[g_wEffectRegistryCount++] = effect;
+    }
+}
+
+static void WEffectRegistryRemove(const Effects* effect) {
+    for (s32 i = 0; i < g_wEffectRegistryCount; i++) {
+        if (g_wEffectRegistry[i] != effect) {
+            continue;
+        }
+
+        const s32 last = --g_wEffectRegistryCount;
+        g_wEffectRegistry[i] = (i == last) ? nullptr : g_wEffectRegistry[last];
+        g_wEffectRegistry[last] = nullptr;
+        return;
+    }
+}
+
+static bool WEffectPoolContains(const Effects* effect) {
+    if (!effect) {
+        return false;
+    }
+
+    ccMinNode* node = g_wEffectPool.head;
+    for (s32 count = 0; node && count < kWEffectRegistryCapacity; count++) {
+        if (!IsValidWEffectPoolPointer(node)) {
+            return false;
+        }
+        if (!WEffectRegistryContains(static_cast<const Effects*>(static_cast<const ccNode*>(node)))) {
+            return false;
+        }
+        if (node == static_cast<const ccMinNode*>(effect)) {
+            return true;
+        }
+        node = node->next;
+    }
+
+    return false;
+}
+
+static bool WEffectPoolIsSane() {
+    if (!g_wEffectPool.head || !g_wEffectPool.tail) {
+        return g_wEffectPool.head == nullptr && g_wEffectPool.tail == nullptr;
+    }
+
+    ccMinNode* previous = nullptr;
+    ccMinNode* node = g_wEffectPool.head;
+    for (s32 count = 0; node && count < kWEffectRegistryCapacity; count++) {
+        if (!IsValidWEffectPoolPointer(node)
+            || !WEffectRegistryContains(static_cast<Effects*>(static_cast<ccNode*>(node)))) {
+            return false;
+        }
+
+        if (node->prev != previous) {
+            return false;
+        }
+
+        previous = node;
+        node = node->next;
+    }
+
+    return node == nullptr && previous == g_wEffectPool.tail && g_wEffectPool.tail->next == nullptr;
+}
+
+static void WEffectPoolRebuild() {
+    g_wEffectPool.head = nullptr;
+    g_wEffectPool.tail = nullptr;
+
+    for (s32 i = 0; i < g_wEffectRegistryCount; i++) {
+        Effects* effect = g_wEffectRegistry[i];
+        if (!effect || !IsValidWEffectPoolPointer(effect)) {
+            continue;
+        }
+
+        if (effect->inEffectsList) {
+            // Active effects belong to g_effectsList, not the pool. Their
+            // intrusive links must remain untouched while rebuilding the
+            // inactive pool.
+            continue;
+        }
+
+        effect->next = nullptr;
+        effect->prev = nullptr;
+        g_wEffectPool.AddNode(g_wEffectPool.tail, effect);
+    }
+}
+
+static void WEffectPoolEnsureSane() {
+    if (!WEffectPoolIsSane()) {
+        WEffectPoolRebuild();
+    }
+}
+
+static void WEffectPoolAdd(Effects* effect) {
+    if (!effect) {
+        return;
+    }
+
+    WEffectPoolEnsureSane();
+    if (effect->inEffectsList) {
+        Effects_RemoveEffect(effect);
+    }
+    if (!WEffectPoolContains(effect)) {
+        g_wEffectPool.AddNode(g_wEffectPool.tail, effect);
+    }
+}
+
+static void WEffectPoolRemove(Effects* effect) {
+    if (!effect) {
+        return;
+    }
+
+    WEffectPoolEnsureSane();
+    if (WEffectPoolContains(effect)) {
+        g_wEffectPool.RemNode(effect);
+    }
+}
+
 #define CountRenderableETreeGeos(originalPtr)                                                       \
     ([&](const OriginalETree* __etOriginal) -> u32 {                                                \
         if (!__etOriginal) {                                                                        \
@@ -2134,6 +2310,7 @@ PaletteData* WEffect::SetupPaletteData(u32 paletteHash, u32 clutMode, u32 flags)
         _self->frameCount = 0;                                                                       \
         _self->currentFrame = 0;                                                                     \
         _self->fastDrawCount = 0;                                                                    \
+        _self->fastDrawGeoIndex = -1;                                                                \
         _self->fastDrawGeo = nullptr;                                                                \
         _self->currentGeo = nullptr;                                                                 \
         _self->currentGeoIndex = -1;                                                                 \
@@ -2174,6 +2351,9 @@ PaletteData* WEffect::SetupPaletteData(u32 paletteHash, u32 clutMode, u32 flags)
         const s32 _inMiscAnimHash = (inMiscAnimHashArg);                                            \
         _self->resourceHash = static_cast<u32>(_inResourceHash);                                    \
         _self->miscAnimHash = static_cast<u32>(_inMiscAnimHash);                                    \
+        _self->fastDrawCount = 0;                                                                    \
+        _self->fastDrawGeoIndex = -1;                                                                \
+        _self->fastDrawGeo = nullptr;                                                                \
         _self->currentGeo = nullptr;                                                                 \
         _self->currentGeoIndex = -1;                                                                 \
         _self->geoWord0Slot = ComEffect::kFastWordInactive;                                   \
@@ -3833,6 +4013,16 @@ void ComEffect::Render(const Mat4& worldMatrix, u32 flags) {
     }
 
     if ((flags & 0x800000u) != 0u && fastDrawGeoIndex >= 0 && fastDrawCount < kMaxFastDrawEntries) {
+        // A level transition can invalidate the source geometry while a
+        // particle system still owns its fast-render queue. Resolve the
+        // current geometry before reading any field through fastDrawGeo.
+        if (!IsFastDrawGeoCurrent()) {
+            fastDrawCount = 0;
+            fastDrawGeo = nullptr;
+            fastDrawGeoIndex = -1;
+            return;
+        }
+
         FastDrawEntry& entry = fastDrawEntries[fastDrawCount++];
         entry.worldMatrix = worldMatrix;
 
@@ -4155,7 +4345,7 @@ u32* ComEffect::GetGeoFastWord1Slot(s32 geoIndex) {
 }
 
 bool ComEffect::FastRenderReady() const {
-    return fastDrawGeoIndex >= 0;
+    return fastDrawGeoIndex >= 0 && IsFastDrawGeoCurrent();
 }
 
 void ComEffect::InitFastRender(OriginalGeo* geo) {
@@ -4187,10 +4377,35 @@ void ComEffect::InitFastRender(OriginalGeo* geo) {
     }
 }
 
+bool ComEffect::IsFastDrawGeoCurrent() const {
+    if (!IsValidFastDrawPointer(model)
+        || !IsValidFastDrawPointer(model->drawable)
+        || !IsValidFastDrawPointer(fastDrawGeo)
+        || fastDrawGeoIndex < 0) {
+        return false;
+    }
+
+    if (model->drawableType == 2) {
+        // Skin trees do not expose an OriginalGeo through ResolveGeoByIndex.
+        // Their fast path is only valid when it still points at the active
+        // geometry selected by the effect.
+        return IsValidFastDrawPointer(currentGeo) && currentGeo == fastDrawGeo;
+    }
+
+    return GetGeo(fastDrawGeoIndex) == fastDrawGeo;
+}
+
 void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
     MARKFUNCTION(0x8004F5E8);
 
     if (!p3d::context || !p3d::device || !fastDrawGeo || primCount == 0u || fastDrawCount == 0u) {
+        return;
+    }
+
+    if (!IsFastDrawGeoCurrent()) {
+        fastDrawCount = 0;
+        fastDrawGeo = nullptr;
+        fastDrawGeoIndex = -1;
         return;
     }
 
@@ -4388,6 +4603,13 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
         return;
     }
 
+    if (!IsFastDrawGeoCurrent()) {
+        fastDrawCount = 0;
+        fastDrawGeo = nullptr;
+        fastDrawGeoIndex = -1;
+        return;
+    }
+
 #if defined(RC_PLATFORM_PSP)
     using FastSortedQuad = PspFastSortedQuad;
 #else
@@ -4582,7 +4804,14 @@ void ComEffect::DoFastRender() {
         return;
     }
 
-    if (!p3d::context || fastDrawGeoIndex < 0 || !fastDrawGeo || !fastDrawGeo->meshBuffer) {
+    if (!p3d::context || fastDrawGeoIndex < 0 || !fastDrawGeo || !IsFastDrawGeoCurrent()) {
+        fastDrawCount = 0;
+        fastDrawGeo = nullptr;
+        fastDrawGeoIndex = -1;
+        return;
+    }
+
+    if (!fastDrawGeo->meshBuffer) {
         fastDrawCount = 0;
         return;
     }
@@ -5133,12 +5362,14 @@ void ComEffect::SetZFar() {
 s32 CBVEffect_CreateForHash(u32 effectHash) {
     MARKFUNCTION(0x8008CD74);
 
+    WEffectPoolEnsureSane();
+
     for (ccMinNode* node = g_wEffectPool.head; node; node = node->next) {
         Effects* effect = static_cast<Effects*>(static_cast<ccNode*>(node));
         if (effect->nameCRC == effectHash && effect->effectType == 6) {
             CBVEffect* cbvEffect = static_cast<CBVEffect*>(effect);
             cbvEffect->Create2();
-            g_wEffectPool.RemNode(cbvEffect);
+            WEffectPoolRemove(cbvEffect);
             Effects_AddEffect(cbvEffect, 0);
             return 1;
         }
@@ -5195,7 +5426,7 @@ s32 CBVEffect::Update() {
 s32 CBVEffect::PutBackEffect() {
     MARKFUNCTION(0x8008CFC4);
 
-    g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+    WEffectPoolAdd(this);
     if (cbvData) {
         cbvData->Release();
         cbvData = nullptr;
@@ -5330,23 +5561,54 @@ s32 WEffect::ReleaseSound() {
 s32 WEffect::Create() {
     MARKFUNCTION(0x8008B850);
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_enter", blockNum, effectType,
+        static_cast<s32>(nameCRC));
+#endif
+
     if (!active) {
         return 0;
     }
+
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_active", blockNum, effectType, active);
+#endif
 
     frameCounter = 0;
     frame = 0;
     vertexFrame = 0;
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_reset", blockNum, effectType, active);
+#endif
+
     if (paletteData) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_palette_begin", blockNum, effectType, 1);
+#endif
         paletteData->InitPalette();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_palette_init", blockNum, effectType, 1);
+#endif
         // Pre-initialize CLUT in vram.data so RefreshVRAMTexture captures the
         // correct initial palette state after a petal reload (not stale values
         // from the previous gameplay session).
-        if (paletteData->Update()) {
+        const bool paletteUpdated = paletteData->Update();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_palette_update", blockNum, effectType,
+            paletteUpdated ? 1 : 0);
+#endif
+        if (paletteUpdated) {
             paletteData->TransferVram();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+            PspPerf::WriteState("weffect_palette_transfer", blockNum, effectType, 1);
+#endif
         }
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_palette", blockNum, effectType,
+        static_cast<s32>(nameCRC));
+#endif
 
     if (pathInfo) {
         pathInfo->Reset();
@@ -5363,12 +5625,24 @@ s32 WEffect::Create() {
 
         blockNum = CollisionSector::GetBlockNumber(pos);
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_path", blockNum, effectType,
+        static_cast<s32>(nameCRC));
+#endif
 
 #if HIGH_FPS_PLAY_PRESENTATION
     prevPos = pos;
 #endif
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_sound_begin", blockNum, effectType,
+        static_cast<s32>(nameCRC));
+#endif
     CreateSound(nullptr);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_create_sound_done", blockNum, effectType,
+        static_cast<s32>(nameCRC));
+#endif
 
     return 1;
 }
@@ -5445,7 +5719,7 @@ s32 WEffect::Update() {
             if (shouldDeactivate) {
                 active = 0;
                 Effects_RemoveEffect(this);
-                g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+                WEffectPoolAdd(this);
             }
 
             const LVector* pathPos = pathInfo->GetPosition();
@@ -5528,7 +5802,7 @@ bool WEffect::GetDebugWorldPos(LVector* outPos) const {
 s32 WEffect::PutBackEffect() {
     MARKFUNCTION(0x8008B988);
 
-    g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+    WEffectPoolAdd(this);
     return ReleaseSound();
 }
 
@@ -5832,7 +6106,7 @@ s32 LensFlare::ComputeTracking(LVector& from, LVector& to) {
 s32 SpotLight::PutBackEffect() {
     MARKFUNCTION(0x800BE51C);
 
-    g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+    WEffectPoolAdd(this);
     return 0;
 }
 
@@ -5860,7 +6134,7 @@ void WEffect::NISRemoveEffect() {
 
     active = 0;
     Effects_RemoveEffect(this);
-    g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+    WEffectPoolAdd(this);
 }
 
 bool WEffect::IsDirectorOverlay() const {
@@ -5924,6 +6198,10 @@ void WEffect_Unload() {
     g_wEffectGlobalFrame = 0;
 
     WEffect_PurgePool();
+    for (s32 i = 0; i < g_wEffectRegistryCount; i++) {
+        g_wEffectRegistry[i] = nullptr;
+    }
+    g_wEffectRegistryCount = 0;
 }
 
 WEffect* WEffect::Find(u32 effectHash) {
@@ -5972,6 +6250,8 @@ void FWEffect::SetScaleRoll(s32 scaleValue, s32 rollValue) {
 s32 FWEffect::Create(s32 blockNum) {
     MARKFUNCTION(0x8008BF50);
 
+    WEffectPoolEnsureSane();
+
     s32 result = static_cast<s32>(0x800E0000);
 
     for (ccMinNode* node = g_wEffectPool.head; node;) {
@@ -5986,7 +6266,7 @@ s32 FWEffect::Create(s32 blockNum) {
         result = fwEffect->Create();
 
         if (result) {
-            g_wEffectPool.RemNode(effect);
+            WEffectPoolRemove(effect);
             Effects_AddEffect(effect, 0);
         }
 
@@ -6020,6 +6300,8 @@ s32 FWEffect::Create2(u32 effectHash,
 {
     MARKFUNCTION(0x8008C078);
 
+    WEffectPoolEnsureSane();
+
     for (ccMinNode* node = g_wEffectPool.head; node; node = node->next) {
         Effects* effect = static_cast<Effects*>(static_cast<ccNode*>(node));
         if (effect->nameCRC != effectHash) {
@@ -6033,7 +6315,7 @@ s32 FWEffect::Create2(u32 effectHash,
 
         FWEffect* spawnedFw = static_cast<FWEffect*>(wEffect);
         spawnedFw->Create2(posOverride, scaleOverride, rotationOverride, flags);
-        g_wEffectPool.RemNode(effect);
+        WEffectPoolRemove(effect);
         Effects_AddEffect(effect, (flags & 4u) ? 1 : 0);
 
         return 1;
@@ -6193,7 +6475,7 @@ s32 FWEffect::Update() {
                     result = doneMask;
                     if (doneMask) {
                         Effects_RemoveEffect(this);
-                        g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+                        WEffectPoolAdd(this);
                         ReleaseSound();
                     }
                 }
@@ -6277,7 +6559,7 @@ s32 FWEffect::Update() {
         else if (pathMode == 99) {
             if (stepFrame()) {
                 Effects_RemoveEffect(this);
-                g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+                WEffectPoolAdd(this);
                 ReleaseSound();
             }
         }
@@ -6491,7 +6773,7 @@ s32 LensFlare::Update() {
 
         if (!targetEffect->inEffectsList) {
             Effects_RemoveEffect(this);
-            g_wEffectPool.AddNode(g_wEffectPool.tail, this);
+            WEffectPoolAdd(this);
             return 0;
         }
 
@@ -6755,7 +7037,8 @@ void WEffect_InitWorldEffects(DBPoint* firstPoint) {
                 effect->blockNum = static_cast<s32>(value);
             }
 
-            g_wEffectPool.AddNode(g_wEffectPool.tail, effect);
+            WEffectRegistryAdd(effect);
+            WEffectPoolAdd(effect);
             continue;
         }
 
@@ -7016,7 +7299,8 @@ void WEffect_InitWorldEffects(DBPoint* firstPoint) {
             static_cast<SpotLight*>(effect)->SetUp(spotSetup, spotRange, spotLinkedHash);
         }
 
-        g_wEffectPool.AddNode(g_wEffectPool.tail, effect);
+        WEffectRegistryAdd(effect);
+        WEffectPoolAdd(effect);
     }
 
     if (hasMentorLinks) {
@@ -7041,27 +7325,58 @@ void WEffect_InitWorldEffects(DBPoint* firstPoint) {
 void WEffect_CreateForBlock(s32 inBlockNum) {
     MARKFUNCTION(0x8008B774);
 
-    for (ccMinNode* node = g_wEffectPool.head; node;) {
-        ccMinNode* next = node->next;
-        Effects* effect = static_cast<Effects*>(static_cast<ccNode*>(node));
+    // During a level transition the inactive-effect list can briefly contain
+    // a stale intrusive link left by the previous petal. Rebuild it from the
+    // registry before selecting effects. The registry is independent of the
+    // effect links, so this path never has to read a possibly corrupt `next`
+    // pointer just to find the next candidate.
+    WEffectPoolRebuild();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_pool_ready", inBlockNum, -1, -1);
+#endif
+
+    const s32 registryCount = g_wEffectRegistryCount;
+    for (s32 nodeIndex = 0; nodeIndex < registryCount; nodeIndex++) {
+        Effects* effect = g_wEffectRegistry[nodeIndex];
+        if (!effect || !IsValidWEffectPoolPointer(effect) || effect->inEffectsList) {
+            continue;
+        }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_node_begin", inBlockNum, nodeIndex, -1);
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_node_link", inBlockNum, nodeIndex, -1);
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_node_cast", inBlockNum, nodeIndex, -1);
+#endif
 
         if ((effect->effectType == 1 || effect->effectType == 6 || effect->effectType == 7)
             && effect->blockNum == inBlockNum) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+            PspPerf::WriteState("weffect_create_begin", inBlockNum, nodeIndex,
+                effect->effectType);
+#endif
             if (effect->Create()) {
-                g_wEffectPool.RemNode(effect);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+                PspPerf::WriteState("weffect_create_done", inBlockNum, nodeIndex,
+                    effect->effectType);
+#endif
+                WEffectPoolRemove(effect);
                 Effects_AddEffect(effect, 0);
             }
         }
-
-        node = next;
     }
 }
 
 void WEffect_PurgePool() {
     MARKFUNCTION(0x8008B924);
 
+    WEffectPoolEnsureSane();
     while (ccMinNode* node = g_wEffectPool.RemHead()) {
-        delete static_cast<Effects*>(static_cast<ccNode*>(node));
+        Effects* effect = static_cast<Effects*>(static_cast<ccNode*>(node));
+        WEffectRegistryRemove(effect);
+        delete effect;
     }
 }
 
@@ -7073,6 +7388,9 @@ void WEffect_PopulateWEffects() {
     }
 
     const u32 numBlocks = g_blockManager->GetNumBlocks();
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_pop_begin", static_cast<s32>(numBlocks), -1, -1);
+#endif
     for (u32 i = 0; i < numBlocks; i++) {
         Block* block = g_blockManager->GetBlock(i);
         if (!block) {
@@ -7084,11 +7402,42 @@ void WEffect_PopulateWEffects() {
             continue;
         }
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_block", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+        PspPerf::WriteState("weffect_w_begin", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+#endif
         WEffect_CreateForBlock(blockNum);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_w_done", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+        PspPerf::WriteState("weffect_fw_begin", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+#endif
         FWEffect::Create(blockNum);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_fw_done", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+        PspPerf::WriteState("weffect_pw_begin", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+#endif
         PWEffect_CreateForBlock(blockNum);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_pw_done", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+        PspPerf::WriteState("weffect_fpw_begin", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+#endif
         FPWEffect_CreateForBlock(blockNum);
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("weffect_fpw_done", blockNum, static_cast<s32>(i),
+            static_cast<s32>(numBlocks));
+#endif
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("weffect_pop_done", static_cast<s32>(numBlocks), -1, -1);
+#endif
 }
 
 void WEffect_UnPopulateWEffects(s32 blockNum) {

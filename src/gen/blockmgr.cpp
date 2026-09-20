@@ -153,6 +153,21 @@ static bool ContainsBlockNumber(const u16* list, u32 count, u16 blockNum) {
     return false;
 }
 
+// DemandLoading is called from the render path when the player crosses a
+// block boundary. The current block can change while the load/draw/active
+// windows remain exactly the same; in that case reactivating every AI object
+// and rebuilding every world effect only repeats work and cannot change the
+// visible result. Compare the small fixed-size windows as sets so ordering
+// changes do not defeat the fast path.
+static bool SameBlockSet(const u16* lhs, u32 lhsCount,
+                         const u16* rhs, u32 rhsCount) {
+    if (lhsCount != rhsCount) return false;
+    for (u32 index = 0; index < lhsCount; ++index) {
+        if (!ContainsBlockNumber(rhs, rhsCount, lhs[index])) return false;
+    }
+    return true;
+}
+
 static u16 ResolveBlockNumberFromAllBlocks(const std::vector<Block>& blocks, const LVector& pos) {
     for (u32 index = 0; index < blocks.size(); index++) {
         if (blocks[index].PointInBlock(&pos)) {
@@ -439,9 +454,30 @@ s32 BlockManager::DemandLoading() {
         return 0;
     }
 
+    u16 previousToBeLoaded[kBlockManagerListCapacity] = {};
+    u16 previousDrawList[kBlockManagerListCapacity] = {};
+    u16 previousActiveList[kBlockManagerListCapacity] = {};
+    const u32 previousToBeLoadedCount = toBeLoadedCount;
+    const u32 previousDrawListCount = drawListCount;
+    const u32 previousActiveListCount = alreadyLoadedCount;
+    std::copy_n(toBeLoadedList, kBlockManagerListCapacity, previousToBeLoaded);
+    std::copy_n(drawList, kBlockManagerListCapacity, previousDrawList);
+    std::copy_n(alreadyLoadedList, kBlockManagerListCapacity, previousActiveList);
+
     currentBlockNum = playerBlockNum;
     UpdateToBeLoadedList(currentBlockNum);
     UpdateAlreadyLoadedList();
+
+    const bool windowsUnchanged =
+        SameBlockSet(previousToBeLoaded, previousToBeLoadedCount,
+                     toBeLoadedList, toBeLoadedCount)
+        && SameBlockSet(previousDrawList, previousDrawListCount,
+                        drawList, drawListCount)
+        && SameBlockSet(previousActiveList, previousActiveListCount,
+                        alreadyLoadedList, alreadyLoadedCount);
+    if (windowsUnchanged) {
+        return 0;
+    }
 
     if (g_ai) {
         g_ai->UnpopulateBlock();

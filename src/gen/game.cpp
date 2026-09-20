@@ -34,6 +34,7 @@
 #include "gen/animmat.h"
 #include "fe/hud.h"
 #include "radmovie/movieplayer.h"
+#include "pc/debugui.h"
 #include "pc/inputaction.h"
 #include "pc/tim.h"
 #include "p3d/input.h"
@@ -1497,6 +1498,14 @@ bool Game::gsOpenFEState(Game* game) {
     if (g_selectedLevel != -1) {
         World* world = game->GetWorld();
         if (world) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
+            // LoadPermanent has populated GAME_LN.TXT by the time OpenFE is
+            // entered. Resolve the benchmark's stable level ID here instead
+            // of doing it from main(), where the list is still empty and
+            // LevelIDToIndex would legitimately fall back to index 0 (hub).
+            g_selectedLevel = static_cast<s16>(world->LevelIDToIndex(1));
+            PspPerf::WriteState("autostart", 1, g_selectedLevel, g_selectedLevel);
+#endif
             world->SetTargetLevelPetal((u32)g_selectedLevel, 0);
         }
         if (g_time) {
@@ -1725,6 +1734,9 @@ bool Game::gsPlayState(Game* game) {
         }
 
         if (g_display && g_display->GetCamera()) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
+            DebugUI::UpdateBenchmarkCamera(g_display->GetCamera());
+#endif
             g_display->GetCamera()->UpdateHighFPS();
         }
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
@@ -1801,6 +1813,9 @@ bool Game::gsPlayState(Game* game) {
     }
 
     if (g_display && g_display->GetCamera()) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
+        DebugUI::UpdateBenchmarkCamera(g_display->GetCamera());
+#endif
         g_display->GetCamera()->UpdateHighFPS();
     }
 
@@ -2163,11 +2178,27 @@ bool Game::gsQueueLevelLoad(Game* game) {
         return true;
     }
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_begin", world->GetLevelIDFromIndex(world->GetTargetLevelIndex()),
+        static_cast<s32>(world->GetCurrentLevelIndex()),
+        static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
+
     // PSX: UnloadLevel(world), UnloadLevelPart2(world)
     world->Unload();
     LOG("[Game] QueueLevelLoad: world unload complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("unload_done", world->GetLevelIDFromIndex(world->GetTargetLevelIndex()),
+        static_cast<s32>(world->GetCurrentLevelIndex()),
+        static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
     world->UnloadLevelPart2();
     LOG("[Game] QueueLevelLoad: level part2 unload complete");
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("unload2_done", world->GetLevelIDFromIndex(world->GetTargetLevelIndex()),
+        static_cast<s32>(world->GetCurrentLevelIndex()),
+        static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
 
     // PSX: FreeDynamicPrimBuffers(), AllocateDynamicPrimBuffers(0)
     // PSX GPU primitive buffers - not applicable on PC
@@ -2186,6 +2217,12 @@ bool Game::gsQueueLevelLoad(Game* game) {
     }
 #endif
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("loading_screen", world->GetLevelIDFromIndex(world->GetTargetLevelIndex()),
+        static_cast<s32>(world->GetCurrentLevelIndex()),
+        static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
+
     // PSX: LoadOverlay(levelType==7) - load code overlay
     // PSX: BossAI overlay switch for levels 1-7 vs 8,11-14
     // Not applicable on PC - all code is statically linked
@@ -2199,10 +2236,26 @@ bool Game::gsQueueLevelLoad(Game* game) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: world load begin");
 #endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("world_load_begin", world->GetLevelIDFromIndex(world->GetTargetLevelIndex()),
+        static_cast<s32>(world->GetCurrentLevelIndex()),
+        static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
     if (!world->LoadLevelIndex(world->GetTargetLevelIndex())) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+        PspPerf::WriteState("load_fail", world->GetLevelIDFromIndex(world->GetTargetLevelIndex()),
+            static_cast<s32>(world->GetCurrentLevelIndex()),
+            static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
+        StopLogo();
         game->SetState(GameState::Error);
         return true;
     }
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
+    PspPerf::WriteState("load_done", world->GetCurLevelID(),
+        static_cast<s32>(world->GetCurrentLevelIndex()),
+        static_cast<s32>(world->GetTargetLevelIndex()));
+#endif
     LOG("[Game] QueueLevelLoad: level load complete");
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: world load done");

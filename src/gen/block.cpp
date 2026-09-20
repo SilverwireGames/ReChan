@@ -470,14 +470,23 @@ bool Block::Draw(const LVector* drawPos) {
     p3d::context->SetCullMode(PDDI_CULL_NONE);
 
     PspPerf::Trace("block draw: uv begin");
-    UpdateUVPrimData(blockNum, primGeom);
+    const bool uvUpdated = UpdateUVPrimData(blockNum, primGeom);
 #if defined(PSP_STAGE_DIAGNOSTIC)
     if (pspBlockDrawId < 32u) {
         Log::Get().LogMessage("[PSP Block] after uv #%lu block=%u",
             static_cast<unsigned long>(pspBlockDrawId), static_cast<unsigned>(blockNum));
     }
 #endif
-    UpdateCBVPrimData(blockNum, primGeom);
+    const bool cbvUpdated = UpdateCBVPrimData(blockNum, primGeom);
+#if defined(RC_PLATFORM_PSP)
+    if ((uvUpdated || cbvUpdated)
+        && !UpdatePspPrimGeomDynamicData(primGeom, uvUpdated, cbvUpdated)) {
+        // Patch the converted attributes in place whenever possible. Dynamic
+        // fog or an incomplete map falls back to rebuilding this geometry;
+        // static blocks keep their native buffer and skip the decoder.
+        InvalidatePspPrimGeomCache(primGeom);
+    }
+#endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
     if (pspBlockDrawId < 32u) {
         Log::Get().LogMessage("[PSP Block] after cbv #%lu block=%u",
