@@ -1925,7 +1925,12 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
     const bool zeroKey = wordZeroKey || blendMode != PDDI_BLEND_NONE;
     const bool samePage = pageBindingValid && lastBoundHandle == vramHandle
         && lastBoundTpage == tpage && lastBoundZeroKey == zeroKey;
-    if (samePage && lastBoundCba == cba) {
+    // A page/material hit can still switch between the compact integer UV
+    // stream and the generic float stream. Keep the texture image/CLUT
+    // cached, but replay the scale command when the coordinate representation
+    // changes so the cache never returns with the wrong UV interpretation.
+    if (samePage && lastBoundCba == cba
+        && pageTexScaleValid && pageTexScalePacked == packedUv) {
         return;
     }
     PspPerf::CountRenderer(PspPerf::RendererCounter::PageBinds);

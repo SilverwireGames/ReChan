@@ -111,7 +111,11 @@ endif
 # build.mak supplies the user-mode PSP runtime and core exports. Keep only
 # libraries used directly by this title; adding kernel/legacy SDK libraries
 # here causes duplicate newlib symbols with current PSPDev releases.
-LIBS = -lstdc++ -lpspgum -lpspgu -lpspaudiolib -lpspaudio -lpspaudio_driver -lpsppower -lm
+# The PSPDev VFPU GUM implementation keeps matrix setup/multiplication on
+# the Allegrex vector unit. The renderer already avoids redundant uploads, so
+# this changes only the implementation of the remaining matrix operations;
+# the PDDI math contract and visible vertex data stay unchanged.
+LIBS = -lstdc++ -lpspgum_vfpu -lpspvfpu -lpspgu -lpspaudiolib -lpspaudio -lpspaudio_driver -lpsppower -lm
 
 EXTRA_CLEAN = $(OBJS)
 
