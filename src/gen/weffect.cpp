@@ -1552,6 +1552,34 @@ static void WEffectPoolEnsureSane() {
     }
 }
 
+static bool WEffectPoolLinksAreValid(const Effects* effect) {
+    if (!effect || !IsValidWEffectPoolPointer(effect)) {
+        return false;
+    }
+
+    const ccMinNode* previous = effect->prev;
+    const ccMinNode* next = effect->next;
+    if ((previous && !IsValidWEffectPoolPointer(previous))
+        || (next && !IsValidWEffectPoolPointer(next))) {
+        return false;
+    }
+
+    if (previous && previous->next != static_cast<const ccMinNode*>(effect)) {
+        return false;
+    }
+    if (next && next->prev != static_cast<const ccMinNode*>(effect)) {
+        return false;
+    }
+    if (!previous && g_wEffectPool.head != static_cast<const ccMinNode*>(effect)) {
+        return false;
+    }
+    if (!next && g_wEffectPool.tail != static_cast<const ccMinNode*>(effect)) {
+        return false;
+    }
+
+    return true;
+}
+
 static void WEffectPoolAdd(Effects* effect) {
     if (!effect) {
         return;
@@ -1572,9 +1600,38 @@ static void WEffectPoolRemove(Effects* effect) {
     }
 
     WEffectPoolEnsureSane();
-    if (WEffectPoolContains(effect)) {
-        g_wEffectPool.RemNode(effect);
+    if (!WEffectPoolContains(effect)) {
+        return;
     }
+
+    // Create() can change effect ownership while the pool is being rebuilt.
+    // Never call ccMinList::RemNode with stale prev/next links: that helper
+    // assumes a perfect intrusive list and would dereference a corrupt PSP
+    // address. Rebuild once, then remove manually only after validating both
+    // neighbors and the head/tail relationship.
+    if (!WEffectPoolLinksAreValid(effect)) {
+        WEffectPoolRebuild();
+        if (!WEffectPoolContains(effect) || !WEffectPoolLinksAreValid(effect)) {
+            return;
+        }
+    }
+
+    ccMinNode* previous = effect->prev;
+    ccMinNode* next = effect->next;
+    if (previous) {
+        previous->next = next;
+    }
+    else {
+        g_wEffectPool.head = next;
+    }
+    if (next) {
+        next->prev = previous;
+    }
+    else {
+        g_wEffectPool.tail = previous;
+    }
+    effect->next = nullptr;
+    effect->prev = nullptr;
 }
 
 #define CountRenderableETreeGeos(originalPtr)                                                       \
