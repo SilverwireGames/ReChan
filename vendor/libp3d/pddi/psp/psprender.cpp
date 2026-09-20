@@ -2175,6 +2175,23 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         if (chunkEnd == end) return end;
         return chunkEnd - (triangleStrip ? 2u : (lineStrip ? 1u : 0u));
     };
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
+    // Dynamic model buffers are deliberately staged because their persistent
+    // vertices are rewritten by CPU skinning every frame. The old staged path
+    // remapped and copied the referenced vertices again for every material
+    // run. Keep one list-owned copy of the complete vertex stream for the
+    // current submission instead; each run can then reuse it with a small,
+    // isolated index range. The serial tracks a possible list fence, after
+    // which the old pointer is no longer valid.
+    const std::size_t wholeVertexBytes = (usePackedVertices
+        ? sizeof(PspPackedVertex) : sizeof(PspVertex)) * vertexCount;
+    const bool wholeVertexStagingFits = wholeVertexBytes
+        + sizeof(u16) * static_cast<std::size_t>(kDrawChunk)
+        + kListCommandReserve + 64u
+        <= sizeof(g_displayListStorage.words);
+    void* stagedWholeVertices = nullptr;
+    u32 stagedWholeSerial = 0;
+#endif
     while (start < end) {
         // Reserve before binding: a cache/CLUT miss may also fence the list,
         // but no pointer for this draw has been allocated yet.
@@ -2422,6 +2439,65 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
             start = nextChunk(runEnd);
             continue;
         }
+#if defined(PSP_INDEXED_LIST_MEMORY)
+        // Prefer one whole-buffer staging allocation for opaque/native draws.
+        // A CLUT or command-list fence can invalidate list memory between
+        // material runs, so re-stage whenever the submission serial changes.
+        if (stagedWholeVertices && stagedWholeSerial != g_submissionSerial) {
+            stagedWholeVertices = nullptr;
+        }
+        if (wholeVertexStagingFits && blendMode != PDDI_BLEND_ALPHA) {
+            if (stagedWholeVertices && stagedWholeSerial == g_submissionSerial) {
+                EnsureListSpace(sizeof(u16) * runCount + 64u);
+                if (stagedWholeSerial != g_submissionSerial) {
+                    stagedWholeVertices = nullptr;
+                }
+            }
+            if (!stagedWholeVertices) {
+                EnsureListSpace(wholeVertexBytes + sizeof(u16) * runCount + 64u);
+                stagedWholeVertices = AllocateListMemory(wholeVertexBytes);
+                if (stagedWholeVertices) {
+                    if (usePackedVertices) {
+                        std::copy(buffer->GetPackedVertices(),
+                                  buffer->GetPackedVertices() + vertexCount,
+                                  static_cast<PspPackedVertex*>(stagedWholeVertices));
+                    }
+                    else {
+                        std::copy(vertices, vertices + vertexCount,
+                                  static_cast<PspVertex*>(stagedWholeVertices));
+                    }
+                    WritebackDcacheRange(stagedWholeVertices, wholeVertexBytes);
+                    stagedWholeSerial = g_submissionSerial;
+                    PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes,
+                        static_cast<u32>(wholeVertexBytes));
+                    PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies);
+                }
+            }
+            if (stagedWholeVertices) {
+                EnsureListSpace(sizeof(u16) * runCount + 64u);
+                if (stagedWholeSerial == g_submissionSerial) {
+                    u16* guIndices = static_cast<u16*>(
+                        AllocateListMemory(sizeof(u16) * runCount));
+                    if (guIndices) {
+                        std::copy(indices + start, indices + runEnd, guIndices);
+                        WritebackDcacheRange(guIndices, sizeof(u16) * runCount);
+                        PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes,
+                            sizeof(u16) * runCount);
+                        PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies);
+                        PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runCount);
+                        sceGuDrawArray(primitive,
+                                       nativeIndexedFormat,
+                                       static_cast<int>(runCount),
+                                       guIndices, stagedWholeVertices);
+                        PspPerf::Mark(PspPerf::RuntimeStage::DrawDone, start, runCount);
+                        PspPerf::RecordDrawSubmission(runCount);
+                        start = nextChunk(runEnd);
+                        continue;
+                    }
+                }
+            }
+        }
+#endif
         ++nativeRemapGeneration;
         if (nativeRemapGeneration == 0) {
             nativeRemapStamp.fill(0);
