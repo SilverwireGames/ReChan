@@ -101,6 +101,8 @@ bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* buffer, const u8* rawData,
 // Prefer list-owned vertex staging so restoring that buffer does not fence the
 // current GU list on the PSP.
 void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
+bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
+                                         const void* data, u32 count);
 
 // Legacy host bridge for non-block call sites that still consume a raw
 // pddiPrimBuffer instead of owning a reversed tPrimGeom object.

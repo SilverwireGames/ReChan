@@ -88,6 +88,7 @@ public:
     // list-owned staging path from the first frame so the restore cannot
     // force a mid-frame GE fence.
     void PreferStagedIndexedVertices() { preferStagedIndexedVertices = true; }
+    bool SetDynamicVertexData(const void* data, u32 count);
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour);
@@ -144,6 +145,8 @@ private:
 // lets it opt a temporarily mutated buffer into list-owned staging without
 // exposing the backend's storage layout to game code.
 void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
+bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
+                                        const void* data, u32 count);
 
 class pspTexture final : public pddiTexture {
 public:

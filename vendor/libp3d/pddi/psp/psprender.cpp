@@ -456,6 +456,71 @@ void pspPrimBuffer::MarkDirectSubmission() {
     directSubmissionSerial = g_submissionSerial;
 }
 
+bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count) {
+    // Model skinning supplies the canonical position/colour/UV/tpage/CBA
+    // layout.  Keep this fast path deliberately strict; unexpected formats
+    // fall back to SetVertexData rather than silently changing semantics.
+    constexpr u32 kDynamicFormat = PDDI_V_POSITION | PDDI_V_COLOUR
+        | PDDI_V_UV | PDDI_V_TEXINFO;
+    if (!data || count != vertices.size() || vertexFormat != kDynamicFormat) {
+        return false;
+    }
+
+    PrepareForMutation();
+    const float* source = static_cast<const float*>(data);
+    bool packedUvValid = packedVerticesValid;
+    for (u32 i = 0; i < count; ++i) {
+        const float* input = source + static_cast<std::size_t>(i) * 10u;
+        PspVertex& target = vertices[i];
+        target.x = input[0];
+        target.y = input[1];
+        target.z = input[2];
+        target.color = MakeGeometryColor(input[3], input[4], input[5]);
+        target.u = input[6];
+        target.v = input[7];
+        const float tpage = input[8];
+        const float cba = input[9];
+
+        const bool materialIsValid = std::isfinite(tpage) && tpage >= 0.0f
+            && tpage <= 65535.0f && std::isfinite(cba) && cba >= 0.0f
+            && cba <= 65535.0f;
+        materialValid[i] = materialIsValid ? 1u : 0u;
+        materialKeys[i] = materialIsValid
+            ? (static_cast<u32>(static_cast<u16>(tpage)) << 16)
+                | static_cast<u16>(cba)
+            : 0u;
+
+        if (!packedUvValid) continue;
+        s16 u = 0;
+        s16 v = 0;
+        const float roundedU = std::round(target.u);
+        const float roundedV = std::round(target.v);
+        if (!std::isfinite(target.u) || !std::isfinite(target.v)
+            || target.u != roundedU || target.v != roundedV
+            || roundedU < -32768.0f || roundedU > 32767.0f
+            || roundedV < -32768.0f || roundedV > 32767.0f) {
+            packedUvValid = false;
+            continue;
+        }
+        u = static_cast<s16>(roundedU);
+        v = static_cast<s16>(roundedV);
+        PspPackedVertex& packed = packedVertices[i];
+        packed.u = u;
+        packed.v = v;
+        packed.color = target.color;
+        packed.x = target.x;
+        packed.y = target.y;
+        packed.z = target.z;
+    }
+    packedVerticesValid = packedUvValid;
+    WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    if (packedVerticesValid) {
+        WritebackDcacheRange(packedVertices.data(),
+            sizeof(PspPackedVertex) * packedVertices.size());
+    }
+    return true;
+}
+
 void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
     if (!data) return;
     if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
@@ -635,6 +700,14 @@ void pspPrimBuffer::RevalidateIndices() {
 void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* base) {
     if (!base) return;
     static_cast<pspPrimBuffer*>(base)->PreferStagedIndexedVertices();
+}
+
+bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,
+                                         const void* data, u32 count) {
+    if (!base) return false;
+    auto* buffer = static_cast<pspPrimBuffer*>(base);
+    buffer->PreferStagedIndexedVertices();
+    return buffer->SetDynamicVertexData(data, count);
 }
 
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,

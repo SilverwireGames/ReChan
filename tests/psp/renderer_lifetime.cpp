@@ -150,17 +150,30 @@ int main() {
     // Shared skinned buffers are rewritten, drawn, then restored in the same
     // frame.  The staged opt-in must keep both mutations list-owned instead
     // of fencing the GE between the draw and the restore.
-    pspPrimBuffer dynamicBuffer({PDDI_PRIM_TRIANGLES, PDDI_V_POSITION, 3, 3});
-    const std::array<float, 9> dynamicA = {0, 0, 1, 1, 0, 1, 0, 1, 1};
-    const std::array<float, 9> dynamicB = {2, 0, 1, 3, 0, 1, 2, 1, 1};
+    pspPrimBuffer dynamicBuffer({PDDI_PRIM_TRIANGLES,
+        PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, 3, 3});
+    const std::array<float, 30> dynamicA = {
+        0, 0, 1, 1, 1, 1, 5, 6, 2, 0,
+        1, 0, 1, 1, 1, 1, 15, 6, 2, 0,
+        0, 1, 1, 1, 1, 1, 5, 16, 2, 0};
+    const std::array<float, 30> dynamicB = {
+        2, 0, 1, 1, 0.5f, 1, 5, 6, 2, 0,
+        3, 0, 1, 1, 0.5f, 1, 15, 6, 2, 0,
+        2, 1, 1, 1, 0.5f, 1, 5, 16, 2, 0};
     dynamicBuffer.SetVertexData(dynamicA.data(), 3);
     dynamicBuffer.SetIndices(ids, 3);
     PreparePspPrimBufferForDynamicSubmission(&dynamicBuffer);
     ctx.BeginFrame();
     const int syncsBeforeDynamicRestore = FakeGe::syncs;
-    dynamicBuffer.SetVertexData(dynamicB.data(), 3);
+    require(UpdatePspPrimBufferDynamicVertices(&dynamicBuffer, dynamicB.data(), 3),
+        "dynamic vertex fast path rejected canonical format");
     ctx.DrawPrimBuffer(&dynamicBuffer);
-    dynamicBuffer.SetVertexData(dynamicA.data(), 3);
+    require(dynamicBuffer.vertices[0].x == 2.0f
+        && dynamicBuffer.vertices[0].u == 5.0f
+        && dynamicBuffer.GetMaterialKey(0) == (2u << 16),
+        "dynamic vertex fast path changed stable material data");
+    require(UpdatePspPrimBufferDynamicVertices(&dynamicBuffer, dynamicA.data(), 3),
+        "dynamic vertex restore failed");
     require(FakeGe::syncs == syncsBeforeDynamicRestore,
         "dynamic buffer restore fenced the GU list");
     display.SwapBuffers();

@@ -888,9 +888,17 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
 #endif
     if (applyLighting && BuildLitGeoVerts(geo, litVerts)) {
 #if defined(RC_PLATFORM_PSP)
-        PreparePspPrimBufferForDynamicSubmission(geo->meshBuffer);
+        if (!UpdatePspPrimBufferDynamicVertices(geo->meshBuffer,
+                                                litVerts.data(),
+                                                geo->dynamicVertCount))
 #endif
-        geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
+        {
+#if defined(RC_PLATFORM_PSP)
+            // The renderer fast path is strict about the shared 10-float
+            // layout; retain the generic conversion as a safe fallback.
+#endif
+            geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
+        }
     }
     if (pspGeoProbe) {
         LOG("[PSP GeoDraw] after lit verts");
@@ -1329,9 +1337,15 @@ void DrawableSTree::Display(u32 /*flags*/) {
                            &vertData);
 
 #if defined(RC_PLATFORM_PSP)
-        PreparePspPrimBufferForDynamicSubmission(skinnedBuffer);
+        if (!UpdatePspPrimBufferDynamicVertices(skinnedBuffer,
+                                                vertData.data(), skin->numVerts))
 #endif
-        skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
+        {
+#if defined(RC_PLATFORM_PSP)
+            // Keep the existing parser for an unexpected vertex format.
+#endif
+            skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
+        }
         const bool skinBlendApplied = applySkinBlendState(skin);
         DrawTexturedMesh(skinnedBuffer
 #if REAL_TEXTURE_RENDERING
