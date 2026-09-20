@@ -95,7 +95,8 @@ void ShutdownPspGeometryFrameScratch();
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* buffer, const u8* rawData,
                                 u32 rawSize, const u32* uvOffsets,
                                 const u32* colourOffsets, u32 vertexCount,
-                                bool updateUv, bool updateColour);
+                                bool updateUv, bool updateColour,
+                                bool packedOnly = false);
 
 // Dynamic model/lighting paths temporarily rewrite a shared converted buffer.
 // Prefer list-owned vertex staging so restoring that buffer does not fence the

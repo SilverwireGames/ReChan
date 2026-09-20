@@ -383,6 +383,23 @@ pspPrimBuffer::pspPrimBuffer(const pddiPrimBufferDesc& desc)
     indices.resize(desc.indexCount);
 }
 
+bool pspPrimBuffer::GetSingleMaterialKey(u32 start, u32 end, u32* key) const {
+    if (!key || primType != PDDI_PRIM_TRIANGLES || start >= end
+        || end > indices.size()) {
+        return false;
+    }
+
+    const u16 firstIndex = indices[start];
+    if (!HasMaterialKey(firstIndex)) return false;
+    const u32 firstKey = GetMaterialKey(firstIndex);
+    for (u32 cursor = start + 1u; cursor < end; ++cursor) {
+        const u16 index = indices[cursor];
+        if (!HasMaterialKey(index) || GetMaterialKey(index) != firstKey) return false;
+    }
+    *key = firstKey;
+    return true;
+}
+
 pspPrimBuffer::~pspPrimBuffer() {
     PrepareForMutation();
     if (packedVerticesAllocatedBytes != 0) {
@@ -446,6 +463,10 @@ bool pspPrimBuffer::UsesStagedIndexedVertices() const {
 }
 
 void pspPrimBuffer::PrepareForMutation() {
+    // A queued opaque draw keeps a pointer to this buffer until the next
+    // render barrier. Flush before fencing, replacing or destroying storage
+    // so the queue cannot replay stale geometry.
+    if (g_activeContext) g_activeContext->FlushQueuedOpaqueDraws();
     if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial
         && g_activeContext) {
         g_activeContext->FlushList();
@@ -613,7 +634,8 @@ bool pspPrimBuffer::PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                            const u32* uvOffsets,
                                            const u32* colourOffsets,
                                            u32 count, bool updateUv,
-                                           bool updateColour) {
+                                           bool updateColour,
+                                           bool packedOnly) {
     if (!rawData || count != vertices.size()
         || (updateUv && !uvOffsets) || (updateColour && !colourOffsets)) {
         return false;
@@ -655,17 +677,24 @@ bool pspPrimBuffer::PatchDynamicAttributes(const u8* rawData, u32 rawSize,
         }
         if (packedVerticesValid) {
             if (updateUv && uvOffsets[i] != kInvalidOffset) {
-                packedVertices[i].u = static_cast<s16>(std::clamp(
-                    static_cast<int>(std::lround(vertices[i].u)), -32768, 32767));
-                packedVertices[i].v = static_cast<s16>(std::clamp(
-                    static_cast<int>(std::lround(vertices[i].v)), -32768, 32767));
+                // UV animation originates in the PSX packet's byte lanes.
+                // The page path already satisfies the packed GU coordinate
+                // contract; avoid two lround/clamp pairs per vertex.
+                packedVertices[i].u = static_cast<s16>(rawData[uvOffsets[i]]);
+                packedVertices[i].v = static_cast<s16>(rawData[uvOffsets[i] + 1u]);
             }
             if (updateColour) {
                 packedVertices[i].color = vertices[i].color;
             }
         }
     }
-    WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    // Block geometry is submitted through the packed page stream. Do not
+    // write back the parallel float stream that the GE will not read. The
+    // generic path keeps both writebacks for callers that may submit float
+    // vertices in a later pass.
+    if (!packedOnly || !packedVerticesValid) {
+        WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    }
     if (packedVerticesValid) {
         WritebackDcacheRange(packedVertices.data(),
             sizeof(PspPackedVertex) * packedVertices.size());
@@ -734,11 +763,12 @@ bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,
                                 u32 rawSize, const u32* uvOffsets,
                                 const u32* colourOffsets, u32 vertexCount,
-                                bool updateUv, bool updateColour) {
+                                bool updateUv, bool updateColour,
+                                bool packedOnly) {
     if (!base) return false;
     return static_cast<pspPrimBuffer*>(base)->PatchDynamicAttributes(
         rawData, rawSize, uvOffsets, colourOffsets, vertexCount,
-        updateUv, updateColour);
+        updateUv, updateColour, packedOnly);
 }
 
 pspTexture::~pspTexture() {
@@ -1103,6 +1133,7 @@ pspContext::~pspContext() {
 
 void pspContext::BeginFrame() {
     PspPerf::Mark(PspPerf::RuntimeStage::FrameBegin);
+    FlushQueuedOpaqueDraws();
     FinishList();
     g_activeContext = this;
     g_activeShader = nullptr;
@@ -1136,8 +1167,110 @@ void pspContext::BeginFrame() {
 }
 
 void pspContext::EndFrame() {
+    // Opaque submissions can be reordered by material until the frame barrier.
+    // Transparent/effect paths remain immediate and therefore force this
+    // queue to drain before they alter GU state.
+    FlushQueuedOpaqueDraws();
     // The display owns the final sceGuFinish/swap sequence.  Keeping the list
     // open here lets the existing overlay callback draw into the same frame.
+}
+
+void pspContext::FlushQueuedOpaqueDraws() {
+#if defined(PSP_OPAQUE_RENDER_QUEUE) && defined(PSP_ENABLE_NATIVE_INDEXED) \
+    && defined(PSP_INDEXED_LIST_MEMORY)
+    if (replayingOpaqueQueue || opaqueQueueCount == 0) return;
+
+    const u32 count = opaqueQueueCount;
+    PspPerf::CountRenderer(PspPerf::RendererCounter::OpaqueQueueFlushes);
+    std::sort(opaqueQueue.begin(), opaqueQueue.begin() + count,
+        [](const QueuedOpaqueDraw& lhs, const QueuedOpaqueDraw& rhs) {
+            if (lhs.vramHandle != rhs.vramHandle) return lhs.vramHandle < rhs.vramHandle;
+            if (lhs.materialKey != rhs.materialKey) return lhs.materialKey < rhs.materialKey;
+            if (lhs.texInfoOverride != rhs.texInfoOverride) {
+                return lhs.texInfoOverride < rhs.texInfoOverride;
+            }
+            return lhs.texInfoWord < rhs.texInfoWord;
+        });
+
+    const Mat4 savedProjection = projection;
+    const Mat4 savedView = view;
+    const Mat4 savedWorld = world;
+    const u32 savedVramHandle = vramHandle;
+    const bool savedTexInfoOverride = texInfoOverride;
+    const u32 savedTexInfoWord = texInfoWord;
+    replayingOpaqueQueue = true;
+    for (u32 i = 0; i < count; ++i) {
+        const QueuedOpaqueDraw& command = opaqueQueue[i];
+        projection = command.projection;
+        view = command.view;
+        world = command.world;
+        vramHandle = command.vramHandle;
+        texInfoOverride = command.texInfoOverride;
+        texInfoWord = command.texInfoWord;
+        DrawPrimBuffer(command.buffer, command.indexOffset, command.indexCount);
+    }
+    replayingOpaqueQueue = false;
+    opaqueQueueCount = 0;
+
+    projection = savedProjection;
+    view = savedView;
+    world = savedWorld;
+    vramHandle = savedVramHandle;
+    texInfoOverride = savedTexInfoOverride;
+    texInfoWord = savedTexInfoWord;
+    // The last replayed command may belong to a different page than the
+    // caller's current state. Force the next immediate draw to bind its page.
+    pageBindingValid = false;
+    pageTexScaleValid = false;
+#else
+    opaqueQueueCount = 0;
+#endif
+}
+
+bool pspContext::QueueOpaqueDraw(pspPrimBuffer* buffer, u32 indexOffset,
+                                 u32 indexCount) {
+#if defined(PSP_OPAQUE_RENDER_QUEUE) && defined(PSP_ENABLE_NATIVE_INDEXED) \
+    && defined(PSP_INDEXED_LIST_MEMORY)
+    if (replayingOpaqueQueue || !listOpen || !buffer
+        || buffer->GetPrimType() != PDDI_PRIM_TRIANGLES
+        || blendMode != PDDI_BLEND_NONE || !zBufferEnabled
+        || polygonOffsetEnabled || realTextureMode || vramHandle == 0
+        || !buffer->HasPackedVertices() || !buffer->HasValidIndices()) {
+        return false;
+    }
+
+    const u32 total = buffer->GetIndexCount();
+    const u32 start = std::min(indexOffset, total);
+    const u32 end = indexCount
+        ? start + std::min(indexCount, total - start) : total;
+    if (end <= start || end - start > kDrawChunk) return false;
+
+    u32 materialKey = 0;
+    if (texInfoOverride) materialKey = texInfoWord;
+    else if (!buffer->GetSingleMaterialKey(start, end, &materialKey)) return false;
+
+    if (opaqueQueueCount == kOpaqueQueueCapacity) FlushQueuedOpaqueDraws();
+    if (opaqueQueueCount == kOpaqueQueueCapacity) return false;
+
+    QueuedOpaqueDraw& command = opaqueQueue[opaqueQueueCount++];
+    command.buffer = buffer;
+    command.indexOffset = start;
+    command.indexCount = end - start;
+    command.materialKey = materialKey;
+    command.vramHandle = vramHandle;
+    command.texInfoOverride = texInfoOverride;
+    command.texInfoWord = texInfoWord;
+    command.projection = projection;
+    command.view = view;
+    command.world = world;
+    PspPerf::CountRenderer(PspPerf::RendererCounter::OpaqueQueuedDraws);
+    return true;
+#else
+    (void)buffer;
+    (void)indexOffset;
+    (void)indexCount;
+    return false;
+#endif
 }
 
 void pspContext::FinishList() {
@@ -1165,6 +1298,7 @@ void pspContext::FinishList() {
 
 void pspContext::FlushList() {
     if (!listOpen) return;
+    if (!replayingOpaqueQueue) FlushQueuedOpaqueDraws();
     PspPerf::CountRenderer(PspPerf::RendererCounter::ListFlushes);
     FinishList();
     ResetDisplayListGuard();
@@ -1234,6 +1368,7 @@ void pspContext::Setup3DState() {
 }
 
 void pspContext::Setup2DState() {
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     gu3DStateReady = false;
     pageBindingValid = false;
@@ -1257,6 +1392,7 @@ void pspContext::Setup2DState() {
 }
 
 void pspContext::Clear(int flags) {
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     const u32 color = MakeColor(clearColour);
     sceGuClearColor(color);
@@ -1273,6 +1409,7 @@ void pspContext::SetCullMode(pddiCullMode mode) {
     // list-space probe and the cached GU calls.  A 2D pass clears this key,
     // so the next 3D setter still re-emits the state when required.
     if (gu3DStateReady && cullMode == mode) return;
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     cullMode = mode;
     if (mode == PDDI_CULL_NONE) GuDisable(GU_CULL_FACE);
@@ -1284,6 +1421,7 @@ void pspContext::SetCullMode(pddiCullMode mode) {
 
 void pspContext::EnableZBuffer(bool enable) {
     if (gu3DStateReady && zBufferEnabled == enable) return;
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     zBufferEnabled = enable;
     if (enable) GuEnable(GU_DEPTH_TEST);
@@ -1293,6 +1431,7 @@ void pspContext::EnableZBuffer(bool enable) {
 
 void pspContext::SetBlendMode(pddiBlendMode mode) {
     if (gu3DStateReady && blendMode == mode) return;
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     blendMode = mode;
     SetBlend(mode);
@@ -1313,6 +1452,7 @@ void pspContext::SetPolygonOffset(bool enable, f32 factor, f32 units) {
     if (gu3DStateReady && polygonOffsetEnabled == enable
         && polygonOffset == requestedOffset) return;
 
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     polygonOffsetEnabled = enable;
     polygonOffset = requestedOffset;
@@ -1320,6 +1460,7 @@ void pspContext::SetPolygonOffset(bool enable, f32 factor, f32 units) {
 }
 
 void pspContext::SetScissor(int x, int y, int w, int h) {
+    FlushQueuedOpaqueDraws();
     EnsureListSpace();
     const int right = std::clamp(x + w, 0, kWidth);
     const int bottom = std::clamp(y + h, 0, kHeight);
@@ -2071,6 +2212,11 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     // 333 MHz CPU while preserving the backend's ownership invariant.
     auto* buffer = static_cast<pspPrimBuffer*>(base);
     if (!listOpen || !buffer || buffer->GetIndexCount() == 0) return;
+
+    if (!replayingOpaqueQueue) {
+        if (QueueOpaqueDraw(buffer, indexOffset, indexCount)) return;
+        FlushQueuedOpaqueDraws();
+    }
 
 #if defined(PSP_GU_DIAGNOSTIC)
     static u32 primProbe = 0;

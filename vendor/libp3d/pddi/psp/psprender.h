@@ -83,6 +83,7 @@ public:
     const u16* GetIndices() const { return indices.data(); }
     bool HasValidIndices() const { return indicesValid; }
     bool HasPackedVertices() const { return packedVerticesValid; }
+    bool GetSingleMaterialKey(u32 start, u32 end, u32* key) const;
     // Shared model buffers are temporarily rewritten for CPU skinning or
     // lighting and restored after their draw.  Keep those submissions in the
     // list-owned staging path from the first frame so the restore cannot
@@ -92,7 +93,8 @@ public:
                               bool uvIsIntegral = false);
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
-                                u32 count, bool updateUv, bool updateColour);
+                                u32 count, bool updateUv, bool updateColour,
+                                bool packedOnly);
     bool UsesStagedIndexedVertices() const;
     // Direct indexed submissions borrow the persistent vertex array until the
     // current GU list is fenced. These hooks keep mutation/destruction from
@@ -289,7 +291,10 @@ public:
     const Mat4& GetViewMatrix() const override { return view; }
     const Mat4& GetProjectionMatrix() const override { return projection; }
     void SetWorldMirror(bool enable) override {
-        if (worldMirror != enable) gu3DStateReady = false;
+        if (worldMirror != enable) {
+            FlushQueuedOpaqueDraws();
+            gu3DStateReady = false;
+        }
         worldMirror = enable;
     }
     bool GetWorldMirror() const override { return worldMirror; }
@@ -318,6 +323,7 @@ public:
                          float x3, float y3, float r3, float g3, float b3, float a3) override;
 
     void SetTexture(pddiTexture* texture) override {
+        if (currentTexture != texture) FlushQueuedOpaqueDraws();
         currentTexture = texture;
         pageBindingValid = false;
     }
@@ -336,7 +342,10 @@ public:
     void UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
                                  const u16* data, int x, int y,
                                  int w, int h) override;
-    void SetRealTextureMode(bool enabled) override { realTextureMode = enabled; }
+    void SetRealTextureMode(bool enabled) override {
+        if (realTextureMode != enabled) FlushQueuedOpaqueDraws();
+        realTextureMode = enabled;
+    }
     bool IsRealTextureModeEnabled() const override { return realTextureMode; }
     void SetRealTextureRect(float, float, float, float) override {}
 
@@ -352,6 +361,7 @@ public:
     void SetShadowDebugMode(int) override {}
 
     void ApplyShader(const pspShader* shader);
+    void FlushQueuedOpaqueDraws();
     // Native PSX background sprite: reuse indexed pages, no RGBA heap copy.
     void DrawVRAMQuad(u32 handle, u16 tpage, u16 cba,
                       float x, float y, float w, float h,
@@ -373,6 +383,19 @@ private:
         // Invalidation clears the key, but must retain both storage and this
         // pin until the GE has consumed the submission that references them.
         bool inFlight = false;
+    };
+
+    struct QueuedOpaqueDraw {
+        pspPrimBuffer* buffer = nullptr;
+        u32 indexOffset = 0;
+        u32 indexCount = 0;
+        u32 materialKey = 0;
+        u32 vramHandle = 0;
+        bool texInfoOverride = false;
+        u32 texInfoWord = 0;
+        Mat4 projection{};
+        Mat4 view{};
+        Mat4 world{};
     };
 
     pspDisplay* display = nullptr;
@@ -416,6 +439,10 @@ private:
     // allocations; a larger cache starves streamed BLK geometry during load.
     static constexpr u32 kPageCacheCapacity = 16;
     std::array<PageCache, kPageCacheCapacity> pageCache{};
+    static constexpr u32 kOpaqueQueueCapacity = 256;
+    std::array<QueuedOpaqueDraw, kOpaqueQueueCapacity> opaqueQueue{};
+    u32 opaqueQueueCount = 0;
+    bool replayingOpaqueQueue = false;
     // These fixed arenas belong to the current GU submission. On saturation
     // finish/sync the list before recycling; normal draws need no allocation
     // or CPU/GE fence. Both expanded and indexed geometry use this storage.
@@ -456,6 +483,7 @@ private:
 
     void FinishList();
     void FlushList();
+    bool QueueOpaqueDraw(pspPrimBuffer* buffer, u32 indexOffset, u32 indexCount);
     void EnsureListSpace(std::size_t payloadBytes = 0);
     void EnsureDrawSpace(u32 vertexCount, u32 indexCount);
     void* AllocateListMemory(std::size_t bytes);

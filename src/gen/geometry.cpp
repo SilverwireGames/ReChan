@@ -618,6 +618,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     if (!geom || !geom->ownedRawData || !geom->ownedRawSize)
         return nullptr;
 
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::CountRenderer(PspPerf::RendererCounter::GeometryBuilds);
+#endif
+
     const u8* verts = geom->GetVertexList();
     const u8* polys = geom->polyData;
     const u8* primStart = geom->primList;
@@ -1668,7 +1672,7 @@ bool UpdatePspPrimGeomDynamicData(tPrimGeom* geom, bool uvUpdated, bool colourUp
         return false;
     }
 
-    return UpdatePspPrimBufferDynamic(
+    const bool patched = UpdatePspPrimBufferDynamic(
         geom->pspCachedBuffer,
         geom->ownedRawData,
         geom->ownedRawSize,
@@ -1676,7 +1680,16 @@ bool UpdatePspPrimGeomDynamicData(tPrimGeom* geom, bool uvUpdated, bool colourUp
         geom->pspCachedColourOffsets.data(),
         vertexCount,
         uvUpdated,
-        colourUpdated);
+        colourUpdated,
+        true);
+#if defined(RC_PLATFORM_PSP)
+    if (patched) {
+        PspPerf::CountRenderer(PspPerf::RendererCounter::GeometryDynamicPatches);
+        PspPerf::CountRenderer(PspPerf::RendererCounter::GeometryDynamicPatchVertices,
+                               vertexCount);
+    }
+#endif
+    return patched;
 }
 
 static pddiPrimBuffer* GetOrBuildPspPrimGeomBuffer(tPrimGeom* geom,
@@ -1702,6 +1715,9 @@ static pddiPrimBuffer* GetOrBuildPspPrimGeomBuffer(tPrimGeom* geom,
     }
 
     if (geom->pspCachedBuffer) {
+#if defined(RC_PLATFORM_PSP)
+        PspPerf::CountRenderer(PspPerf::RendererCounter::GeometryCacheHits);
+#endif
         if (outUsesSemiTrans) *outUsesSemiTrans = geom->pspCachedUsesSemiTrans;
         if (outSemiTransMode) *outSemiTransMode = geom->pspCachedSemiTransMode;
         return geom->pspCachedBuffer;

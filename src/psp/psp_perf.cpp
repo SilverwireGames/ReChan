@@ -354,7 +354,10 @@ void WriteReport() {
 }
 
 void WriteReportTo(const char* path) {
-    char report[2048] = {};
+    // Keep enough room for the complete profile, including every renderer
+    // counter. This is written outside the measured frame path; the former
+    // 2048-byte buffer silently truncated counters as the schema grew.
+    char report[4096] = {};
     const u32 averageFrameUs = g_frame.Average();
     const u32 p50FrameUs = Percentile(g_frame, 50);
     const u32 p95FrameUs = Percentile(g_frame, 95);
@@ -466,7 +469,10 @@ void WriteReportTo(const char* path) {
 
     static constexpr const char* rendererNames[] = {
         "page_binds_avg", "gu_state_writes_avg", "list_flushes_avg",
-        "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg"
+        "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg",
+        "geometry_builds_avg", "geometry_cache_hits_avg",
+        "geometry_dynamic_patches_avg", "geometry_dynamic_patch_vertices_avg",
+        "opaque_queued_draws_avg", "opaque_queue_flushes_avg"
     };
     for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
         const std::size_t length = std::strlen(report);
