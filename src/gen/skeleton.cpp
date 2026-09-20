@@ -1118,6 +1118,42 @@ void BuildPerJointMeshes(OriginalSTree* original, const u8* primGeomData, u32 pr
         return;
     }
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_SORT_OPAQUE_MATERIALS)
+    // Character packets arrive in PSX packet order, which commonly alternates
+    // body, face and accessory materials.  That is correct on the original
+    // renderer but expensive on the PSP: every material run can require a
+    // CLUT load and a separate GE submission.  For a mesh with no
+    // semi-transparent packet, depth testing makes triangle submission order
+    // irrelevant, so group only the index triplets by their exact PSX
+    // (tpage, cba) key.  Vertex data, UVs, lighting and suit metadata remain
+    // untouched.  Mixed/alpha meshes keep source order because blending is
+    // order-dependent.
+    if (!usesSemiTrans && allIndices.size() >= 6u) {
+        const u32 triangleCount = static_cast<u32>(allIndices.size() / 3u);
+        std::vector<u32> materialOrder(triangleCount);
+        std::vector<u32> materialKeys(triangleCount);
+        std::vector<u16> groupedIndices(allIndices.size());
+
+        for (u32 triangle = 0; triangle < triangleCount; ++triangle) {
+            materialOrder[triangle] = triangle;
+            const SkinVertex& vertex = skinVerts[allIndices[triangle * 3u]];
+            materialKeys[triangle] = (static_cast<u32>(static_cast<u16>(vertex.tpage)) << 16)
+                | static_cast<u16>(vertex.cba);
+        }
+
+        std::sort(materialOrder.begin(), materialOrder.end(),
+            [&](u32 lhs, u32 rhs) { return materialKeys[lhs] < materialKeys[rhs]; });
+
+        for (u32 sortedTriangle = 0; sortedTriangle < triangleCount; ++sortedTriangle) {
+            const u32 sourceTriangle = materialOrder[sortedTriangle];
+            groupedIndices[sortedTriangle * 3u + 0u] = allIndices[sourceTriangle * 3u + 0u];
+            groupedIndices[sortedTriangle * 3u + 1u] = allIndices[sourceTriangle * 3u + 1u];
+            groupedIndices[sortedTriangle * 3u + 2u] = allIndices[sourceTriangle * 3u + 2u];
+        }
+        allIndices.swap(groupedIndices);
+    }
+#endif
+
 #if REAL_TEXTURE_RENDERING
     // Re-sort the (already complete, triangle-list) index buffer by each
     // triangle's (tpage, cba) so the real-texture path can sub-range-draw
@@ -1222,4 +1258,3 @@ void BuildPerJointMeshes(OriginalSTree* original, const u8* primGeomData, u32 pr
     LOG("[Skeleton] Built skinned mesh: %u verts, %u indices across %u joints",
         sd->numVerts, sd->numIndices, skeleton->numJoints);
 }
-
