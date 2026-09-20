@@ -442,10 +442,11 @@ private:
     // CLUT uploads are also asynchronous.  A per-page palette was mutable and
     // could be changed by the next material before the GE consumed the prior
     // sceGuClutLoad command; keep every palette in a submission immutable.
-    // The gameplay scene binds just under 500 material palettes per frame.
-    // Keep one complete frame in immutable RAM so CLUT pressure does not
-    // force a mid-frame Finish/Sync fence and stall the CPU every frame.
-    static constexpr u32 kFramePaletteCapacity = 512;
+    // The gameplay scene binds just under 500 material palettes per frame, but
+    // overlays and character material changes can cross that boundary. Keep
+    // two complete frame budgets in immutable RAM so CLUT pressure does not
+    // force a mid-frame Finish/Sync fence and stall the CPU.
+    static constexpr u32 kFramePaletteCapacity = 1024;
     alignas(16) std::array<u16, kFramePaletteCapacity * 256> framePalettes{};
     u32 framePaletteUsed = 0;
     u32 cacheAge = 1;

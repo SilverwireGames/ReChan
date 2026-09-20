@@ -100,10 +100,11 @@ constexpr u32 kEdramBytes = 2u * 1024u * 1024u;
 constexpr u32 kFramebufferBytes = kBufferWidth * kHeight * 4u * 2u;
 constexpr u32 kDepthBytes = kBufferWidth * kHeight * 2u;
 constexpr u32 kReservedEdramBytes = kFramebufferBytes + kDepthBytes;
-// Keep the command list bounded to 1 MiB.  The native 480x272 frame fits in
-// this list; allocating another MiB here costs more than it saves on the PSP's
-// small user heap and makes streamed gameplay assets compete with rendering.
-constexpr int kMaxDisplayListWords = 262144;
+// Keep enough command-list headroom for a complete gameplay frame.  The
+// original 1 MiB list was reached by the real hub benchmark and caused about
+// five Finish/Sync fences per frame.  A 1.5 MiB resident list is still small
+// beside the PSP's available user RAM and removes those avoidable GE drains.
+constexpr int kMaxDisplayListWords = 393216;
 // More than one complete state/matrix/texture setup plus FINISH/END. Check
 // before a draw or setter, never after allocating data for an unsubmitted draw.
 constexpr std::size_t kListCommandReserve = 4096;

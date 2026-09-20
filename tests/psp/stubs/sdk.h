@@ -45,7 +45,10 @@ inline void emit(size_t bytes = 4) {
     require(open, "commands outside an open list");
     used += bytes;
     peak = std::max(used, peak);
-    require(used <= 1024 * 1024, "display list overflow");
+    // Keep the fake GE aligned with the production PSP renderer's resident
+    // 1.5 MiB command list.  The previous 1 MiB assertion hid the intended
+    // list-headroom optimization behind a harness-only abort.
+    require(used <= 1536 * 1024, "display list overflow");
 }
 inline void read(const void* ptr, size_t bytes) {
     require(ptr && bytes, "empty GPU source");
