@@ -97,6 +97,11 @@ bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* buffer, const u8* rawData,
                                 const u32* colourOffsets, u32 vertexCount,
                                 bool updateUv, bool updateColour);
 
+// Dynamic model/lighting paths temporarily rewrite a shared converted buffer.
+// Prefer list-owned vertex staging so restoring that buffer does not fence the
+// current GU list on the PSP.
+void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
+
 // Legacy host bridge for non-block call sites that still consume a raw
 // pddiPrimBuffer instead of owning a reversed tPrimGeom object.
 tPrimGeom* CloneRawPrimGeom(const u8* primData, u32 primSize);

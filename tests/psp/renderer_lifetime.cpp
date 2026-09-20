@@ -146,6 +146,25 @@ int main() {
     FakeGe::drawSignatures.clear();
     display.SwapBuffers();
     ctx.SetVRAMHandle(0);
+
+    // Shared skinned buffers are rewritten, drawn, then restored in the same
+    // frame.  The staged opt-in must keep both mutations list-owned instead
+    // of fencing the GE between the draw and the restore.
+    pspPrimBuffer dynamicBuffer({PDDI_PRIM_TRIANGLES, PDDI_V_POSITION, 3, 3});
+    const std::array<float, 9> dynamicA = {0, 0, 1, 1, 0, 1, 0, 1, 1};
+    const std::array<float, 9> dynamicB = {2, 0, 1, 3, 0, 1, 2, 1, 1};
+    dynamicBuffer.SetVertexData(dynamicA.data(), 3);
+    dynamicBuffer.SetIndices(ids, 3);
+    PreparePspPrimBufferForDynamicSubmission(&dynamicBuffer);
+    ctx.BeginFrame();
+    const int syncsBeforeDynamicRestore = FakeGe::syncs;
+    dynamicBuffer.SetVertexData(dynamicB.data(), 3);
+    ctx.DrawPrimBuffer(&dynamicBuffer);
+    dynamicBuffer.SetVertexData(dynamicA.data(), 3);
+    require(FakeGe::syncs == syncsBeforeDynamicRestore,
+        "dynamic buffer restore fenced the GU list");
+    display.SwapBuffers();
+
     const auto primitivesBefore = FakeGe::primitives;
     for (int frame = 0; frame < 2; ++frame) {
         ctx.BeginFrame();
@@ -218,7 +237,7 @@ int main() {
     }
     texture->SetData(16, 16, 32, 8, rgba.data()); // must fence live standalone texture
     display.SwapBuffers();
-    require(FakeGe::swaps == 9, "internal fence presented an extra frame");
+    require(FakeGe::swaps == 10, "internal fence presented an extra frame");
     require(FakeGe::clears == 0, "internal fence cleared the framebuffer");
     uint64_t signature = 0;
     for (auto value : FakeGe::drawSignatures) signature = signature * 31 + value;

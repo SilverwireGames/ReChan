@@ -632,6 +632,11 @@ void pspPrimBuffer::RevalidateIndices() {
     }
 }
 
+void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* base) {
+    if (!base) return;
+    static_cast<pspPrimBuffer*>(base)->PreferStagedIndexedVertices();
+}
+
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,
                                 u32 rawSize, const u32* uvOffsets,
                                 const u32* colourOffsets, u32 vertexCount,

@@ -83,6 +83,11 @@ public:
     const u16* GetIndices() const { return indices.data(); }
     bool HasValidIndices() const { return indicesValid; }
     bool HasPackedVertices() const { return packedVerticesValid; }
+    // Shared model buffers are temporarily rewritten for CPU skinning or
+    // lighting and restored after their draw.  Keep those submissions in the
+    // list-owned staging path from the first frame so the restore cannot
+    // force a mid-frame GE fence.
+    void PreferStagedIndexedVertices() { preferStagedIndexedVertices = true; }
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour);
@@ -134,6 +139,11 @@ private:
     void RevalidateIndices();
     void RebuildPackedVertices();
 };
+
+// The shared model path only knows the PDDI buffer interface.  This PSP hook
+// lets it opt a temporarily mutated buffer into list-owned staging without
+// exposing the backend's storage layout to game code.
+void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 
 class pspTexture final : public pddiTexture {
 public:

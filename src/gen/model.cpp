@@ -887,6 +887,9 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     std::vector<GeoRenderVertex> litVerts;
 #endif
     if (applyLighting && BuildLitGeoVerts(geo, litVerts)) {
+#if defined(RC_PLATFORM_PSP)
+        PreparePspPrimBufferForDynamicSubmission(geo->meshBuffer);
+#endif
         geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
     }
     if (pspGeoProbe) {
@@ -1325,6 +1328,9 @@ void DrawableSTree::Display(u32 /*flags*/) {
                            skin,
                            &vertData);
 
+#if defined(RC_PLATFORM_PSP)
+        PreparePspPrimBufferForDynamicSubmission(skinnedBuffer);
+#endif
         skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
         const bool skinBlendApplied = applySkinBlendState(skin);
         DrawTexturedMesh(skinnedBuffer
