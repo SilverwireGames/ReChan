@@ -2463,8 +2463,8 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                 if (pspStageProbe) {
                     Log::Get().LogMessage("[PSP GU Stage] before bind #%lu tpage=%04X cba=%04X",
                         static_cast<unsigned long>(pspStageGuDrawId),
-                        static_cast<unsigned>(static_cast<u16>(firstTpage)),
-                        static_cast<unsigned>(static_cast<u16>(firstCba)));
+                        static_cast<unsigned>(static_cast<u16>(firstMaterialKey >> 16)),
+                        static_cast<unsigned>(static_cast<u16>(firstMaterialKey & 0xffffu)));
                 }
 #endif
                 BindPage(static_cast<float>(firstMaterialKey >> 16),

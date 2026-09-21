@@ -66,7 +66,7 @@ OBJS = $(SOURCES:.cpp=.o)
 
 # build.mak prefixes every entry in INCDIR with -I.
 INCDIR = $(ROOT)/src $(ROOT)/vendor/libp3d $(ROOT)/vendor/cgltf $(ROOT)/vendor/stb
-DEFINES = -DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE
+DEFINES = -DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_SORT_OPAQUE_MATERIALS
 
 COMMON_FLAGS = $(DEFINES) -std=gnu++17 -G0 -ffunction-sections -fdata-sections \
 	-fno-strict-aliasing -mno-check-zero-division -Wall -Wextra

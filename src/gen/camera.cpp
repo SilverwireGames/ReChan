@@ -213,7 +213,9 @@ void Camera::Reset() {
         asyncAnimEnum = 0xFFFF;
         asyncAnim = nullptr;
     }
-    cameraAnchor = nullptr;
+    // The original PSX Camera::Reset preserves the active CameraAnchor
+    // (+0x188). World loading installs/replaces the anchor; player and
+    // switch resets must not disable the follow-path camera.
 }
 
 #if HIGH_FPS_PLAY_PRESENTATION
@@ -881,8 +883,9 @@ void Camera::FollowPath() {
         (void)dist;
     }
 
-    if (!nodeA)
+    if (!nodeA) {
         return;
+    }
 
     if (!nodeB)
         nodeB = nodeA;

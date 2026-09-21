@@ -393,6 +393,8 @@ CameraManager::CameraManager() {
 
 CameraManager::~CameraManager() {
     MARKFUNCTION(0x8004A580);
+    delete anchor;
+    anchor = nullptr;
     g_cameraManager = nullptr;
 }
 
@@ -413,6 +415,12 @@ void CameraManager::InternalOpen() {
 // Finally stores the anchor in the global Camera object.
 void CameraManager::SetupPaths() {
     MARKFUNCTION(0x8004A668);
+
+    // A level/petal reload replaces the database.  The previous anchor owns
+    // path nodes that point into that database, so retaining it leaks the
+    // old rail and leaves a stale camera graph alive across transitions.
+    delete anchor;
+    anchor = nullptr;
 
     anchor = new CameraAnchor();
     anchor->SetName("CamAnchor", 0);
@@ -461,4 +469,3 @@ void CameraManager::SetupPaths() {
     LOG("[CameraManager] SetupPaths: source=%u target=%u builtPaths=%u builtNodes=%u",
         sourcePathCount, targetPathCount, builtPathCount, builtNodeCount);
 }
-

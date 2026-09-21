@@ -76,12 +76,12 @@ u32* DBRoot::Process(u32* data, const u32* end) {
 
     const u8* dataBytes = reinterpret_cast<const u8*>(data);
     if (endBytes) {
-        // The fixed DBRoot header occupies eight words.  Reject truncated
+        // The fixed DBRoot header occupies nine words.  Reject truncated
         // records before touching the u16/u32 fields below; on the PSP an
         // invalid WDB cursor otherwise becomes an address exception while
         // loading a level.
         if (dataBytes > endBytes ||
-            static_cast<size_t>(endBytes - dataBytes) < (8u * sizeof(u32))) {
+            static_cast<size_t>(endBytes - dataBytes) < (9u * sizeof(u32))) {
             return const_cast<u32*>(end);
         }
     }
@@ -420,9 +420,9 @@ void Database::PreScan() {
 // Tag 2: DBVolume (84 bytes)
 // Tag 3: DBSphere (64 bytes)
 // Tag 4: DBLine (76 bytes)
-// Tag 5: DBPath (76 bytes)
-// Tag 6: DBMesh (64 bytes)
-// Tag 7: reserved
+// Tag 5: reserved
+// Tag 6: DBPath (76 bytes)
+// Tag 7: DBMesh (64 bytes)
 void Database::Scan(const u8* data, u32 size) {
     MARKFUNCTION(0x80038B48);
 
@@ -536,6 +536,11 @@ void Database::Scan(const u8* data, u32 size) {
             }
             case 5:
             {
+                // Reserved on the original WDB stream.
+                break;
+            }
+            case 6:
+            {
                 // DBPath
                 if (stream + 9 > end) goto done;
                 DBPath* obj = new DBPath();
@@ -566,7 +571,7 @@ void Database::Scan(const u8* data, u32 size) {
                 pathList.AddNodeTail(obj);
                 break;
             }
-            case 6:
+            case 7:
             {
                 // DBMesh
                 if (stream + 9 > end) goto done;
@@ -596,6 +601,19 @@ done:
 
     // PSX: SortPriReverse on blockList after parsing (0x80039090)
     blockList.SortPriReverse();
+
+#if defined(PSP_STAGE_DIAGNOSTIC)
+    Log::Get().LogMessage(
+        "[PSP WDB] scan size=%lu points=%ld paths=%ld meshes=%ld lines=%ld spheres=%ld volumes=%ld blocks=%ld",
+        static_cast<unsigned long>(size),
+        static_cast<long>(pointList.GetNumElements()),
+        static_cast<long>(pathList.GetNumElements()),
+        static_cast<long>(meshList.GetNumElements()),
+        static_cast<long>(lineList.GetNumElements()),
+        static_cast<long>(sphereList.GetNumElements()),
+        static_cast<long>(volumeList.GetNumElements()),
+        static_cast<long>(blockList.GetNumElements()));
+#endif
 }
 
 // PSX: Close__8Database (DATABASE.CPP:821)
