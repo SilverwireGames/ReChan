@@ -446,6 +446,11 @@ void tGeometry::SetVertexList(const u8* verts) {
 tPrimGeom::~tPrimGeom() {
     MARKFUNCTION(0x800A14C4);
 
+    if (drawBuffer) {
+        drawBuffer->Release();
+        drawBuffer = nullptr;
+    }
+
     delete[] ownedRawData;
     ownedRawData = nullptr;
     ownedRawSize = 0;
@@ -522,7 +527,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                                                    const LVector* drawPos,
                                                    const GMFogState* gmFogState,
                                                    bool* outUsesSemiTrans,
-                                                   u8* outSemiTransMode
+                                                   u8* outSemiTransMode,
+                                                   bool reuseGeomBuffer = false
 #ifdef REAL_TEXTURE_RENDERING
                                                    , std::vector<RealTextureGroup>* outRealTexGroups = nullptr
 #endif
@@ -559,7 +565,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         u16 primCounts[4];
     };
 
-    std::vector<LoopInfo> loops;
+    static std::vector<LoopInfo> loops;
+    loops.clear();
     loops.reserve(geom->numLoops);
 
     u16 vertAccum = 0;
@@ -597,8 +604,13 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     }
 
     struct Vert { f32 x, y, z, r, g, b, u, v, tpage, cba; };
-    std::vector<Vert> vertBuf;
-    std::vector<u16> idxBuf;
+    // Rebuilt for every visible block every frame (the emitted triangle set is
+    // camera-dependent), so the storage is reused rather than reallocated per
+    // call. Rendering is single-threaded and this function is not re-entrant.
+    static std::vector<Vert> vertBuf;
+    static std::vector<u16> idxBuf;
+    vertBuf.clear();
+    idxBuf.clear();
     u32 culledBackfaceCount = 0;
     u32 culledClipCount = 0;
     bool usesSemiTrans = false;
@@ -783,7 +795,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         return vert;
     };
 
-    std::vector<u8> gmFogPrimScratch;
+    // Reused across calls: this is refilled for every fogged block every frame,
+    // so a fresh allocation per call is pure churn. Same single-threaded,
+    // non-re-entrant reasoning as vertBuf/idxBuf above.
+    static std::vector<u8> gmFogPrimScratch;
     if (gmFogState && gmFogState->enabled && geom->gmFogWriteList && geom->gmFogColourList) {
         const u32 primRegionOff = static_cast<u32>(primStart - geom->ownedRawData);
         if (primRegionOff < geom->ownedRawSize) {
@@ -1230,7 +1245,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     // index order changes, so the legacy single-draw path is unaffected.
     if (outRealTexGroups) {
         const u32 numTris = static_cast<u32>(idxBuf.size() / 3);
-        std::vector<u32> order(numTris);
+        static std::vector<u32> order;
+        order.resize(numTris);
         for (u32 t = 0; t < numTris; t++) order[t] = t;
 
         auto keyOf = [&](u32 tri) -> u32 {
@@ -1239,7 +1255,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         };
         std::stable_sort(order.begin(), order.end(), [&](u32 a, u32 b) { return keyOf(a) < keyOf(b); });
 
-        std::vector<u16> groupedIndices(idxBuf.size());
+        // Static for the same reason as vertBuf/idxBuf: swapping a fresh local
+        // into idxBuf would discard the reused allocation every frame.
+        static std::vector<u16> groupedIndices;
+        groupedIndices.assign(idxBuf.size(), 0);
         outRealTexGroups->clear();
         u32 groupStart = 0;
         u32 prevKey = (numTris > 0) ? keyOf(order[0]) : 0;
@@ -1273,7 +1292,13 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                             static_cast<u32>(vertBuf.size()),
                             static_cast<u32>(idxBuf.size()));
 
-    pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+    pddiPrimBuffer* buffer = reuseGeomBuffer ? geom->drawBuffer : nullptr;
+    if (!buffer) {
+        buffer = p3d::device->NewPrimBuffer(desc);
+        if (reuseGeomBuffer) {
+            geom->drawBuffer = buffer;
+        }
+    }
     buffer->SetVertexData(vertBuf.data(), static_cast<u32>(vertBuf.size()));
     buffer->SetIndices(idxBuf.data(), static_cast<u32>(idxBuf.size()));
 
@@ -1349,7 +1374,9 @@ pddiPrimBuffer* BuildPrimBufferFromRawPrimGeom(const u8* primData, u32 primSize
         return nullptr;
     }
 
-    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, nullptr, nullptr
+    // reuseGeomBuffer must stay false: geom is deleted immediately below, which
+    // would release the buffer this function returns.
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, nullptr, nullptr, false
 #ifdef REAL_TEXTURE_RENDERING
                                                           , outRealTexGroups
 #endif
@@ -1816,7 +1843,7 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
     tPrimGeom* primGeom = static_cast<tPrimGeom*>(geometry);
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
-    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode);
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, nullptr, &usesSemiTrans, &semiTransMode, true);
     if (!buffer)
         return 0;
 
@@ -1839,7 +1866,6 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
 
-    buffer->Release();
     return 1;
 }
 
@@ -1855,7 +1881,7 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
     tPrimGeom* primGeom = static_cast<tPrimGeom*>(geometry);
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
-    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode);
+    pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(primGeom, drawPos, &gmFogState, &usesSemiTrans, &semiTransMode, true);
     if (!buffer)
         return 0;
 
@@ -1878,7 +1904,6 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
 
-    buffer->Release();
     return 1;
 }
 

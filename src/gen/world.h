@@ -96,6 +96,12 @@ public:
     // Upload raw PSX texture data to VRAM and refresh the GL texture
     void UploadToVRAM(s16 x, s16 y, s16 w, s16 h, const u8* raw);
     void RefreshVRAMTexture();
+    // Palette cycling and RAM-texture flipbooks write CPU VRAM many times per
+    // frame. The writes are coalesced into one upload at the top of
+    // World::Render, bounded to the rectangle they actually touched: a palette
+    // transfer dirties 256x1 of a 1024x512 surface.
+    void MarkVRAMDirtyRect(s32 x, s32 y, s32 w, s32 h);
+    void FlushDirtyVRAM();
     u32 GetVRAMHandle() const { return vramHandle; }
     const PsxVRAM& GetVRAM() const { return vram; }
 
@@ -178,6 +184,11 @@ public:
 private:
     PsxVRAM vram;
     u32 vramHandle = 0;
+    // Inclusive min, exclusive max. Empty when minX >= maxX.
+    s32 vramDirtyMinX = 0;
+    s32 vramDirtyMinY = 0;
+    s32 vramDirtyMaxX = 0;
+    s32 vramDirtyMaxY = 0;
     std::vector<u8> streamData; // LCF file data (kept alive for block pointers)
     LVector levelMin = {}, levelMax = {};
 

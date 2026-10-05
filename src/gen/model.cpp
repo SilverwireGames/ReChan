@@ -824,8 +824,11 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         p3d::context->SetBlendMode(blendMode);
     }
 
-    std::vector<GeoRenderVertex> litVerts;
-    if (applyLighting && BuildLitGeoVerts(geo, litVerts)) {
+    // Reused across frames; BuildLitGeoVerts assign()s over it, so only its
+    // capacity carries between calls.
+    static std::vector<GeoRenderVertex> litVerts;
+    const bool litVertsApplied = applyLighting && BuildLitGeoVerts(geo, litVerts);
+    if (litVertsApplied) {
         geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
     }
 
@@ -835,7 +838,7 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
 #endif
                       );
 
-    if (!litVerts.empty()) {
+    if (litVertsApplied) {
         geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
     }
 
@@ -1038,7 +1041,16 @@ void DrawableSTree::Display(u32 /*flags*/) {
 
     // Per-frame CPU skinning
     if (skel && skin && skin->numVerts > 0 && skel->joints && skinnedBuffer) {
-        Mat4* jointMatrices = new Mat4[skel->numJoints];
+        // Reused across frames and characters: this ran a heap allocation per
+        // character per frame, on the render path. Safe as a shared buffer
+        // because the joint pre/post callbacks ComputeWorldMatricesWithCallbacks
+        // fires only adjust joint transforms -- none of them re-enter drawing,
+        // so nothing can resize this out from under the pointer below.
+        static std::vector<Mat4> jointMatrixScratch;
+        if (jointMatrixScratch.size() < skel->numJoints) {
+            jointMatrixScratch.resize(skel->numJoints);
+        }
+        Mat4* jointMatrices = jointMatrixScratch.data();
         skel->ComputeWorldMatricesWithCallbacks(jointMatrices);
         const Mat4 modelWorld = p3d::context->GetWorldMatrix();
         Mat4 lightingWorld = modelWorld;
@@ -1154,7 +1166,14 @@ void DrawableSTree::Display(u32 /*flags*/) {
             }
         }
 
-        std::vector<f32> vertData(skin->numVerts * 10);
+        // Reused across frames: allocating and zeroing numVerts*10 floats every
+        // frame per character was pure churn, since the loop below overwrites
+        // all of it. Consumers index by vertex, never by vertData.size(), so a
+        // buffer left larger than needed is harmless.
+        static std::vector<f32> vertData;
+        if (vertData.size() < static_cast<size_t>(skin->numVerts) * 10u) {
+            vertData.resize(static_cast<size_t>(skin->numVerts) * 10u);
+        }
         for (u32 i = 0; i < skin->numVerts; i++) {
             const SkinVertex& sv = skin->verts[i];
             const Mat4& m = jointMatrices[sv.jointIdx];
@@ -1219,7 +1238,6 @@ void DrawableSTree::Display(u32 /*flags*/) {
         if (skinBlendApplied) {
             p3d::context->SetBlendMode(PDDI_BLEND_NONE);
         }
-        delete[] jointMatrices;
         return;
     }
 

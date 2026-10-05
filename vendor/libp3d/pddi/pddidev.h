@@ -282,6 +282,14 @@ public:
     // allocator; a no-op safety net if handle is 0.
     virtual void UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) = 0;
 
+    // Re-uploads a sub-rectangle only. data points at the rect's first texel
+    // inside a larger buffer whose rows are srcPitchTexels apart, so a small
+    // dirty region can be pushed without touching the rest of the texture.
+    // Palette cycling dirties 256x1 of a 1024x512 texture, so the full-surface
+    // path moves 1 MiB to deliver 512 bytes.
+    virtual void UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                                       int srcPitchTexels, const u16* data) = 0;
+
     // Real-texture rendering: an alternate 3D texturing path that samples a
     // real 2D texture (bound via SetTexture) instead of the PSX VRAM atlas.
     // Off by default; the texture set via SetTexture is only used for 3D

@@ -5,6 +5,7 @@
 #include "pddi/pdditex.h"
 #include "pddi/pddishad.h"
 #include "pddi/pddidev.h"
+#include "pddi/pddishadersrc.h"
 #include <array>
 #include <string>
 #include <unordered_map>
@@ -32,10 +33,17 @@ private:
     u32 vertexFormat;
     u32 vertexCount = 0;
     u32 indexCount = 0;
+    // Allocated GPU storage, which can exceed the live counts: callers that
+    // refill a buffer every frame then update in place instead of reallocating.
+    u32 vertexCapacity = 0;
+    u32 indexCapacity = 0;
     u32 stride = 0;
     u32 vao = 0;
     u32 vbo = 0;
     u32 ebo = 0;
+    // Set when the GL objects came from the recycle pool: the first write has
+    // to orphan the storage rather than patch a buffer still in flight.
+    bool orphanOnNextWrite = false;
 
     void SetupVertexAttribs();
 };
@@ -290,6 +298,8 @@ public:
     u32  CreateVRAMTexture(int w, int h, const u16* data) override;
     void DestroyVRAMTexture(u32 handle) override;
     void UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) override;
+    void UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                               int srcPitchTexels, const u16* data) override;
 
     void SetRealTextureMode(bool enabled) override { realTextureModeEnabled = enabled; }
     bool IsRealTextureModeEnabled() const override { return realTextureModeEnabled; }
@@ -379,6 +389,24 @@ private:
     float shadowLightDir[3] = { 0.35f, -0.85f, 0.25f };
     float shadowTexelWorldSize[kShadowCascadeCount] = {};
     s32 shadowDebugMode = 0;
+
+    // Last values pushed to program3D. Uniform values live in the program
+    // object and survive glUseProgram, so comparing against the last write is
+    // enough to skip a redundant call. The hundreds of effect/trail draws in a
+    // frame all share these; only the matrices genuinely change per draw.
+    struct Prog3DCache {
+        f32 alphaScale = -1.0f;
+        s32 useZeroTexelKey = -1;
+        s32 receiveShadows = -1;
+        s32 shadowCascadeCount = -1;
+        s32 shadowFilterQuality = -1;
+        s32 texInfoOverrideEnabled = -1;
+        f32 texInfoTpage = -2.0f;
+        f32 texInfoCba = -2.0f;
+        s32 hasVRAM = -1;
+        s32 realTextureMode = -1;
+    } prog3DCache;
+
 
     bool shadowConstUniformsDirty = true;
     bool shadowCascadeUniformsDirty = true;

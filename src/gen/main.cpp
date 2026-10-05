@@ -15,6 +15,7 @@
 #include "pc/debugui.h"
 #include "pc/inputaction.h"
 #include "pc/rechan_icon_embedded.h"
+#include "pc/shadersrc.h"
 #include "pc/textmgr.h"
 #include "gen/game.h"
 #include "gen/time.h"
@@ -229,6 +230,10 @@ int main(int argc, char** argv) {
         return unchanged ? 0 : 5;
     }
 #endif
+
+    // Must precede CreateContext: the backend compiles its programs there and
+    // pddi carries no GLSL of its own.
+    RechanInstallShaderSources();
 
     tPlatform* platform = tPlatform::Create();
 

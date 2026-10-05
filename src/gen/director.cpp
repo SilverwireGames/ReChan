@@ -3479,19 +3479,13 @@ bool Director::DoesLevelHaveExtraMem(s32 level) {
 void Director::updateVramAnims() {
     MARKFUNCTION(0x8003BB90);
 
-    bool updated = false;
-
+    // AdvanceFrame pushes its new frame through p3d::rawTextureUploader, which
+    // is World::UploadToVRAM, so the dirty rect is recorded there.
     if (flipbookA) {
         reinterpret_cast<tFlipbook*>(flipbookA)->AdvanceFrame();
-        updated = true;
     }
     if (flipbookB) {
         reinterpret_cast<tFlipbook*>(flipbookB)->AdvanceFrame();
-        updated = true;
-    }
-
-    if (updated && g_game && g_game->GetWorld()) {
-        g_game->GetWorld()->RefreshVRAMTexture();
     }
 }
 

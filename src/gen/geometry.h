@@ -52,6 +52,12 @@ struct tPrimGeom : public tGeometry {
 	u8* ownedRawData = nullptr;
 	u32 ownedRawSize = 0;
 
+	// Reused across frames by RP_ZCullGClip/RP_ZCullGMFog. The emitted triangle
+	// set is camera-dependent (PSX NCLIP runs per frame), so the contents are
+	// still rebuilt and re-uploaded every frame -- only the GPU buffer object
+	// persists, instead of being created and destroyed per block per frame.
+	mutable pddiPrimBuffer* drawBuffer = nullptr;
+
 	~tPrimGeom();
 	tPrimGeom* Clone() const;
 	int Display(const LVector* drawPos = nullptr);
