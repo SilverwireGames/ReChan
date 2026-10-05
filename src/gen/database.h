@@ -110,7 +110,9 @@ struct DBMesh : public DBRoot {
 
     ~DBMesh() override;
 
-    void SetFileName(const char* name);
+    // length bounds the copy: WDB filenames are length-prefixed and are not
+    // guaranteed to be NUL-terminated inside the file buffer.
+    void SetFileName(const char* name, u32 length);
 };
 
 // DBPath - a path with child points (76 bytes on PSX)

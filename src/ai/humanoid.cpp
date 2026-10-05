@@ -96,6 +96,7 @@ static s32 s_throwPickupReleaseForce = 0x59D8;
 // PSX gp+0x73C (0x800DD088), release-frame threshold for _TableThrow.
 static s32 s_tableThrowReleaseFrame = 0xD;
 static u32 s_humanoidSuitTraceBudget = 64;
+static u32 s_nonSTreeHumanoidModelBudget = 16;
 static constexpr s32 DROP_PICKUP_DAMAGE_THRESHOLD = 14;
 static constexpr s32 BACK_GRAB_MIN_RELATIVE_ANGLE = 5461;
 static constexpr u32 BACK_GRAB_RELATIVE_ANGLE_RANGE = 0xD8E3;
@@ -1913,8 +1914,16 @@ void Humanoid::CreateModel(const char* name) {
 
     // PSX: ApplyAnimToModel(thingType, 0, 2, 0, 0) then InitSemiTransMode
     Model* m = static_cast<Model*>(model);
-    if (m) {
-        SModel* sm = static_cast<SModel*>(m);
+    SModel* sm = dynamic_cast<SModel*>(m);
+    if (m && !sm && s_nonSTreeHumanoidModelBudget > 0) {
+        LOG("[Humanoid::CreateModel] Non-STree model attached to humanoid thingType=%u name=%s drawableType=%d",
+            thingType,
+            GetName() ? GetName() : "null",
+            m->drawableType);
+        s_nonSTreeHumanoidModelBudget--;
+    }
+
+    if (sm) {
         m->ApplyAnimToModel(thingType, 0, 2, 0, 0);
         sm->SetupModelCallbacks();
         m->SetAnim(22, 0, 1, 0);
@@ -1934,8 +1943,7 @@ void Humanoid::CreateModel(const char* name) {
     orientation = spawnOrientation;
     faceAngle = spawnOrientation.y;
 
-    if (m) {
-        SModel* sm = static_cast<SModel*>(m);
+    if (sm) {
         sm->scale = GetCharSubTypeScale(characterSubType);
 
         if (m->drawableType == 2 && m->drawable) {

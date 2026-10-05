@@ -290,7 +290,7 @@ bool ApplyWDBParameterOverrides(Database* database, const char* jsonPath) {
             if (const JSONValue* file = patch.FindMember("file"); file && file->IsString()) {
                 DBMesh* mesh = static_cast<DBMesh*>(ref.root);
                 if (!mesh->fileName || file->stringVal != mesh->fileName)
-                    mesh->SetFileName(file->stringVal.c_str());
+                    mesh->SetFileName(file->stringVal.c_str(), static_cast<u32>(file->stringVal.size()));
             }
         }
         else if (kind == "line") {

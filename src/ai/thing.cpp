@@ -340,8 +340,11 @@ void Thing::CreateModel(const char* name) {
     }
     else if (modelType == 1) {
         SModel* sm = nullptr;
-        if (existing && existing->drawableType != 1) {
-            sm = static_cast<SModel*>(existing);
+        if (existing) {
+            sm = dynamic_cast<SModel*>(existing);
+        }
+        if (sm) {
+            model = sm;
         }
         else {
             if (existing) {
