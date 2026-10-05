@@ -2135,7 +2135,8 @@ void Behaviour::Idle(Behaviour* self) {
 
     if (owner->field412 != 0) {
         Model* model = static_cast<Model*>(owner->model);
-        const s32 modelGate = model ? ((s32)model->modelFlags >> 4) : 0;
+        // PSX 0x80075750: only bit 4 (srl 4, then and with the 0/1 flag).
+        const s32 modelGate = model ? (((s32)model->modelFlags >> 4) & 1) : 0;
         active = active && (modelGate != 0);
     }
 
@@ -2215,7 +2216,8 @@ void Behaviour::GetBackIntoActiveZone(Behaviour* self) {
             }
             else {
                 self->owner->FaceThingDesired(player);
-                self->owner->moveSpeed = 0x5A;
+                // PSX 0x80077854: writes owner+0x13C (the taunt animation), not the move speed.
+                self->owner->field316 = 0x5A;
                 self->owner->RequestAction(0x15);
             }
             return;
@@ -2562,7 +2564,8 @@ void Behaviour::ComplexAttack() {
             else {
                 owner->moveSpeed = (s32)(s16)animConfigPtr->strafingSpeed;
                 owner->SetDesiredMoveDirection(owner->faceAngle + 0x8000);
-                owner->SetTarget(nullptr);
+                // PSX 0x80074AEC: keeps the player as target while backing off.
+                owner->SetTarget(Player::s_player);
                 owner->RequestAction(6);
                 return;
             }
@@ -2594,7 +2597,8 @@ void Behaviour::BackoffAndTaunt(Behaviour* b) {
 
     b->owner->FaceThingDesired(Player::s_player);
 
-    const s32 state = b->owner->actionState;
+    // PSX 0x80075820: this tests the thing type (lhu owner+0x18), not the action state.
+    const s32 state = (s32)b->owner->thingType;
     const bool stateAllowsDistanceChecks =
         state == 10 || state == 12 || state == 13 || state == 15 || state == 17;
 
@@ -2608,7 +2612,7 @@ void Behaviour::BackoffAndTaunt(Behaviour* b) {
                 b->navDecisionCounter++;
                 b->owner->moveSpeed = (s32)(s16)b->animConfigPtr->strafingSpeed;
                 b->owner->SetDesiredMoveDirection(b->owner->faceAngle + 0x8000);
-                b->owner->SetTarget(nullptr);
+                b->owner->SetTarget(Player::s_player);
                 b->owner->RequestAction(6);
                 return;
             }
@@ -2628,7 +2632,7 @@ void Behaviour::BackoffAndTaunt(Behaviour* b) {
         if (distToPlayer < 1500 && floorDelta < NDMS_FLOOR_SAFE_DELTA_THRESHOLD && wallBlocked == 0) {
             b->owner->moveSpeed = (s32)(s16)b->animConfigPtr->strafingSpeed;
             b->owner->SetDesiredMoveDirection(b->owner->faceAngle + 0x8000);
-            b->owner->SetTarget(nullptr);
+            b->owner->SetTarget(Player::s_player);
             b->owner->RequestAction(6);
             return;
         }
@@ -2685,7 +2689,7 @@ void Behaviour::BackOutOfTheFight(Behaviour* b) {
             b->navDecisionCounter++;
             b->owner->moveSpeed = (s32)(s16)b->animConfigPtr->strafingSpeed;
             b->owner->SetDesiredMoveDirection(b->owner->faceAngle + 0x8000);
-            b->owner->SetTarget(nullptr);
+            b->owner->SetTarget(Player::s_player);
             b->owner->RequestAction(6);
             return;
         }
@@ -2757,7 +2761,7 @@ void Behaviour::NDMS(Behaviour* b) {
         b->nextHandlerThisOffset = 0;
         b->nextHandlerDispatch = -1;
         b->nextHandler = NDMS;
-        b->currentPathNodeIndex = 0;
+        b->navDecisionCounter = 0;
         b->handlerThisOffset = 0;
         b->handlerDispatch = -1;
         b->handler = BackoffAndTaunt;
@@ -2972,7 +2976,7 @@ void Behaviour::NDMS(Behaviour* b) {
             b->nextHandlerThisOffset = 0;
             b->nextHandlerDispatch = -1;
             b->nextHandler = NDMS;
-            b->currentPathNodeIndex = 0;
+            b->navDecisionCounter = 0;
             b->handlerThisOffset = 0;
             b->handlerDispatch = -1;
             b->handler = BackOutOfTheFight;
@@ -2994,7 +2998,7 @@ void Behaviour::NDMS(Behaviour* b) {
             b->nextHandlerThisOffset = 0;
             b->nextHandlerDispatch = -1;
             b->nextHandler = NDMS;
-            b->currentPathNodeIndex = 0;
+            b->navDecisionCounter = 0;
             b->handlerThisOffset = 0;
             b->handlerDispatch = -1;
             b->handler = BackOutOfTheFight;
@@ -3322,7 +3326,8 @@ s32 Behaviour::NavigateEnemies(s32 mode) {
         Humanoid** humans = FightingCollision::GetHumanoidArray();
         for (s32 i = 0; i < FIGHTING_COLLISION_MAX; i++) {
             Humanoid* other = humans[i];
-            if (!other || other == owner) {
+            // PSX 0x80076DA8: the player is in this array too and is skipped.
+            if (!other || other == Player::s_player || other == owner) {
                 continue;
             }
 
