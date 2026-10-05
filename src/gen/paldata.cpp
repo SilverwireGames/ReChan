@@ -217,9 +217,10 @@ s32 PaletteData::NextFrame() {
         return 1;
     }
 
-    // Frame stream is consumed by Update() first, then advanced here.
-    // Wrap immediately after the last valid frame to avoid one invalid read tick.
-    if ((frameIndex + 1) >= frameCount) {
+    // PSX (8009D1B8): slt frameIndex, frameCount -- it advances while the index
+    // is below frameCount, so indices 0..frameCount inclusive get played.
+    // Wrapping a tick earlier silently drops the last frame of every cycle.
+    if (frameIndex >= frameCount) {
         return 1;
     }
 
@@ -238,15 +239,24 @@ s32 PaletteData::Update() {
         return 0;
     }
 
-    // RLE runs are indexed from palette start every frame.
+    // Run positions are absolute within the 256-entry palette.
+    //
+    // PSX (8009D208) leaves the cursor at writeCursorEnd and sign-extends the
+    // skip byte (sll 24 / sra 23), so a byte b of 128..255 seeks to offset b
+    // (256 + (s8)b). That encoding only reaches the upper half: b < 128 would
+    // land at 256 + b, past the palette. Rebasing to the palette start and
+    // treating the byte as unsigned yields offset b for every b in 0..255 --
+    // identical to PSX wherever its form is valid, and correct where it is not.
     writeCursor = writeCursorEnd - 256;
 
     const u8* frame = frameStream + frameOffset;
     const u16 runCount = ReadU16Pal(frame + 0);
     const u16 alphaMask = (setupFlags == 1u) ? 0x8000u : 0u;
 
+    u16* const paletteStart = writeCursorEnd - 256;
     const u8* runData = frame + 4;
     for (u32 run = 0; run < runCount; run++) {
+        // Unsigned: paired with the rebase above, see the note there.
         const u8 skip = *runData++;
         const u8 spanByte = *runData++;
 
@@ -259,7 +269,12 @@ s32 PaletteData::Update() {
 
         for (u32 i = 0; i < span; i++) {
             const u8 paletteIndex = *runData++;
-            *writeCursor = static_cast<u16>(paletteLut[paletteIndex] | alphaMask);
+            // The cursor is data-driven; keep writes inside the 256-entry
+            // buffer so malformed data corrupts colours rather than the heap.
+            // runData still advances so the stream stays in step.
+            if (writeCursor >= paletteStart && writeCursor < writeCursorEnd) {
+                *writeCursor = static_cast<u16>(paletteLut[paletteIndex] | alphaMask);
+            }
             writeCursor += 1;
         }
     }
