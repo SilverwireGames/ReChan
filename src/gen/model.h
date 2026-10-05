@@ -492,6 +492,11 @@ public:
     s32 bobblePrevDX = 0;        // previous delta for acceleration
     s32 bobblePrevDZ = 0;
     bool bobblePrevValid = false;
+    bool bobbleApplied = false;  // head joint currently holds our offset
+    s16 bobbleBaseRotX = 0;      // head rotation before the offset
+    s16 bobbleBaseRotZ = 0;
+    s16 bobbleAppliedRotX = 0;   // head rotation after the offset
+    s16 bobbleAppliedRotZ = 0;
     u32 bobbleTick = 0xFFFFFFFFu;
 #endif
 

@@ -174,6 +174,12 @@ public:
     virtual void Move();
     virtual void CreateModel(const char* name);
     virtual void DeleteModel();
+
+    // PC: a model that exists only so the thing is drawn in a block that widescreen
+    // shows but PSX would not have active yet. See Thing::Activate / Deactivate.
+    bool pcVisualModelOnly = false;
+    virtual void OnVisualModelPromoted();
+    virtual void OnVisualModelDemoted();
     virtual void HandleCollision(Thing* other, s32 damage, ...);
     virtual void AnalyzeMesh(DBRoot* root);
     virtual void GetViewSpot(LVector* outPos, LVector* outTarget);

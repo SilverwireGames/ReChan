@@ -683,6 +683,12 @@ static void RegisterScriptRegion(u32 virtualBase, s32* hostBase, s32 wordCount) 
 }
 
 static s32* ResolveScriptAddress(u32 virtualAddress) {
+    // Regions can overlap: death_fall_goo is reconstructed with the words that follow it
+    // in PSX memory, which are NISdoor1 and the start of NISdoor1WithDialog. The region
+    // with the closest base owns the address, otherwise a script that starts inside an
+    // earlier region's tail resolves to a truncated copy and runs off its end.
+    s32* best = nullptr;
+    u32 bestBase = 0;
     for (s32 i = 0; i < g_directorScriptRegionCount; i++) {
         const DirectorScriptRegion& region = g_directorScriptRegions[i];
         if (virtualAddress < region.virtualBase) {
@@ -699,10 +705,13 @@ static s32* ResolveScriptAddress(u32 virtualAddress) {
             continue;
         }
 
-        return region.hostBase + wordOffset;
+        if (!best || region.virtualBase > bestBase) {
+            best = region.hostBase + wordOffset;
+            bestBase = region.virtualBase;
+        }
     }
 
-    return nullptr;
+    return best;
 }
 
 static s32* ResolveOverlay7BlobAddress(u32 virtualAddress) {
@@ -2237,6 +2246,14 @@ void Director::Process() {
                 // advancing scriptPtr — the script blocks on the bad opcode each frame
                 // rather than desyncing by consuming one word.
                 LOG("[Director] unknown opcode 0x%02X at scriptPtr=%p", static_cast<u32>(opcode), static_cast<const void*>(scriptPtr));
+                {
+                    // Blocks here every frame, so only report each stuck location once.
+                    static const s32* s_lastReported = nullptr;
+                    if (s_lastReported != scriptPtr) {
+                        s_lastReported = scriptPtr;
+                        LOG_ALWAYS("[Director] script blocked on unknown opcode 0x%02X", static_cast<u32>(opcode));
+                    }
+                }
                 field68 = 1;
                 break;
         }

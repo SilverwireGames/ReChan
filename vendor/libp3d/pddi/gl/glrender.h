@@ -146,6 +146,7 @@ public:
 
     bool  InitDisplay(const pddiDisplayInit& init) override;
     void  SwapBuffers() override;
+    bool  ReadBackBuffer(std::vector<unsigned char>& rgb, int& width, int& height) override;
     int   GetWidth() override;
     int   GetHeight() override;
     bool  ShouldClose() override;

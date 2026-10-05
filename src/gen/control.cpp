@@ -1,6 +1,7 @@
 #include "gen/control.h"
 #include "config.h"
 #include "pc/inputaction.h"
+#include "pc/autotest.h"
 #include "p3d/context.h"
 #include "p3d/input.h"
 
@@ -241,6 +242,8 @@ void InputManager::ServiceHostPads(const ActionInput* actionInput, bool commitNo
     if (analogPad && actionInput) {
         actionInput->GetPadAnalog(analogLX, analogLY, analogRX, analogRY);
     }
+
+    buttons |= AutoTest::GetHeldButtons();
 
     sampledPressLatch[0] |= (buttons & ~sampledButtons[0]);
     sampledButtons[0] = buttons;

@@ -454,8 +454,24 @@ static void BobbleHeadUpdate(Humanoid* owner, STreeJoint* joint) {
         model->bobbleAngleZ = std::sin(model->bobblePhase * 0.8f + 1.7f) * total * 0.7f;
     }
 
+    // The offset is added in place. If nothing re-evaluated the joint since the last
+    // Show() (paused game, repeated draws of one pose) it still holds our previous
+    // offset, so start again from the saved base instead of stacking another one.
+    if (model->bobbleApplied
+        && joint->rotationX == model->bobbleAppliedRotX
+        && joint->rotationZ == model->bobbleAppliedRotZ) {
+        joint->rotationX = model->bobbleBaseRotX;
+        joint->rotationZ = model->bobbleBaseRotZ;
+    }
+    model->bobbleBaseRotX = joint->rotationX;
+    model->bobbleBaseRotZ = joint->rotationZ;
+
     joint->rotationX = (s16)(joint->rotationX + (s16)model->bobbleAngleX);
     joint->rotationZ = (s16)(joint->rotationZ + (s16)model->bobbleAngleZ);
+
+    model->bobbleAppliedRotX = joint->rotationX;
+    model->bobbleAppliedRotZ = joint->rotationZ;
+    model->bobbleApplied = true;
 
     if (owner->thingType == AITypes::TT_PLAYER)
         joint->renderScale = 2.2f;
@@ -619,7 +635,8 @@ void AnimationMatrices::SetupCallbacks(Model* model) {
         bool isPreCallback;
     };
 
-    static const CallbackBinding bindings[] = {
+    // Not static: the hand/foot entries depend on this model's mirror flag.
+    const CallbackBinding bindings[] = {
         { "Bip01 Head", AM_HeadCallback, true },
         { "Bip01 L Hand", leftHandCallback, false },
         { "Bip01 R Hand", rightHandCallback, false },

@@ -352,32 +352,35 @@ void AnimStructure::ExecuteHandler(s32 doFlip) {
             }
         }
 
-        if (mode == 0 && loopTypeField == ANIM_BLEND2) {
-            s32 blendDuration = endFrame + FIX16_ONE;
-            s32 blendWeight = FIX16_ONE + 1;
-            if (blendDuration != 0) {
-                blendWeight = rmDiv16i(currentFrame + FIX16_ONE, blendDuration);
-            }
-
-            if (blendWeight <= FIX16_ONE) {
-                flip->SetFrameReal(currentFrame);
-                flip->UpdateJoints();
-                BlendTreePose(blendWeight, blendPose, flip->tree);
-            }
-            else {
-                flip->SetFrameReal(currentFrame);
-                flip->UpdateJoints();
-            }
-        }
-        else {
-            flip->SetFrameReal(currentFrame);
-            flip->UpdateJoints();
-        }
+        ApplyFlipPose(currentFrame);
     }
 
     // Store state
     prevFrame = currentFrame;
     prevTick = currentTick;
+}
+
+// PC: the pose-apply tail of Update, shared with the high-fps render path so an
+// interpolated or restored pose goes through the same BLEND2 blend as the logic tick.
+void AnimStructure::ApplyFlipPose(s32 frameReal) {
+    if (!flip) {
+        return;
+    }
+
+    flip->SetFrameReal(frameReal);
+    flip->UpdateJoints();
+
+    if (mode == 0 && loopTypeField == ANIM_BLEND2) {
+        const s32 blendDuration = endFrame + FIX16_ONE;
+        s32 blendWeight = FIX16_ONE + 1;
+        if (blendDuration != 0) {
+            blendWeight = rmDiv16i(frameReal + FIX16_ONE, blendDuration);
+        }
+
+        if (blendWeight <= FIX16_ONE) {
+            BlendTreePose(blendWeight, blendPose, flip->tree);
+        }
+    }
 }
 
 // PSX: Loop__13AnimStructure (0x8007119C)

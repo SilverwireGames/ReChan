@@ -23,6 +23,7 @@
 #include "extra/fecustommenumgr.h"
 #include "extra/assetexporter.h"
 #include "pc/apppaths.h"
+#include "pc/autotest.h"
 #include "extra/gltfloader.h"
 #include "gen/model.h"
 #include "radlib/rtask.h"
@@ -39,6 +40,9 @@
 
 #include <vector>
 #include <algorithm>
+#include <filesystem>
+#include <string>
+#include <system_error>
 
 #if defined(RC_PLATFORM_SWITCH)
 #include <unistd.h>
@@ -129,11 +133,45 @@ static bool OnWndProc(const pddiWndMessage& msg) {
     return false;
 }
 
-int main(int argc, char** argv) {
-#if !defined(NDEBUG)
-    Log::Get().Init();
+#if !defined(RC_PLATFORM_SWITCH)
+// Game data is addressed relative to the working directory. When launched from somewhere
+// else (shortcut, IDE, terminal), fall back to the executable's own folder.
+static bool EnsureDataDirectory() {
+    if (p3d::io::DirExists("pc")) {
+        return true;
+    }
+
+    const std::string exeDir = p3d::io::GetExecutableDir();
+    if (exeDir.empty() || !p3d::io::DirExists(p3d::io::JoinPath(exeDir, "pc"))) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::current_path(exeDir, ec);
+    return !ec;
+}
 #endif
+
+int main(int argc, char** argv) {
+#if !defined(RC_PLATFORM_SWITCH)
+    const bool dataDirFound = EnsureDataDirectory();
+#endif
+    Log::Get().Init();
     CrashReporter::Install();
+    LOG_ALWAYS("%s %s", JCS_TITLE, GAME_VERSION);
+    AutoTest::ParseArgs(argc, argv);
+
+#if !defined(RC_PLATFORM_SWITCH)
+    if (!dataDirFound) {
+        LOG_ALWAYS("[main] 'pc' data folder not found next to the executable or in the working directory");
+        CrashReporter::ShowFatalMessage(
+            "ReChan",
+            "The 'pc' data folder was not found.\n\n"
+            "Keep the executable together with the files it shipped with and start it from that folder.");
+        Log::Get().Shutdown();
+        return 1;
+    }
+#endif
 
 #if defined(RC_PLATFORM_SWITCH)
     p3d::io::CreateDirectories("sdmc:/switch/rechan");
@@ -284,6 +322,11 @@ int main(int argc, char** argv) {
 
     game.Open();
 
+    if (AutoTest::IsEnabled() && g_time) {
+        // After Open(), which loads the frame-rate setting.
+        g_time->targetFPS = AutoTest::GetFps();
+    }
+
 #ifdef MOD_LOADER
     ModLoader::Instance().Init();
 #endif
@@ -301,6 +344,9 @@ int main(int argc, char** argv) {
 
         f32 realDt = (f32)(frameStart - prevTime);
         prevTime = frameStart;
+        if (AutoTest::IsEnabled()) {
+            realDt = AutoTest::GetFixedDeltaTime();
+        }
         g_time->Tick(realDt);
 #if HIGH_FPS_PLAY_PRESENTATION
         const GameState curState = game.GetState();
@@ -377,6 +423,10 @@ int main(int argc, char** argv) {
         jcsUpdateAmbience();
         jcsUpdateDialogCD();
 
+        if (!AutoTest::Step(game.GetState())) {
+            break;
+        }
+
         g_time->WaitForFrameEnd(frameStart);
 
         static f32 titleAccumSec = 0.0f;
@@ -388,6 +438,9 @@ int main(int argc, char** argv) {
             titleAccumSec = 0.0f;
         }
     }
+
+    LOG_ALWAYS("[main] Main loop ended: windowClosed=%d state=%d",
+               p3d::display->ShouldClose() ? 1 : 0, static_cast<int>(game.GetState()));
 
     platform->DestroyContext(ctx);
     tPlatform::Destroy();
@@ -419,10 +472,8 @@ int main(int argc, char** argv) {
     ModLoader::Instance().Shutdown();
 #endif
 
-    LOG("Clean shutdown");
-#if !defined(NDEBUG)
+    LOG_ALWAYS("Clean shutdown");
     Log::Get().Shutdown();
-#endif
 
-    return 0;
+    return AutoTest::GetExitCode();
 }

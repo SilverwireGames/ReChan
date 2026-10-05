@@ -1441,6 +1441,40 @@ void glDisplay::SwapBuffers() {
     glfwSwapBuffers(window);
 }
 
+bool glDisplay::ReadBackBuffer(std::vector<unsigned char>& rgb, int& width, int& height) {
+    SyncFramebufferSize();
+    width = fbWidth;
+    height = fbHeight;
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    GLint prevReadFbo = 0;
+    GLint prevPackAlignment = 4;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &prevPackAlignment);
+
+    std::vector<unsigned char> bottomUp((size_t)width * height * 3);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, bottomUp.data());
+    const bool ok = (glGetError() == GL_NO_ERROR);
+
+    glPixelStorei(GL_PACK_ALIGNMENT, prevPackAlignment);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevReadFbo);
+    if (!ok) {
+        return false;
+    }
+
+    const size_t rowBytes = (size_t)width * 3;
+    rgb.resize(bottomUp.size());
+    for (int y = 0; y < height; ++y) {
+        memcpy(rgb.data() + (size_t)y * rowBytes, bottomUp.data() + (size_t)(height - 1 - y) * rowBytes, rowBytes);
+    }
+    return true;
+}
+
 bool glDisplay::ShouldClose() {
     return glfwWindowShouldClose(window);
 }

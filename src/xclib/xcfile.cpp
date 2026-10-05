@@ -5,7 +5,7 @@
 static bool xcReadFileInternal(const char* path, u8** outData, u32* outSize) {
     ccFile file;
     if (!file.Open(path, ccFile::OPEN_READ)) {
-        LOG("[xcReadFile] Failed to open: %s", path);
+        LOG_ALWAYS("[xcReadFile] Failed to open: %s", path);
         *outData = nullptr;
         *outSize = 0;
         return false;

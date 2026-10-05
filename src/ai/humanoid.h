@@ -428,7 +428,10 @@ public:
     // HIGH_FPS presentation layer is disabled.
     void ResetRenderInterpolation();
 
+    void OnVisualModelPromoted() override;
+    void OnVisualModelDemoted() override;
     void AdvanceRenderInterpolationTick();
+    void UpdateCollisionBoundsFromJoints();
 
     virtual void SetActionState(u32 state, s32 param);
     virtual void ProcessAction();

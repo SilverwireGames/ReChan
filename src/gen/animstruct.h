@@ -72,6 +72,7 @@ public:
     ~AnimStructure() override;
     void ExecuteHandler(s32 doFlip);
     void SetLoopType(s32 type, s32 resetCounts);
+    void ApplyFlipPose(s32 frameReal);
     void ResetCountsToAnim();
     void ForceFrame(s32 frame);
     void ReAttachTree(s32 type, s32 animEnum);

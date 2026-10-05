@@ -324,11 +324,11 @@ static void UpdateHumanoidRenderAnimPose(HumanoidModel* model, HumanoidRenderSmo
         smoothState->curAnimFrame,
         alpha);
 
-    anim->flip->SetFrameReal(frameReal);
-    anim->flip->UpdateJoints();
+    anim->ApplyFlipPose(frameReal);
 }
 
 struct HumanoidRenderAnimPoseBackup {
+    AnimStructure* animStructure = nullptr;
     TransformFlip* flip = nullptr;
     TransformAnim* anim = nullptr;
     s32 frameReal = 0;
@@ -349,6 +349,7 @@ static HumanoidRenderAnimPoseBackup ApplyHumanoidRenderAnimPose(
         return backup;
     }
 
+    backup.animStructure = anim;
     backup.flip = anim->flip;
     backup.anim = anim->flip->anim;
     backup.frameReal = anim->flip->frameReal;
@@ -367,6 +368,14 @@ static void RestoreHumanoidRenderAnimPose(const HumanoidRenderAnimPoseBackup& ba
         backup.flip->anim = backup.anim;
         backup.flip->dirty = 1;
     }
+
+    // Sequences drive the flip with a part-local frame and never blend; everything else
+    // must leave the skeleton exactly as the logic tick built it, blend included.
+    if (backup.animStructure && !backup.animStructure->sequence && backup.animStructure->flip == backup.flip) {
+        backup.animStructure->ApplyFlipPose(backup.frameReal);
+        return;
+    }
+
     backup.flip->SetFrameReal(backup.frameReal);
     backup.flip->UpdateJoints();
 }
@@ -1482,51 +1491,60 @@ void Humanoid::Draw() {
             leftHandObj->Draw();
         }
 
-        if (hm->animMatrices && hm->animMatrices->Copy()) {
-            collBboxMin.x = 175;
-            collBboxMin.y = 0;
-            collBboxMax.x = 175;
-
-            const s32* rootMatrix = hm->animMatrices->GetMatrix(0);
-            if (rootMatrix) {
-                collBboxMin.z = rootMatrix[6] - pos.y + HEAD_RISE;
-            }
-            else {
-                collBboxMin.z = HEAD_RISE;
-            }
-
-            const s32 state = actionState;
-            if ((u32)(state - 57) < 2u || state == 53 || state == AS_THROW_FREE_FALL) {
-                s32 maxRadius = 0;
-                for (u32 i = 0; i < 5; i++) {
-                    const s32* matrix = hm->animMatrices->GetMatrix(i);
-                    if (!matrix) {
-                        continue;
-                    }
-                    const s32 radius = (s32)rmMag2((f32)(matrix[5] - pos.x), (f32)(matrix[7] - pos.z));
-                    if (maxRadius < radius) {
-                        maxRadius = radius;
-                    }
-                }
-                collBboxMax.x = maxRadius;
-            }
-
-            if (state == AS_DIVE_ROLL) {
-                if (thingType != 10) {
-                    collBboxMin.z = HUMANOID_DIVE_ROLL_Y_RISE;
-                }
-            }
-            else if (state == AS_LEDGE_LATCH) {
-                if (collBboxMin.z < HUMANOID_LEDGE_LATCH_MIN_Y_RISE) {
-                    collBboxMin.z = HUMANOID_LEDGE_LATCH_MIN_Y_RISE;
-                }
-            }
-        }
+        UpdateCollisionBoundsFromJoints();
 
         return;
     }
     // No model: fallback to debug wireframe
     Thing::Draw();
+}
+
+// PSX: tail of Draw__8Humanoid. Split out so the high-fps path can also run it once per
+// logic tick; Draw alone leaves the bounds a tick stale when several ticks share a frame.
+void Humanoid::UpdateCollisionBoundsFromJoints() {
+    HumanoidModel* hm = static_cast<HumanoidModel*>(model);
+    if (!hm || !hm->animMatrices || !hm->animMatrices->Copy()) {
+        return;
+    }
+
+    collBboxMin.x = 175;
+    collBboxMin.y = 0;
+    collBboxMax.x = 175;
+
+    const s32* rootMatrix = hm->animMatrices->GetMatrix(0);
+    if (rootMatrix) {
+        collBboxMin.z = rootMatrix[6] - pos.y + HEAD_RISE;
+    }
+    else {
+        collBboxMin.z = HEAD_RISE;
+    }
+
+    const s32 state = actionState;
+    if ((u32)(state - 57) < 2u || state == 53 || state == AS_THROW_FREE_FALL) {
+        s32 maxRadius = 0;
+        for (u32 i = 0; i < 5; i++) {
+            const s32* matrix = hm->animMatrices->GetMatrix(i);
+            if (!matrix) {
+                continue;
+            }
+            const s32 radius = (s32)rmMag2((f32)(matrix[5] - pos.x), (f32)(matrix[7] - pos.z));
+            if (maxRadius < radius) {
+                maxRadius = radius;
+            }
+        }
+        collBboxMax.x = maxRadius;
+    }
+
+    if (state == AS_DIVE_ROLL) {
+        if (thingType != 10) {
+            collBboxMin.z = HUMANOID_DIVE_ROLL_Y_RISE;
+        }
+    }
+    else if (state == AS_LEDGE_LATCH) {
+        if (collBboxMin.z < HUMANOID_LEDGE_LATCH_MIN_Y_RISE) {
+            collBboxMin.z = HUMANOID_LEDGE_LATCH_MIN_Y_RISE;
+        }
+    }
 }
 
 // PSX: Reset__8Humanoid (HUMANOID.CPP:513)
@@ -1880,7 +1898,7 @@ void Humanoid::CreateModel(const char* name) {
         hm->backPtr = this;
     }
 
-    if (field452 != 0 && activeZone) {
+    if (field452 != 0 && activeZone && !pcVisualModelOnly) {
         activeZone->AddHumanoidToOverlordMembers(this);
     }
 
@@ -1940,13 +1958,27 @@ void Humanoid::CreateModel(const char* name) {
     CreateSound();
 }
 
+// PC: zone membership follows the gameplay model, not a display-only one.
+void Humanoid::OnVisualModelPromoted() {
+    if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
+        activeZone->AddHumanoidToOverlordMembers(this);
+    }
+}
+
+void Humanoid::OnVisualModelDemoted() {
+    if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
+        activeZone->RemoveHumanoidFromOverlordMembers(this);
+    }
+}
+
 // PSX: DeleteModel__8Humanoid (HUMANOID.CPP:910)
 void Humanoid::DeleteModel() {
     MARKFUNCTION(0x80063514);
+    const bool wasVisualOnly = pcVisualModelOnly;
     Thing::DeleteModel();
 
     // Host safety: AI teardown can clear activeZoneList before humanoids are destroyed.
-    if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
+    if (!wasVisualOnly && field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
         activeZone->RemoveHumanoidFromOverlordMembers(this);
     }
 

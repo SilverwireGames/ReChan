@@ -755,16 +755,6 @@ static const char STACK_DEFAULT_PUSHABLE_NAME[] = "BoxStack1";
 static constexpr u32 STACK_CALLBACK_JOINT_HASH_A = 0x08857E62;
 static constexpr u32 STACK_CALLBACK_JOINT_HASH_B = 0x08857E63;
 
-static void StackBuildModelWorldMatrix(const Model* model, Mat4& worldMatrix) {
-    worldMatrix = Mat4();
-    if (!model) {
-        return;
-    }
-
-    p3dBuildRotMatrixZYX(model->rotX, model->rotY, model->rotZ, worldMatrix);
-    worldMatrix.SetTranslation((f32)model->posX, (f32)model->posY, (f32)model->posZ);
-}
-
 static STreeJoint* StackFindJointByHash(STreeData* skeleton, u32 jointHash) {
     if (!skeleton || !skeleton->joints || jointHash == 0) {
         return nullptr;
@@ -789,13 +779,17 @@ static s32 StackEJointCallback(STreeJoint* joint, u32 jointIndex, const Mat4& cu
 
     Stack* stack = static_cast<Stack*>(joint->callbackData);
 
-    Mat4 worldMatrix = currentMatrix;
-    Model* stackModel = static_cast<Model*>(stack->model);
-    if (stackModel) {
-        Mat4 modelWorld = Mat4();
-        StackBuildModelWorldMatrix(stackModel, modelWorld);
-        worldMatrix = modelWorld * currentMatrix;
-    }
+    // Built from the stack's own transform, not the model's posX/rot: those are only
+    // written by Draw(), so a stack toppled before it was ever drawn would resolve its
+    // joints at the origin.
+    Mat4 modelWorld = Mat4();
+    p3dBuildRotMatrixZYX(
+        (u16)(stack->orientation.x & 0xFFFF),
+        (u16)(stack->orientation.y & 0xFFFF),
+        (u16)(stack->orientation.z & 0xFFFF),
+        modelWorld);
+    modelWorld.SetTranslation((f32)stack->pos.x, (f32)stack->pos.y, (f32)stack->pos.z);
+    const Mat4 worldMatrix = modelWorld * currentMatrix;
 
     LVector jointPos = {};
     jointPos.x = (s32)worldMatrix.GetTransX();

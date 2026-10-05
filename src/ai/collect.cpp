@@ -636,6 +636,12 @@ void Collectible::Draw() {
         if (alpha < 0.0f) alpha = 0.0f;
         if (alpha > 1.0f) alpha = 1.0f;
 
+        // The tick that wraps the loop goes from the last frame back to 0; blending across
+        // that would sweep the whole animation backwards, so snap instead.
+        if (mCurrentFrame < mRenderPrevFrame) {
+            alpha = 1.0f;
+        }
+
         const s32 frameStep = mCurrentFrame - mRenderPrevFrame;
 
         if (Collectible_ShouldDriveMiscAnim(mAnimB)) {

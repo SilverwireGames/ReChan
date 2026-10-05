@@ -438,7 +438,7 @@ void PsxDiscExtractor::ExtractThreadFunc(std::string imagePath) {
             throw std::runtime_error("Wrong disc detected (" + serial + "). This tool only supports the NTSC-U US release ("
                                      + std::string(kExpectedSerial) + "); PAL and other region discs are not supported.");
         }
-        LOG("[PsxDiscExtractor] Verified disc serial: %s", serial.c_str());
+        LOG_ALWAYS("[PsxDiscExtractor] Verified disc serial: %s", serial.c_str());
 
         std::vector<DirEntry> fileEntries;
         for (const DirEntry& e : allEntries) {
@@ -496,8 +496,12 @@ void PsxDiscExtractor::ExtractThreadFunc(std::string imagePath) {
             }
         }
 
+        // Lookups made before the assets existed cached directory listings without them.
+        p3d::io::InvalidateResolveCache();
+        LOG_ALWAYS("[PsxDiscExtractor] Extraction done: %lld bytes", (long long)m_bytesDone);
         m_state = State::Done;
     } catch (const std::exception& ex) {
+        LOG_ALWAYS("[PsxDiscExtractor] Extraction failed: %s", ex.what());
         m_error = ex.what();
         m_state = State::Error;
     }

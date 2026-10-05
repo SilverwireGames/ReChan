@@ -317,6 +317,12 @@ void Behaviour::SetAIHandler(u32 handlerType) {
     nextHandlerDispatch = 0;
     nextHandler = nullptr;
 
+    // PC: behave.txt is parsed in AI::InternalOpen, which can run before the disc assets
+    // exist. Never hand out a null animConfigPtr because of that ordering.
+    if (g_ai && !g_ai->behaviourList.head) {
+        g_ai->ParseBehaviourAttribScript();
+    }
+
     const u32 behaviourHash = owner ? owner->behaviourNameHash : 0;
     if (g_ai && behaviourHash != 0) {
         animConfigPtr = static_cast<BehaviourAttrib*>(g_ai->behaviourList.FindNodeCRC(behaviourHash));
@@ -2778,10 +2784,13 @@ void Behaviour::NDMS(Behaviour* b) {
     }
 
     b->ndmsThinkCounter++;
-    if (b->ndmsThinkCounter > b->ndmsThinkDelay) {
+    // PSX 0x80075E68: rerolls once the counter reaches the delay (slt counter, delay).
+    if (b->ndmsThinkCounter >= b->ndmsThinkDelay) {
         b->ndmsThinkCounter = 0;
         b->ndmsThinkDelay = (s32)b->animConfigPtr->minThinkFreq
             + (s32)rmRangedRandom((u32)((s32)b->animConfigPtr->maxThinkFreq - (s32)b->animConfigPtr->minThinkFreq));
+        // PSX 0x80075EA0: a fourth roll whose result is discarded.
+        rmRangedRandom(100);
         randomCircling = (s32)rmRangedRandom(100);
         randomDistancing = (s32)rmRangedRandom(100);
         randomAggression = (s32)rmRangedRandom(100);
@@ -2800,7 +2809,8 @@ void Behaviour::NDMS(Behaviour* b) {
             dy = -dy;
         }
 
-        if (dy <= NDMS_HEIGHT_DELTA_THRESHOLD
+        // PSX: player well above/below but horizontally within attackingDist.
+        if (dy > NDMS_HEIGHT_DELTA_THRESHOLD
             && owner->DistanceFromPointXZ(player->pos) <= REJOIN_ACTIVE_ZONE_PLAYER_DIST_THRESHOLD) {
             if (randomAggression - 20 < (s32)b->animConfigPtr->attackFreq) {
                 decision = 6;
@@ -2845,7 +2855,8 @@ void Behaviour::NDMS(Behaviour* b) {
             dy = -dy;
         }
 
-        if (dy <= NDMS_HEIGHT_DELTA_THRESHOLD
+        // PSX: player well above/below but horizontally within attackingDist.
+        if (dy > NDMS_HEIGHT_DELTA_THRESHOLD
             && owner->DistanceFromPointXZ(player->pos) <= REJOIN_ACTIVE_ZONE_PLAYER_DIST_THRESHOLD) {
             if (randomAggression - 20 < (s32)b->animConfigPtr->attackFreq) {
                 decision = 6;
@@ -2878,77 +2889,9 @@ void Behaviour::NDMS(Behaviour* b) {
         }
     }
     else if (distanceToPlayer > REJOIN_ACTIVE_ZONE_PLAYER_DIST_THRESHOLD) {
+        // PSX 0x800761F8: between attackingDist and fringeDist. Close in / circle; the
+        // only attacks from here are the up/down ones when the player is above or below.
         b->ndmsRangeBand = 2;
-        b->field60 = 1;
-
-        if (b->comboScriptIndex != -1) {
-            b->ComplexAttack();
-            return;
-        }
-
-        if ((u32)(actionState - 46) < 9u && (s32)b->animConfigPtr->aggression < randomCircling) {
-            b->nextHandlerThisOffset = 0;
-            b->nextHandlerDispatch = -1;
-            b->nextHandler = NDMS;
-            b->currentPathNodeIndex = 0;
-            b->handlerThisOffset = 0;
-            b->handlerDispatch = -1;
-            b->handler = BackOutOfTheFight;
-            return;
-        }
-
-        const bool allowedToMove =
-            (b->aiParam != 0 && activeZone && activeZone->AllowedToMoveIn(owner) != 0);
-
-        if (allowedToMove) {
-            if (randomAggression < (s32)b->animConfigPtr->attackFreq) {
-                decision = 7;
-            }
-            else if (facingAway && randomAggression - 70 < (s32)b->animConfigPtr->attackFreq) {
-                decision = 7;
-            }
-            else if ((s32)b->animConfigPtr->aggression < randomCircling) {
-                b->nextHandlerThisOffset = 0;
-                b->nextHandlerDispatch = -1;
-                b->nextHandler = NDMS;
-                b->currentPathNodeIndex = 0;
-                b->handlerThisOffset = 0;
-                b->handlerDispatch = -1;
-                b->handler = BackOutOfTheFight;
-                return;
-            }
-            else {
-                decision = 5;
-            }
-        }
-        else if (b->aiParam != 0 && activeZone) {
-            owner->moveSpeed = (s32)(s16)b->animConfigPtr->strafingSpeed;
-            decision = 4;
-        }
-        else {
-            if (randomAggression < (s32)b->animConfigPtr->attackFreq) {
-                decision = 7;
-            }
-            else if (facingAway && randomAggression - 70 < (s32)b->animConfigPtr->attackFreq) {
-                decision = 7;
-            }
-            else if ((s32)b->animConfigPtr->aggression < randomCircling) {
-                b->nextHandlerThisOffset = 0;
-                b->nextHandlerDispatch = -1;
-                b->nextHandler = NDMS;
-                b->currentPathNodeIndex = 0;
-                b->handlerThisOffset = 0;
-                b->handlerDispatch = -1;
-                b->handler = BackOutOfTheFight;
-                return;
-            }
-            else {
-                decision = 5;
-            }
-        }
-    }
-    else {
-        b->ndmsRangeBand = 3;
         b->field60 = 1;
 
         if (b->comboScriptIndex != -1) {
@@ -2961,10 +2904,12 @@ void Behaviour::NDMS(Behaviour* b) {
             dy = -dy;
         }
 
-        if (dy <= NDMS_HEIGHT_DELTA_THRESHOLD
+        // PSX: player well above/below but horizontally within attackingDist.
+        if (dy > NDMS_HEIGHT_DELTA_THRESHOLD
             && owner->DistanceFromPointXZ(player->pos) <= REJOIN_ACTIVE_ZONE_PLAYER_DIST_THRESHOLD) {
             if (randomAggression < (s32)b->animConfigPtr->attackFreq) {
-                if (owner->pos.y < player->pos.y) {
+                // PSX 0x80076288: slt player.y, owner.y
+                if (player->pos.y < owner->pos.y) {
                     owner->RequestAction(9);
                 }
                 else {
@@ -2973,7 +2918,7 @@ void Behaviour::NDMS(Behaviour* b) {
                 return;
             }
 
-            if (randomCircling < (s32)b->animConfigPtr->aggression) {
+            if (randomCircling - 20 < (s32)b->animConfigPtr->attackFreq) {
                 decision = 6;
             }
             else {
@@ -3011,6 +2956,52 @@ void Behaviour::NDMS(Behaviour* b) {
         }
         else {
             decision = 7;
+        }
+    }
+    else {
+        // PSX 0x800763C4: within attackingDist. Attack, hold, or back out of the fight.
+        b->ndmsRangeBand = 3;
+        b->field60 = 1;
+
+        if (b->comboScriptIndex != -1) {
+            b->ComplexAttack();
+            return;
+        }
+
+        if ((u32)(actionState - 46) < 9u && (s32)b->animConfigPtr->aggression < randomCircling) {
+            b->nextHandlerThisOffset = 0;
+            b->nextHandlerDispatch = -1;
+            b->nextHandler = NDMS;
+            b->currentPathNodeIndex = 0;
+            b->handlerThisOffset = 0;
+            b->handlerDispatch = -1;
+            b->handler = BackOutOfTheFight;
+            return;
+        }
+
+        const bool zoneControlled = (b->aiParam != 0 && activeZone);
+        if (zoneControlled && activeZone->AllowedToMoveIn(owner) == 0) {
+            owner->moveSpeed = (s32)(s16)b->animConfigPtr->strafingSpeed;
+            decision = 4;
+        }
+        else if (randomAggression < (s32)b->animConfigPtr->attackFreq) {
+            decision = 7;
+        }
+        else if (facingAway && randomAggression - 70 < (s32)b->animConfigPtr->attackFreq) {
+            decision = 7;
+        }
+        else if ((s32)b->animConfigPtr->aggression < randomCircling) {
+            b->nextHandlerThisOffset = 0;
+            b->nextHandlerDispatch = -1;
+            b->nextHandler = NDMS;
+            b->currentPathNodeIndex = 0;
+            b->handlerThisOffset = 0;
+            b->handlerDispatch = -1;
+            b->handler = BackOutOfTheFight;
+            return;
+        }
+        else {
+            decision = 5;
         }
     }
 
@@ -3067,11 +3058,14 @@ void Behaviour::NDMS(Behaviour* b) {
             }
 
             if (floorDelta >= NDMS_FLOOR_SAFE_DELTA_THRESHOLD) {
-                s32 nextDecision = 6;
-                if ((s32)rmRangedRandom(1) == 0 && !owner->HasEnemyTauntDialog()) {
-                    nextDecision = 5;
+                // PSX 0x800766CC: unlike cases 0-3, this one becomes 5 when the enemy has
+                // a taunt line and is left as it is when it has none.
+                if ((s32)rmRangedRandom(1) != 0) {
+                    b->ndmsDecision = 6;
                 }
-                b->ndmsDecision = nextDecision;
+                else if (owner->HasEnemyTauntDialog()) {
+                    b->ndmsDecision = 5;
+                }
             }
         }
     }

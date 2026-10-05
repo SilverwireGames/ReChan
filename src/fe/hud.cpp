@@ -108,8 +108,12 @@ void HUD::Display() {
     MARKFUNCTION(0x8003F67C);
     // PSX: EnterLayer(view0, 4)
 #if HIGH_FPS_PLAY_PRESENTATION
+    // EndLevelLoop runs on the same fixed logic step (see main loop), so the tally and
+    // takes/dragon slides must not advance on its render-only frames either.
+    const bool usesFixedLogicStep = g_game
+        && (g_game->GetState() == GameState::Play || g_game->GetState() == GameState::EndLevelLoop);
     const bool isPlayRenderOnlyFrame =
-        (g_game && g_game->GetState() == GameState::Play && g_time && !g_time->DidPlayLogicStepThisFrame());
+        (usesFixedLogicStep && g_time && !g_time->DidPlayLogicStepThisFrame());
     if (!isPlayRenderOnlyFrame) {
         if (tally.state == 9) {
             GetGameData();

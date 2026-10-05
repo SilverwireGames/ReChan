@@ -3663,8 +3663,9 @@ void feCustomMenuMgr::LoadSplashTextures() {
 void feCustomMenuMgr::LoadSliderTextures() {
     if (!m_sliderOTex) {
         m_sliderOTex = tTexture::LoadFromImagePath(kSliderOTexturePath);
-        m_sliderOTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-
+        if (m_sliderOTex && m_sliderOTex->GetTexture()) {
+            m_sliderOTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+        }
         if (!m_sliderOTex) {
             LOG("[CustomMenu] Failed to load slider empty texture (%s)", kSliderOTexturePath);
         }
@@ -3672,8 +3673,9 @@ void feCustomMenuMgr::LoadSliderTextures() {
 
     if (!m_sliderFTex) {
         m_sliderFTex = tTexture::LoadFromImagePath(kSliderFTexturePath);
-        m_sliderFTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-
+        if (m_sliderFTex && m_sliderFTex->GetTexture()) {
+            m_sliderFTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+        }
         if (!m_sliderFTex) {
             LOG("[CustomMenu] Failed to load slider filled texture (%s)", kSliderFTexturePath);
         }

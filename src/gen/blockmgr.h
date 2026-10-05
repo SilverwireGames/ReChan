@@ -48,8 +48,12 @@ public:
     u16 GetBlockNumberAllBlocks(const LVector& pos) const;
 
     // PSX: InActiveList (BLKMGR.CPP:825, 0x80050D44)
-    // Checks alreadyLoadedList for blockNum.
+    // Checks activeList for blockNum.
     bool InActiveList(u32 blockNum) const;
+
+    // PC: true for a loaded block that widescreen draws but that is outside the PSX
+    // active range. Things there get a display-only model (see Thing::Activate).
+    bool IsVisualOnlyBlock(u32 blockNum) const;
 
     // PSX: InDrawList (BLKMGR.CPP:807, 0x80050CF4)
     // Checks drawList for blockNum.
@@ -102,9 +106,16 @@ private:
     u32 drawListCount;
     u16 drawList[kBlockManagerListCapacity];
 
-    // PSX +112: alreadyLoadedCount + alreadyLoadedList - currently loaded block nums
+    // PSX +78: alreadyLoadedList - block numbers of the blocks currently resident in
+    // memory. Written by UpdateAlreadyLoadedList from the loaded-block list (+144).
     u32 alreadyLoadedCount;
     u16 alreadyLoadedList[kBlockManagerListCapacity];
+
+    // PSX +112: activeCount + activeList - blocks whose things are activated. Written
+    // by UpdateToBeLoadedList from the current block's own active range, read by
+    // InActiveList. Much narrower than the loaded set; never widened on PC.
+    u32 activeCount;
+    u16 activeList[kBlockManagerListCapacity];
 
     // +132-140: flags (all initialized to 1)
     u32 flag1;

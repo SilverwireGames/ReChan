@@ -25,3 +25,6 @@ switch/**/*.map
 switch/**/*.lst
 switch/**/build_log.txt
 switch/libp3d/lib/
+
+minidumps/
+scripts/autotest-baseline/

@@ -352,6 +352,8 @@ LightingClass::LightingClass() {
 
 LightingClass::~LightingClass() {
     MARKFUNCTION(0x800A27A4);
+    // PC: the view lives in Display, which Game::~Game deletes before EnvironmentManager.
+    view = nullptr;
     Reset();
 }
 

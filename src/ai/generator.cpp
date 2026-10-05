@@ -1,4 +1,6 @@
 #include "ai/generator.h"
+#include "pc/autotest.h"
+#include "gen/blockmgr.h"
 #include "ai/activezn.h"
 #include "ai/colfight.h"
 #include "ai/humanoid.h"
@@ -251,6 +253,16 @@ void EnemyGenerator::GenerateObject(s32 param) {
         modelNameBuffer,
         &dbRoot);
 
+    if (AutoTest::TraceSpawns()) {
+        Humanoid* h = static_cast<Humanoid*>(generated);
+        LOG_ALWAYS("[Spawn] gen 0x%08X spawned %p type=%u at (%d,%d,%d) posBlock=%u thingBlock=%u flags=0x%X zone=%p aiParam=%d zoneMembers=%d made=%d/%d",
+                   nameCRC, (void*)generated, (u32)generateType, spawnPos.x, spawnPos.y, spawnPos.z,
+                   g_blockManager ? (u32)g_blockManager->GetBlockNumber(spawnPos) : 0u,
+                   generated ? (u32)generated->blockNum : 0u, generated ? generated->flags : 0u,
+                   generated ? (void*)h->activeZone : nullptr, generated ? h->field452 : 0,
+                   activeZone ? (s32)activeZone->memberCount : -1, generateCount + 1, field200);
+    }
+
     if (!generated) {
         return;
     }
@@ -361,6 +373,13 @@ void EnemyGenerator::Think() {
     if (!activeZone) {
         if (g_ai) {
             activeZone = static_cast<ActiveZone*>(g_ai->activeZoneList.FindNodeCRC(activeZoneHash, nullptr));
+        }
+        if (AutoTest::TraceSpawns()) {
+            LOG_ALWAYS("[Spawn] gen 0x%08X first think: pos=(%d,%d,%d) block=%u type=%u total=%d burst=%d threshold=%d zoneHash=0x%08X zone=%p targets=%u",
+                       nameCRC, pos.x, pos.y, pos.z, (u32)blockNum, (u32)generateType, field200, field292, field288,
+                       activeZoneHash, (void*)activeZone, targetCount);
+            LOG_ALWAYS("[Spawn]   playerBlock=%u genBlockActive=%d", Player::s_player ? (u32)Player::s_player->blockNum : 0u,
+                       (g_blockManager && g_blockManager->InActiveList(blockNum)) ? 1 : 0);
         }
 
         for (u32 i = 0; i < 3; i++) {
