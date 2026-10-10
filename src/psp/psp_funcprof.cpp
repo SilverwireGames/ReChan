@@ -36,6 +36,16 @@ volatile unsigned g_depth = 0;
 std::uintptr_t g_stackLow = 0;
 std::uintptr_t g_stackSize = 0;
 Entry g_table[kTableSize];
+// Self samples by (caller, function), to tell which caller makes a hot
+// function hot. Same open addressing as g_table.
+struct PairEntry {
+    const void* caller;
+    const void* fn;
+    unsigned self;
+};
+constexpr unsigned kPairBits = 10;
+constexpr unsigned kPairSize = 1u << kPairBits;
+PairEntry g_pairs[kPairSize];
 volatile bool g_sampling = false;
 unsigned g_samples = 0;
 unsigned g_emptySamples = 0;
@@ -62,6 +72,25 @@ PSP_NO_INSTRUMENT Entry* Lookup(const void* fn) {
     return nullptr;
 }
 
+PSP_NO_INSTRUMENT void BumpPair(const void* caller, const void* fn) {
+    const unsigned key = (static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(caller)) >> 2)
+        ^ (static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(fn)) >> 2) * 40503u;
+    const unsigned hash = (key * 2654435761u) >> (32u - kPairBits);
+    for (unsigned probe = 0; probe < kPairSize; ++probe) {
+        PairEntry& entry = g_pairs[(hash + probe) & (kPairSize - 1u)];
+        if (entry.caller == caller && entry.fn == fn) {
+            ++entry.self;
+            return;
+        }
+        if (!entry.fn) {
+            entry.caller = caller;
+            entry.fn = fn;
+            entry.self = 1;
+            return;
+        }
+    }
+}
+
 // VTimer handler (interrupt context): charge the sampled main-thread stack.
 PSP_NO_INSTRUMENT SceUInt OnSample(SceUID, SceKernelSysClock*, SceKernelSysClock*, void*) {
     if (!g_sampling) return kSamplePeriodUs;
@@ -81,6 +110,7 @@ PSP_NO_INSTRUMENT SceUInt OnSample(SceUID, SceKernelSysClock*, SceKernelSysClock
         return kSamplePeriodUs;
     }
     ++top->self;
+    if (depth >= 2u) BumpPair(g_stack[depth - 2u], g_stack[depth - 1u]);
     for (unsigned i = 0; i < depth; ++i) {
         const void* fn = g_stack[i];
         bool seen = false;
@@ -121,6 +151,7 @@ PSP_NO_INSTRUMENT void Start() {
         g_stackSize = static_cast<std::uintptr_t>(info.stackSize);
     }
     std::memset(g_table, 0, sizeof(g_table));
+    std::memset(g_pairs, 0, sizeof(g_pairs));
     g_samples = g_emptySamples = g_lostSamples = g_overflowSamples = 0;
     if (g_timer < 0) {
         g_timer = sceKernelCreateVTimer("rechan_prof", nullptr);
@@ -161,9 +192,18 @@ PSP_NO_INSTRUMENT void StopAndWrite(const char* path) {
             entry.self, entry.incl);
         if (length > 0) used += static_cast<std::size_t>(length);
     }
+    for (const PairEntry& pair : g_pairs) {
+        if (!pair.fn || pair.self < 2u) continue;
+        if (sizeof(buffer) - used < 64u) flush();
+        const int length = std::snprintf(buffer + used, sizeof(buffer) - used, "pair %ld %ld %u\n",
+            static_cast<long>(reinterpret_cast<std::uintptr_t>(pair.caller)) - ref,
+            static_cast<long>(reinterpret_cast<std::uintptr_t>(pair.fn)) - ref, pair.self);
+        if (length > 0) used += static_cast<std::size_t>(length);
+    }
     flush();
     sceIoClose(fd);
     std::memset(g_table, 0, sizeof(g_table));
+    std::memset(g_pairs, 0, sizeof(g_pairs));
 }
 
 } // namespace PspFuncProfile
