@@ -94,6 +94,9 @@ u32 g_audioMemoryBytes = 0;
 std::atomic_uint g_audioCallbackCount{0};
 std::atomic_uint g_audioUnderruns{0};
 std::atomic_uint g_audioMaxUs{0};
+std::atomic_uint g_audioCallbackTotalUs{0};
+std::atomic_uint g_musicDecodeCount{0};
+std::atomic_uint g_musicDecodeTotalUs{0};
 std::atomic_uint g_audioMusicStarts{0};
 std::atomic_uint g_audioMusicMixCallbacks{0};
 std::atomic_uint g_audioMusicMixedFrames{0};
@@ -352,6 +355,9 @@ void Reset() {
     g_audioCallbackCount.store(0, std::memory_order_relaxed);
     g_audioUnderruns.store(0, std::memory_order_relaxed);
     g_audioMaxUs.store(0, std::memory_order_relaxed);
+    g_audioCallbackTotalUs.store(0, std::memory_order_relaxed);
+    g_musicDecodeCount.store(0, std::memory_order_relaxed);
+    g_musicDecodeTotalUs.store(0, std::memory_order_relaxed);
     g_audioMusicStarts.store(0, std::memory_order_relaxed);
     g_audioMusicMixCallbacks.store(0, std::memory_order_relaxed);
     g_audioMusicMixedFrames.store(0, std::memory_order_relaxed);
@@ -448,8 +454,14 @@ void AddRendererMemory(s32 bytes) {
 
 void SetAudioMemory(u32 bytes) { g_audioMemoryBytes = bytes; }
 
+void RecordMusicDecode(u32 durationUs) {
+    g_musicDecodeCount.fetch_add(1, std::memory_order_relaxed);
+    g_musicDecodeTotalUs.fetch_add(durationUs, std::memory_order_relaxed);
+}
+
 void RecordAudioCallback(u32 durationUs) {
     g_audioCallbackCount.fetch_add(1, std::memory_order_relaxed);
+    g_audioCallbackTotalUs.fetch_add(durationUs, std::memory_order_relaxed);
     unsigned int measuredUs = static_cast<unsigned int>(
         std::min<u32>(durationUs, 0xFFFFFFFFu));
     unsigned int previous = g_audioMaxUs.load(std::memory_order_relaxed);
@@ -647,11 +659,17 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         "audio_music_starts=%lu\n"
         "audio_music_mix_callbacks=%lu\n"
         "audio_music_mixed_frames=%lu\n"
-        "audio_worker_errors=%lu\n",
+        "audio_worker_errors=%lu\n"
+        "audio_callback_total_us=%lu\n"
+        "music_decodes=%lu\n"
+        "music_decode_total_us=%lu\n",
         static_cast<unsigned long>(g_audioMusicStarts.load(std::memory_order_relaxed)),
         static_cast<unsigned long>(g_audioMusicMixCallbacks.load(std::memory_order_relaxed)),
         static_cast<unsigned long>(g_audioMusicMixedFrames.load(std::memory_order_relaxed)),
-        static_cast<unsigned long>(g_audioWorkerErrors.load(std::memory_order_relaxed)));
+        static_cast<unsigned long>(g_audioWorkerErrors.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_audioCallbackTotalUs.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_musicDecodeCount.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_musicDecodeTotalUs.load(std::memory_order_relaxed)));
 
     const std::size_t metadataOffset = std::strlen(report);
     std::snprintf(report + metadataOffset, sizeof(report) - metadataOffset,
@@ -895,6 +913,7 @@ void RecordMemorySnapshot(u32, u32, u32, u32) {}
 void AddRendererMemory(s32) {}
 void SetAudioMemory(u32) {}
 void RecordAudioCallback(u32) {}
+void RecordMusicDecode(u32) {}
 void RecordAudioUnderrun() {}
 void RecordAudioMusicStart() {}
 void RecordAudioMusicMix(u32) {}

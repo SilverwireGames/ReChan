@@ -203,8 +203,14 @@ static bool PrepareMusicPair(u32 pair, MusicChunk& destination) {
         return false;
     }
 
+#if defined(PSP_PERF_TELEMETRY)
+    const u64 decodeStart = sceKernelGetSystemTimeWide();
+#endif
     DecodeMusicChunk(g_musicStream.compressedPair.data(), destination.left);
     DecodeMusicChunk(g_musicStream.compressedPair.data() + kMusicChunkBytes, destination.right);
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::RecordMusicDecode(static_cast<u32>(sceKernelGetSystemTimeWide() - decodeStart));
+#endif
     destination.pair = pair;
     return true;
 }

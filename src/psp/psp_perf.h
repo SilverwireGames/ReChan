@@ -146,6 +146,8 @@ void RecordMemorySnapshot(u32 heapFree, u32 heapMax, u32 vramUsed, u32 vramFree)
 void AddRendererMemory(s32 bytes);
 void SetAudioMemory(u32 bytes);
 void RecordAudioCallback(u32 durationUs);
+// Music worker: one ADPCM pair decode (both channels), read excluded.
+void RecordMusicDecode(u32 durationUs);
 void RecordAudioUnderrun();
 void RecordAudioMusicStart();
 void RecordAudioMusicMix(u32 mixedFrames);
