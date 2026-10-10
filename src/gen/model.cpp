@@ -1764,6 +1764,12 @@ DrawableSTree::~DrawableSTree() {
     alternate = nullptr;
     delete[] mirroredJointOrderMap;
     mirroredJointOrderMap = nullptr;
+#if defined(RC_PLATFORM_PSP)
+    if (pspSkinBuffer) {
+        pspSkinBuffer->Release();
+        pspSkinBuffer = nullptr;
+    }
+#endif
 }
 
 // PSX: Display dispatches through vtable to OriginalSTree::Draw -> tPrimGeom::Display
@@ -1830,6 +1836,23 @@ void DrawableSTree::Display(u32 /*flags*/) {
     // Per-frame CPU skinning
     if (skel && skin && skin->numVerts > 0 && skel->joints && skinnedBuffer) {
         PspPerf::ScopeTimer skinTimer(PspPerf::RendererCounter::SkinPrepareUs);
+#if defined(RC_PLATFORM_PSP) && defined(RC_PSP_VFPU_SKIN) && !defined(PSP_DISABLE_FUSED_SKIN_UPLOAD) \
+    && !defined(PSP_SHARED_SKIN_BUFFERS)
+        // Skin into this drawable's own copy of the model buffer.
+        bool exclusiveSkinBuffer = false;
+        if (pspSkinBufferSource != skinnedBuffer || pspSkinBufferSkin != skin || !pspSkinBuffer
+            || pspSkinBuffer->GetVertexCount() != skinnedBuffer->GetVertexCount()
+            || pspSkinBuffer->GetIndexCount() != skinnedBuffer->GetIndexCount()) {
+            if (pspSkinBuffer) pspSkinBuffer->Release();
+            pspSkinBuffer = ClonePspDynamicPrimBuffer(skinnedBuffer);
+            pspSkinBufferSource = pspSkinBuffer ? skinnedBuffer : nullptr;
+            pspSkinBufferSkin = pspSkinBuffer ? skin : nullptr;
+        }
+        if (pspSkinBuffer) {
+            skinnedBuffer = pspSkinBuffer;
+            exclusiveSkinBuffer = true;
+        }
+#endif
 #if defined(RC_PLATFORM_PSP)
         // Joint world matrices: written once here, then read by the view
         // cull, once per joint by the light pass and at every joint change of
@@ -2039,7 +2062,11 @@ void DrawableSTree::Display(u32 /*flags*/) {
         // the self-test draw, keeps the float vertex path below.
         PspPackedVertex* fusedVertices = (vfpuEnabled && !g_pspFusedSkinDisabled
                                           && PspSkinColoursAreBytes(skin))
-            ? BeginPspPrimBufferPackedUpload(skinnedBuffer, skin->numVerts)
+            ? BeginPspPrimBufferPackedUpload(skinnedBuffer, skin->numVerts
+#if !defined(PSP_SHARED_SKIN_BUFFERS)
+                                             , exclusiveSkinBuffer
+#endif
+                                             )
             : nullptr;
         if (fusedVertices) {
             const PspSkinLoop loop = {

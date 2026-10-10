@@ -745,6 +745,50 @@ int main() {
     }
 
     if (kPackedStreamConsumed) {
+        // Per-drawable skinned buffers: a clone starts with the source's
+        // streams, indices and material state; its exclusive uploads keep
+        // direct submission, while a shared buffer's uploads stage.
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        constexpr u32 kCount = 9;
+        std::vector<float> data(kCount * 10u);
+        for (u32 v = 0; v < kCount; ++v) {
+            float* lane = &data[v * 10u];
+            for (int c = 0; c < 3; ++c) lane[c] = static_cast<float>(v * 3u + c);
+            for (int c = 3; c < 6; ++c) lane[c] = 0.5f + 0.1f * static_cast<float>(c);
+            lane[6] = static_cast<float>(v * 7u % 256u);
+            lane[7] = static_cast<float>(v * 13u % 256u);
+            lane[8] = static_cast<float>(v % 3u);
+            lane[9] = v == 4u ? -1.0f : 1.0f;
+        }
+        const u16 idx[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+        pspPrimBuffer shared({PDDI_PRIM_TRIANGLES, kFormat, kCount, 9});
+        shared.SetVertexData(data.data(), kCount);
+        shared.SetIndices(idx, 9);
+        require(shared.SetDynamicVertexData(data.data(), kCount, true), "dynamic upload refused");
+        require(shared.HasStaleFloatVertices(), "compact-only upload kept the floats current");
+        pspPrimBuffer* clone = shared.CloneDynamic();
+        require(clone != nullptr, "clone failed");
+        shared.RefreshFloatVertices();
+        require(std::memcmp(clone->vertices.data(), shared.vertices.data(), sizeof(PspVertex) * kCount) == 0
+                && std::memcmp(clone->packedVertices.data(), shared.packedVertices.data(),
+                       sizeof(PspPackedVertex) * kCount) == 0
+                && clone->packedVerticesValid && !clone->floatStale
+                && clone->materialKeys == shared.materialKeys
+                && clone->materialValid == shared.materialValid
+                && std::equal(clone->indices.begin(), clone->indices.end(), shared.indices.begin())
+                && clone->indicesValid && !clone->preferStagedIndexedVertices,
+            "clone differs from its source");
+        require(clone->BeginPackedUpload(kCount, true) != nullptr, "exclusive upload refused");
+        clone->EndPackedUpload(&data[8], 10u, &data[9], 10u, kCount, 5u);
+        require(!clone->preferStagedIndexedVertices && !clone->UsesStagedIndexedVertices(),
+            "exclusive upload staged");
+        require(shared.BeginPackedUpload(kCount) != nullptr, "shared upload refused");
+        shared.EndPackedUpload(&data[8], 10u, &data[9], 10u, kCount, 5u);
+        require(shared.UsesStagedIndexedVertices(), "shared upload not staged");
+        clone->Release();
+    }
+
+    if (kPackedStreamConsumed) {
         // Precomputed lane keys (suit lanes shared by several instances of a
         // model): alternating sources copy BuildPspMaterialKeys results and
         // must leave the keys, validity and runs SetDynamicVertexData leaves.

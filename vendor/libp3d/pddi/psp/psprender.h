@@ -100,7 +100,12 @@ public:
     // buffer exactly as SetDynamicVertexData(..., uvIsIntegral = true) would on
     // its compact-only path. Begin returns nullptr when that path is not
     // available (the caller then falls back to SetDynamicVertexData).
-    PspPackedVertex* BeginPackedUpload(u32 count);
+    // exclusive: the buffer belongs to one drawable (drawn at most once per
+    // frame), so its draws may keep borrowing the persistent arrays.
+    PspPackedVertex* BeginPackedUpload(u32 count, bool exclusive = false);
+    // A new buffer with this one's streams, indices and material state, for a
+    // drawable that uploads its own vertices (null if out of memory).
+    pspPrimBuffer* CloneDynamic() const;
     // laneSource != 0 promises the lanes are immutable memory identified by
     // that value: repeating the last upload's source and lanes skips the
     // per-vertex material comparison (it would find nothing to change).
@@ -272,7 +277,10 @@ void ResetPspBenchCombatInput();
 // for callers that can produce the compact stream directly (PSP character
 // skinning): write `count` vertices to the returned array, then call End with
 // the tpage/CBA lanes. Begin returns nullptr when the buffer cannot take it.
-PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, u32 count);
+PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, u32 count,
+                                                bool exclusive = false);
+// Per-drawable copy of a shared dynamic buffer (see CloneDynamic).
+pddiPrimBuffer* ClonePspDynamicPrimBuffer(pddiPrimBuffer* source);
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, const float* tpage, u32 tpageStride,
                                   const float* cba, u32 cbaStride, u32 count,
                                   u32 laneSource = 0, const u32* laneKeys = nullptr,

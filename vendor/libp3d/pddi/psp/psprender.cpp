@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <malloc.h>
+#include <new>
 #include <tuple>
 
 namespace {
@@ -828,7 +829,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
     return true;
 }
 
-PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count) {
+PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count, bool exclusive) {
     constexpr u32 kDynamicFormat = PDDI_V_POSITION | PDDI_V_COLOUR
         | PDDI_V_UV | PDDI_V_TEXINFO;
     // SetDynamicVertexData's compact-only path (uvIsIntegral) and nothing else.
@@ -836,7 +837,12 @@ PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count) {
         || count != vertices.size() || vertexFormat != kDynamicFormat) {
         return nullptr;
     }
-    PreferStagedIndexedVertices();  // as UpdatePspPrimBufferDynamicVertices
+    // A shared buffer is rewritten for each drawable within a frame, so its
+    // draws copy the vertices into the list (as UpdatePspPrimBufferDynamic-
+    // Vertices). An exclusive one changes once per frame, after the previous
+    // list was fenced; PrepareForMutation still fences a second same-frame
+    // upload.
+    if (!exclusive) PreferStagedIndexedVertices();
     packedUploadStaged = UsesStagedIndexedVertices();
     PrepareForMutation();
     return packedVertices.data();
@@ -1157,9 +1163,51 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* base) {
     static_cast<pspPrimBuffer*>(base)->PreferStagedIndexedVertices();
 }
 
-PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* base, u32 count) {
+PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* base, u32 count, bool exclusive) {
     if (!base) return nullptr;
-    return static_cast<pspPrimBuffer*>(base)->BeginPackedUpload(count);
+    return static_cast<pspPrimBuffer*>(base)->BeginPackedUpload(count, exclusive);
+}
+
+pspPrimBuffer* pspPrimBuffer::CloneDynamic() const {
+    auto* clone = new (std::nothrow) pspPrimBuffer(pddiPrimBufferDesc(
+        primType, vertexFormat, static_cast<u32>(vertices.size()), static_cast<u32>(indices.size())));
+    if (!clone) return nullptr;
+    // Floats as RefreshFloatVertices would make them, without touching the
+    // source (the shared buffer may be mid-frame).
+    if (floatStale) {
+        const std::size_t count = std::min(vertices.size(), packedVertices.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            const PspPackedVertex& source = packedVertices[i];
+            clone->vertices[i] = {static_cast<float>(source.u), static_cast<float>(source.v),
+                                  source.color, source.x, source.y, source.z};
+        }
+    }
+    else {
+        std::copy(vertices.begin(), vertices.end(), clone->vertices.begin());
+    }
+    if (packedVerticesValid) {
+        clone->packedVertices.assign(packedVertices.begin(), packedVertices.end());
+        clone->packedVerticesAllocatedBytes = clone->packedVertices.capacity() * sizeof(PspPackedVertex);
+        PspPerf::AddRendererMemory(static_cast<s32>(clone->packedVerticesAllocatedBytes));
+        clone->packedVerticesValid = true;
+    }
+    clone->materialKeys = materialKeys;
+    clone->materialValid = materialValid;
+    clone->materialRawBits = materialRawBits;
+    clone->materialRawBitsValid = materialRawBitsValid;
+    std::copy(indices.begin(), indices.end(), clone->indices.begin());
+    clone->indicesValid = indicesValid;
+    WritebackDcacheRange(clone->vertices.data(), sizeof(PspVertex) * clone->vertices.size());
+    if (clone->packedVerticesValid) {
+        WritebackDcacheRange(clone->packedVertices.data(),
+            sizeof(PspPackedVertex) * clone->packedVertices.size());
+    }
+    WritebackDcacheRange(clone->indices.data(), sizeof(u16) * clone->indices.size());
+    return clone;
+}
+
+pddiPrimBuffer* ClonePspDynamicPrimBuffer(pddiPrimBuffer* source) {
+    return source ? static_cast<pspPrimBuffer*>(source)->CloneDynamic() : nullptr;
 }
 
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* base, const float* tpage, u32 tpageStride,

@@ -324,9 +324,19 @@ struct DrawableSTree : public DrawableBasic {
     u32 mirrorFlags = 0;                 // +32 on PSX, bit 0 = mirrored tree
     u32* mirroredJointOrderMap = nullptr;
     s16 suitIndex = 0;
+#if defined(RC_PLATFORM_PSP)
+    // This drawable's copy of the model's skinned buffer (Display): the GE
+    // draws it in place, where the shared buffer, rewritten for every
+    // instance, had its vertices copied into the list on each draw.
+    pddiPrimBuffer* pspSkinBuffer = nullptr;
+    const pddiPrimBuffer* pspSkinBufferSource = nullptr;
+    const SkinData* pspSkinBufferSkin = nullptr;
+#endif
 
     DrawableSTree(OriginalSTree* orig);
     ~DrawableSTree() override;
+    DrawableSTree(const DrawableSTree&) = delete;
+    DrawableSTree& operator=(const DrawableSTree&) = delete;
 
     // PSX: Display__13DrawableSTree (calls OriginalSTree::Draw -> tPrimGeom::Display)
     // PC: draws the pddiPrimBuffer
