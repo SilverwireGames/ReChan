@@ -174,7 +174,7 @@ PSP_PROFILE_OBJS = $(addprefix $(ROOT)/,$(PSP_PROFILE_SOURCES:.cpp=.o))
 # Tiny per-vertex/per-entry helpers are left to their callers: entry/exit
 # hooks on every call would dominate (and distort) their measured cost.
 # (One line: a backslash continuation would insert spaces into the list.)
-PSP_PROFILE_EXCLUDED_FUNCTIONS = ToPspVertexByte,MakeGeometryColor,PackIntegralTexCoord,ConvertPsxTexelToGu5551,GetUnwrappedTime,GuCapability,LoadGumMatrix,PsxLitChannelToGuByte,ModulatePsxColourChannel,ClampLitChannelToByte,ComputeLightIntensity12,WritebackDcacheRange
+PSP_PROFILE_EXCLUDED_FUNCTIONS = ToPspVertexByte,MakeGeometryColor,PackIntegralTexCoord,ConvertPsxTexelToGu5551,GetUnwrappedTime,GuCapability,LoadGumMatrix,PsxLitChannelToGuByte,ModulatePsxColourChannel,ClampLitChannelToByte,ComputeLightIntensity12,WritebackDcacheRange,ReadPackedInput,PspSkinPackedVfpu,EncodeGuDrawArray
 $(PSP_PROFILE_OBJS): CXXFLAGS += -finstrument-functions \
 	-finstrument-functions-exclude-file-list=.h,/usr/local/pspdev,psp_funcprof \
 	-finstrument-functions-exclude-function-list=$(PSP_PROFILE_EXCLUDED_FUNCTIONS)
