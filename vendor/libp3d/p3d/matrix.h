@@ -6,6 +6,11 @@
 
 using f32 = float;
 
+#if defined(RC_PLATFORM_PSP) && defined(__psp__) && defined(__mips__) \
+    && !defined(PSP_DISABLE_VFPU_MAT4)
+#define P3D_VFPU_MAT4 1
+#endif
+
 struct Vec3;
 
 // 4x4 column-major float matrix (OpenGL convention)
@@ -50,14 +55,502 @@ struct Mat4 {
     Mat4 operator*(const Mat4& b) const;
 };
 
-inline Mat4 Mat4::operator*(const Mat4& b) const {
-    Mat4 r;
+// Scalar column-major product r = a * b (r must not alias a or b).
+inline void p3dMat4MulScalar(const f32* a, const f32* b, f32* r) {
     for (int c = 0; c < 4; ++c)
         for (int row = 0; row < 4; ++row) {
-            r.m[c * 4 + row] = 0.0f;
+            f32 sum = 0.0f;
             for (int k = 0; k < 4; ++k)
-                r.m[c * 4 + row] += m[k * 4 + row] * b.m[c * 4 + k];
+                sum += a[k * 4 + row] * b[c * 4 + k];
+            r[c * 4 + row] = sum;
         }
+}
+
+#if defined(P3D_VFPU_MAT4)
+// VFPU 4x4 product r = a * b of column-major matrices (4-byte aligned; the
+// lv.s/sv.s loads need no 16-byte alignment). Mode picks the vmmul operand
+// order and result orientation; p3dVfpuMat4Select() picks, once, the one that
+// reproduces the scalar product (else the scalar product itself). It uses
+// M000-M200 as scratch: GCC does not track VFPU registers, so no caller may
+// hold values there across a Mat4 product (the skin/light kernels load theirs
+// after any product; pspgum_vfpu keeps its matrix in M700).
+template <int Mode>
+inline void p3dVfpuMat4Mul(const f32* a, const f32* b, f32* r);
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<1>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, M000, M100\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S201, 4(%[r])\n"
+        "sv.s    S202, 8(%[r])\n"
+        "sv.s    S203, 12(%[r])\n"
+        "sv.s    S210, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S212, 24(%[r])\n"
+        "sv.s    S213, 28(%[r])\n"
+        "sv.s    S220, 32(%[r])\n"
+        "sv.s    S221, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S223, 44(%[r])\n"
+        "sv.s    S230, 48(%[r])\n"
+        "sv.s    S231, 52(%[r])\n"
+        "sv.s    S232, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<2>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, M000, M100\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S210, 4(%[r])\n"
+        "sv.s    S220, 8(%[r])\n"
+        "sv.s    S230, 12(%[r])\n"
+        "sv.s    S201, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S221, 24(%[r])\n"
+        "sv.s    S231, 28(%[r])\n"
+        "sv.s    S202, 32(%[r])\n"
+        "sv.s    S212, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S232, 44(%[r])\n"
+        "sv.s    S203, 48(%[r])\n"
+        "sv.s    S213, 52(%[r])\n"
+        "sv.s    S223, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<3>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, E000, M100\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S201, 4(%[r])\n"
+        "sv.s    S202, 8(%[r])\n"
+        "sv.s    S203, 12(%[r])\n"
+        "sv.s    S210, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S212, 24(%[r])\n"
+        "sv.s    S213, 28(%[r])\n"
+        "sv.s    S220, 32(%[r])\n"
+        "sv.s    S221, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S223, 44(%[r])\n"
+        "sv.s    S230, 48(%[r])\n"
+        "sv.s    S231, 52(%[r])\n"
+        "sv.s    S232, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<4>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, E000, M100\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S210, 4(%[r])\n"
+        "sv.s    S220, 8(%[r])\n"
+        "sv.s    S230, 12(%[r])\n"
+        "sv.s    S201, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S221, 24(%[r])\n"
+        "sv.s    S231, 28(%[r])\n"
+        "sv.s    S202, 32(%[r])\n"
+        "sv.s    S212, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S232, 44(%[r])\n"
+        "sv.s    S203, 48(%[r])\n"
+        "sv.s    S213, 52(%[r])\n"
+        "sv.s    S223, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<5>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, M100, M000\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S201, 4(%[r])\n"
+        "sv.s    S202, 8(%[r])\n"
+        "sv.s    S203, 12(%[r])\n"
+        "sv.s    S210, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S212, 24(%[r])\n"
+        "sv.s    S213, 28(%[r])\n"
+        "sv.s    S220, 32(%[r])\n"
+        "sv.s    S221, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S223, 44(%[r])\n"
+        "sv.s    S230, 48(%[r])\n"
+        "sv.s    S231, 52(%[r])\n"
+        "sv.s    S232, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<6>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, M100, M000\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S210, 4(%[r])\n"
+        "sv.s    S220, 8(%[r])\n"
+        "sv.s    S230, 12(%[r])\n"
+        "sv.s    S201, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S221, 24(%[r])\n"
+        "sv.s    S231, 28(%[r])\n"
+        "sv.s    S202, 32(%[r])\n"
+        "sv.s    S212, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S232, 44(%[r])\n"
+        "sv.s    S203, 48(%[r])\n"
+        "sv.s    S213, 52(%[r])\n"
+        "sv.s    S223, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<7>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, E100, M000\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S201, 4(%[r])\n"
+        "sv.s    S202, 8(%[r])\n"
+        "sv.s    S203, 12(%[r])\n"
+        "sv.s    S210, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S212, 24(%[r])\n"
+        "sv.s    S213, 28(%[r])\n"
+        "sv.s    S220, 32(%[r])\n"
+        "sv.s    S221, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S223, 44(%[r])\n"
+        "sv.s    S230, 48(%[r])\n"
+        "sv.s    S231, 52(%[r])\n"
+        "sv.s    S232, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+template <>
+__attribute__((noinline)) inline void p3dVfpuMat4Mul<8>(const f32* a, const f32* b, f32* r) {
+    __asm__ volatile(
+        "lv.s    S000, 0(%[a])\n"
+        "lv.s    S001, 4(%[a])\n"
+        "lv.s    S002, 8(%[a])\n"
+        "lv.s    S003, 12(%[a])\n"
+        "lv.s    S010, 16(%[a])\n"
+        "lv.s    S011, 20(%[a])\n"
+        "lv.s    S012, 24(%[a])\n"
+        "lv.s    S013, 28(%[a])\n"
+        "lv.s    S020, 32(%[a])\n"
+        "lv.s    S021, 36(%[a])\n"
+        "lv.s    S022, 40(%[a])\n"
+        "lv.s    S023, 44(%[a])\n"
+        "lv.s    S030, 48(%[a])\n"
+        "lv.s    S031, 52(%[a])\n"
+        "lv.s    S032, 56(%[a])\n"
+        "lv.s    S033, 60(%[a])\n"
+        "lv.s    S100, 0(%[b])\n"
+        "lv.s    S101, 4(%[b])\n"
+        "lv.s    S102, 8(%[b])\n"
+        "lv.s    S103, 12(%[b])\n"
+        "lv.s    S110, 16(%[b])\n"
+        "lv.s    S111, 20(%[b])\n"
+        "lv.s    S112, 24(%[b])\n"
+        "lv.s    S113, 28(%[b])\n"
+        "lv.s    S120, 32(%[b])\n"
+        "lv.s    S121, 36(%[b])\n"
+        "lv.s    S122, 40(%[b])\n"
+        "lv.s    S123, 44(%[b])\n"
+        "lv.s    S130, 48(%[b])\n"
+        "lv.s    S131, 52(%[b])\n"
+        "lv.s    S132, 56(%[b])\n"
+        "lv.s    S133, 60(%[b])\n"
+        "vmmul.q M200, E100, M000\n"
+        "sv.s    S200, 0(%[r])\n"
+        "sv.s    S210, 4(%[r])\n"
+        "sv.s    S220, 8(%[r])\n"
+        "sv.s    S230, 12(%[r])\n"
+        "sv.s    S201, 16(%[r])\n"
+        "sv.s    S211, 20(%[r])\n"
+        "sv.s    S221, 24(%[r])\n"
+        "sv.s    S231, 28(%[r])\n"
+        "sv.s    S202, 32(%[r])\n"
+        "sv.s    S212, 36(%[r])\n"
+        "sv.s    S222, 40(%[r])\n"
+        "sv.s    S232, 44(%[r])\n"
+        "sv.s    S203, 48(%[r])\n"
+        "sv.s    S213, 52(%[r])\n"
+        "sv.s    S223, 56(%[r])\n"
+        "sv.s    S233, 60(%[r])\n"
+        : : [a] "r"(a), [b] "r"(b), [r] "r"(r) : "memory");
+}
+
+using P3dMat4MulFn = void (*)(const f32* a, const f32* b, f32* r);
+
+__attribute__((noinline)) inline P3dMat4MulFn p3dVfpuMat4Select() {
+    constexpr P3dMat4MulFn kModes[8] = {
+        &p3dVfpuMat4Mul<1>, &p3dVfpuMat4Mul<2>, &p3dVfpuMat4Mul<3>, &p3dVfpuMat4Mul<4>,
+        &p3dVfpuMat4Mul<5>, &p3dVfpuMat4Mul<6>, &p3dVfpuMat4Mul<7>, &p3dVfpuMat4Mul<8>,
+    };
+    Mat4 a;
+    Mat4 b;
+    for (int i = 0; i < 16; ++i) {
+        a.m[i] = static_cast<f32>((i * 7 + 3) % 11) - 4.5f;
+        b.m[i] = static_cast<f32>((i * 5 + 1) % 13) * 0.25f - 1.0f;
+    }
+    f32 expected[16];
+    p3dMat4MulScalar(a.m, b.m, expected);
+    for (const P3dMat4MulFn candidate : kModes) {
+        f32 actual[16];
+        candidate(a.m, b.m, actual);
+        bool same = true;
+        for (int i = 0; i < 16 && same; ++i) {
+            const f32 tolerance = 1.0e-4f * (1.0f + std::fabs(expected[i]));
+            same = std::fabs(actual[i] - expected[i]) <= tolerance;
+        }
+        if (same) return candidate;
+    }
+    return &p3dMat4MulScalar;
+}
+
+// The product used by Mat4::operator*: chosen on first use.
+inline P3dMat4MulFn g_p3dMat4Mul = nullptr;
+#endif
+
+inline Mat4 Mat4::operator*(const Mat4& b) const {
+    Mat4 r;
+#if defined(P3D_VFPU_MAT4)
+    // A skeleton build multiplies once or twice per joint; the scalar loop
+    // is bound by FPU latency (~10x the VFPU product).
+    if (!g_p3dMat4Mul) g_p3dMat4Mul = p3dVfpuMat4Select();
+    g_p3dMat4Mul(m, b.m, r.m);
+#else
+    p3dMat4MulScalar(m, b.m, r.m);
+#endif
     return r;
 }
 
