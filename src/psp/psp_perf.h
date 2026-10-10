@@ -32,6 +32,10 @@ enum class RendererCounter : u32 {
     SuitLaneMismatches,
     // Inside SkinPrepareUs: the fused skinning loop and the suit lane lookup.
     SkinKernelUs, SkinSuitUs,
+    // Inside SubmitUs: page/CLUT binds and list-memory staging copies.
+    BindUs, StageUs,
+    // HUD/overlay quads (DrawQuadBatch, DrawGouraudQuad) and their time.
+    OverlayQuads, OverlayUs,
     Count
 };
 

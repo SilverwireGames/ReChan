@@ -2227,6 +2227,9 @@ void pspContext::DrawQuad(pddiBaseShader* shader, float x, float y, float w, flo
 void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
                                const pddiBatchVertex* source, s32 vertCount) {
     if (!listOpen || !source || vertCount <= 0) return;
+    PspPerf::CountRenderer(PspPerf::RendererCounter::OverlayQuads,
+                           static_cast<u32>(vertCount) / 6u);
+    PspPerf::ScopeTimer overlayTimer(PspPerf::RendererCounter::OverlayUs);
     if (vertCount > static_cast<s32>(kDrawChunk)) {
         for (s32 offset = 0; offset < vertCount; offset += kDrawChunk) {
             DrawQuadBatch(tex, blend, source + offset,
@@ -2437,6 +2440,8 @@ void pspContext::DrawGouraudQuad(float x0, float y0, float r0, float g0, float b
                                  float x2, float y2, float r2, float g2, float b2, float a2,
                                  float x3, float y3, float r3, float g3, float b3, float a3) {
     if (!listOpen) return;
+    PspPerf::CountRenderer(PspPerf::RendererCounter::OverlayQuads);
+    PspPerf::ScopeTimer overlayTimer(PspPerf::RendererCounter::OverlayUs);
     EnsureListSpace(sizeof(PspVertex) * 6u + 32u);
     Setup2DState();
     GuDisable(GU_TEXTURE_2D);
@@ -2794,6 +2799,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
         return;
     }
     PspPerf::CountRenderer(PspPerf::RendererCounter::PageBinds);
+    PspPerf::ScopeTimer bindTimer(PspPerf::RendererCounter::BindUs);
     EnsureListSpace();
     if (framePaletteUsed == kFramePaletteCapacity) FlushList();
 #if defined(PSP_GU_DIAGNOSTIC)
@@ -3466,6 +3472,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
             }
             if (!stagedWholeVertices) {
                 EnsureListSpace(wholeVertexBytes + sizeof(u16) * runCount + 64u);
+                PspPerf::ScopeTimer stageTimer(PspPerf::RendererCounter::StageUs);
                 stagedWholeVertices = AllocateListMemory(wholeVertexBytes);
                 if (stagedWholeVertices) {
                     if (usePackedVertices) {

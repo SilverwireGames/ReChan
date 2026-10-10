@@ -686,7 +686,8 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         "skeleton_avg_us", "skeleton_builds_avg", "skeleton_joints_avg",
         "packed_lane_holds_avg", "packed_lane_compares_avg", "material_run_builds_avg",
         "suit_lane_builds_avg", "suit_lane_mismatches_avg",
-        "skin_kernel_avg_us", "skin_suit_avg_us"
+        "skin_kernel_avg_us", "skin_suit_avg_us", "bind_avg_us", "stage_avg_us",
+        "overlay_quads_avg", "overlay_avg_us"
     };
     static_assert(sizeof(rendererNames) / sizeof(rendererNames[0])
         == static_cast<u32>(RendererCounter::Count), "renderer schema mismatch");
