@@ -36,6 +36,8 @@ enum class RendererCounter : u32 {
     BindUs, StageUs,
     // HUD/overlay quads (DrawQuadBatch, DrawGouraudQuad) and their time.
     OverlayQuads, OverlayUs,
+    // Static buffers drawn by calling their recorded GE list, and lists built.
+    RecordedDrawCalls, RecordedDrawBuilds,
     Count
 };
 

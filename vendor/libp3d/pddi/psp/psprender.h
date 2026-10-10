@@ -133,7 +133,51 @@ public:
     // every draw of an unchanged buffer. False when start is not a triangle.
     bool FindMaterialRun(u32 start, bool* valid, u32* key, u32* end);
 
+    // A static buffer's whole draw recorded as a GE call list (see
+    // pspContext::DrawRecordedPrimBuffer): the texture state and indexed
+    // draws of its material runs, on the buffer's persistent arrays. Valid
+    // only for the buffer content, render state and cached pages/CLUTs it
+    // was built from.
+    struct RecordedPage {
+        u32 slot = 0;
+        u32 fill = 0;
+    };
+    struct RecordedClut {
+        u32 entry = 0;
+        u32 rowGeneration = 0;
+        u32 epoch = 0;
+        u16 row = 0;
+    };
+    struct RecordedDraw {
+        std::vector<u32, PspAlignedAllocator<u32, 16>> words;
+        // Word-aligned copies of the runs whose index ranges start on an odd
+        // u16 (the GE reads indices from word-aligned addresses).
+        std::vector<u16, PspAlignedAllocator<u16, 16>> indexCopies;
+        std::vector<RecordedPage> pages;
+        std::vector<RecordedClut> cluts;
+        u32 contentSerial = 0;
+        u32 vramHandle = 0;
+        u32 blendMode = 0;
+        u32 submissionSerial = 0;  // display list that last called it
+        u32 runs = 0;
+        u32 indexCount = 0;
+        bool packedUv = false;
+        bool valid = false;
+    };
+    RecordedDraw& Recorded() { return recorded; }
+    // Bumped by every mutation (PrepareForMutation).
+    u32 GetContentSerial() const { return contentSerial; }
+    // True when the previous draw saw the same content; records this draw.
+    bool DrawnUnchanged() {
+        const bool unchanged = lastDrawnContentSerial == contentSerial;
+        lastDrawnContentSerial = contentSerial;
+        return unchanged;
+    }
+
 private:
+    u32 contentSerial = 1;
+    u32 lastDrawnContentSerial = 0;
+    RecordedDraw recorded;
     pddiPrimType primType;
     u32 vertexFormat;
     std::vector<PspVertex, PspAlignedAllocator<PspVertex, 16>> vertices;
@@ -364,6 +408,13 @@ public:
     ~pspContext() override;
 
     void BeginFrame() override;
+    // Recorded GE call lists of static buffers (DrawPrimBuffer).
+    bool DrawRecordedPrimBuffer(pspPrimBuffer* buffer, int indexedFormat, bool packedUv);
+    bool RecordPrimBufferCallList(pspPrimBuffer* buffer, int indexedFormat, bool packedUv);
+    bool RecordedDrawCurrent(pspPrimBuffer* buffer, bool packedUv) const;
+    int FindCachedPageSlot(u32 handle, u16 tpage) const;
+    int FindCurrentClutEntry(u16 cba, u32 depth, u8 flags, u32 row) const;
+    void ForgetTextureState();
 #if defined(PSP_DRAW_MICROBENCH)
     void RunDrawMicrobench();
 #endif
@@ -475,6 +526,9 @@ private:
         // Invalidation clears the key, but must retain both storage and this
         // pin until the GE has consumed the submission that references them.
         bool inFlight = false;
+        // Bumped whenever the slot is refilled or invalidated: a recorded
+        // call list naming this slot is current only while it holds.
+        u32 fill = 0;
     };
 
     struct QueuedOpaqueDraw {

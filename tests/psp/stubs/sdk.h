@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <functional>
+#include <map>
 #include <vector>
 
 inline uint64_t sceKernelGetSystemTimeWide() {
@@ -78,6 +80,19 @@ constexpr size_t kSurfaceBytes = 512 * 272 * 10;
 #endif
 }
 
+// GE call lists: commands written while a GU_CALL list is open are kept and
+// run, with all of the model's checks, each time the list is called.
+namespace FakeGe {
+inline std::map<const void*, std::vector<std::function<void()>>> callLists;
+inline std::vector<std::function<void()>>* recording = nullptr;
+inline int callListCalls = 0;
+template <class F> bool Defer(F&& run) {
+    if (!recording) return false;
+    recording->emplace_back(std::forward<F>(run));
+    return true;
+}
+}
+
 // Display model (relative eDRAM offsets): the buffer scanned out, the one
 // queued for the next VBlank, and the PSPSDK's own draw/display pair, which
 // sceGuSwapBuffers exchanges and sceGuStart re-emits as the GE target.
@@ -121,7 +136,14 @@ inline void requireOffScreenTarget() {
             "GE draws into a displayed buffer");
 }
 }
-inline int sceGuStart(int, void* ptr) {
+inline int sceGuStart(int context, void* ptr) {
+    if (context == GU_CALL) {
+        FakeGe::require(FakeGe::open && !FakeGe::recording, "call list outside a display list");
+        FakeGe::require((reinterpret_cast<uintptr_t>(ptr) & 15) == 0, "unaligned call list");
+        FakeGe::recording = &FakeGe::callLists[ptr];
+        FakeGe::recording->clear();
+        return 0;
+    }
     FakeGe::require(!FakeGe::open && FakeGe::reads.empty(), "restarted before sync");
     FakeGe::list = static_cast<unsigned char*>(ptr);
     FakeGe::used = 0; FakeGe::open = true; FakeGe::emit(8);
@@ -134,7 +156,23 @@ inline void* sceGuGetMemory(int size) {
     FakeGe::emit(((size + 3) & ~3) + 8);
     return result;
 }
-inline void sceGuFinish() { FakeGe::emit(8); FakeGe::open = false; }
+inline int sceGuFinish() {
+    if (FakeGe::recording) {
+        const int bytes = static_cast<int>(FakeGe::recording->size() * 16 + 4);
+        FakeGe::recording = nullptr;
+        return bytes;
+    }
+    FakeGe::emit(8); FakeGe::open = false;
+    return static_cast<int>(FakeGe::used);
+}
+inline void sceGuCallList(const void* list) {
+    FakeGe::require(!FakeGe::recording, "nested call list");
+    FakeGe::emit(16);
+    const auto found = FakeGe::callLists.find(list);
+    FakeGe::require(found != FakeGe::callLists.end(), "called an unrecorded list");
+    ++FakeGe::callListCalls;
+    for (const auto& command : found->second) command();
+}
 inline void sceGuSync(int, int) {
     FakeGe::require(!FakeGe::open, "sync on unfinished list");
     for (const auto& r : FakeGe::reads) {
@@ -180,11 +218,13 @@ inline void sceGuDrawBufferList(int format, void* buffer, int) {
     FakeGe::emit(12); FakeGe::drawBufferFormat = format; FakeGe::drawBuffer = buffer;
 }
 inline void sceGuEnable(int state) {
+    if (FakeGe::Defer([=] { sceGuEnable(state); })) return;
     FakeGe::emit();
     if (state == GU_TEXTURE_2D) FakeGe::textureEnabled = true;
     if (state == GU_ALPHA_TEST) FakeGe::alphaEnabled = true;
 }
 inline void sceGuDisable(int state) {
+    if (FakeGe::Defer([=] { sceGuDisable(state); })) return;
     FakeGe::emit();
     if (state == GU_TEXTURE_2D) FakeGe::textureEnabled = false;
     if (state == GU_ALPHA_TEST) FakeGe::alphaEnabled = false;
@@ -193,25 +233,34 @@ inline void sceGuDepthRange(int nearValue, int farValue) {
     FakeGe::emit(16); FakeGe::depthNear = nearValue; FakeGe::depthFar = farValue;
 }
 inline void sceGuDepthMask(int mask) { FakeGe::emit(); FakeGe::depthMask = mask; }
-inline void sceGuTexMode(int format, int, int, int) { FakeGe::emit(8); FakeGe::textureFormat = format; }
-inline void sceGuTexFunc(int function, int) { FakeGe::emit(16); FakeGe::textureFunction = function; }
+inline void sceGuTexMode(int format, int a, int b, int c) {
+    if (FakeGe::Defer([=] { sceGuTexMode(format, a, b, c); })) return;
+    FakeGe::emit(8); FakeGe::textureFormat = format;
+}
+inline void sceGuTexFunc(int function, int a) {
+    if (FakeGe::Defer([=] { sceGuTexFunc(function, a); })) return;
+    FakeGe::emit(16); FakeGe::textureFunction = function;
+}
 namespace FakeGe {
 inline int blendSource = 0, blendDestination = 0;
 inline unsigned int blendSourceFix = 0, blendDestinationFix = 0;
 }
 inline void sceGuBlendFunc(int equation, int source, int destination, unsigned int sourceFix,
                            unsigned int destinationFix) {
+    if (FakeGe::Defer([=] { sceGuBlendFunc(equation, source, destination, sourceFix, destinationFix); })) return;
     FakeGe::emit(16); FakeGe::blendEquation = equation;
     FakeGe::blendSource = source; FakeGe::blendDestination = destination;
     FakeGe::blendSourceFix = sourceFix; FakeGe::blendDestinationFix = destinationFix;
 }
 inline void sceGuTexImage(int, int width, int height, int stride, const void* ptr) {
+    if (FakeGe::Defer([=] { sceGuTexImage(0, width, height, stride, ptr); })) return;
     FakeGe::require((reinterpret_cast<uintptr_t>(ptr) & 15) == 0, "unaligned texture");
     FakeGe::emit(16); FakeGe::texture = ptr;
     FakeGe::textureWidth = stride; FakeGe::textureHeight = height;
     FakeGe::require(width <= stride, "invalid texture stride");
 }
 inline void sceGuClutLoad(int blocks, const void* ptr) {
+    if (FakeGe::Defer([=] { sceGuClutLoad(blocks, ptr); })) return;
     FakeGe::require(blocks == 1 || blocks == 16, "wrong 5551 CLUT byte count");
     FakeGe::require((reinterpret_cast<uintptr_t>(ptr) & 15) == 0, "unaligned CLUT");
     FakeGe::emit(12); FakeGe::read(ptr, blocks * 32); ++FakeGe::cluts;
@@ -230,6 +279,7 @@ inline void sceGuCopyImage(int format, int, int, int width, int height, int srcw
     ++FakeGe::copyFormats[width == 64 ? 0 : (width == 128 ? 1 : 2)];
 }
 inline void sceGuDrawArray(int primitive, int format, int count, const void* indices, const void* vertices) {
+    if (FakeGe::Defer([=] { sceGuDrawArray(primitive, format, count, indices, vertices); })) return;
     FakeGe::lastVertices = vertices;
     FakeGe::lastDrawTextured = FakeGe::textureEnabled;
     FakeGe::require(count > 0 && count <= 65535, "GE draw count overflow");
@@ -284,7 +334,9 @@ inline void sceGumUpdateMatrix() { FakeGe::emit(192); }
 inline int sceCtrlReadBufferPositive(SceCtrlData* data, int) { *data = {0, 128, 128}; return 1; }
 inline int sceKernelMaxFreeMemSize() { return 16 * 1024 * 1024; }
 inline int sceKernelTotalFreeMemSize() { return 16 * 1024 * 1024; }
-#define GE_COMMAND(name) template<class... T> inline int name(T...) { FakeGe::emit(16); return 0; }
+#define GE_COMMAND(name) template<class... T> inline int name(T... args) { \
+    if (FakeGe::Defer([=] { name(args...); })) return 0; \
+    FakeGe::emit(16); return 0; }
 GE_COMMAND(sceGuAlphaFunc) GE_COMMAND(sceGuAmbientColor)
 GE_COMMAND(sceGuClearColor) GE_COMMAND(sceGuClearDepth) GE_COMMAND(sceGuClutMode)
 GE_COMMAND(sceGuDepthBuffer) GE_COMMAND(sceGuDepthFunc)
@@ -300,4 +352,5 @@ SDK_NOOP(guSwapBuffersBehaviour)
 SDK_NOOP(sceCtrlSetSamplingCycle) SDK_NOOP(sceCtrlSetSamplingMode)
 SDK_NOOP(sceGumLoadIdentity) SDK_NOOP(sceGumOrtho)
 SDK_NOOP(sceKernelDcacheWritebackAll) SDK_NOOP(sceKernelDcacheWritebackRange)
+SDK_NOOP(sceKernelDcacheWritebackInvalidateRange)
 #undef SDK_NOOP

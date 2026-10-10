@@ -675,6 +675,7 @@ void pspPrimBuffer::PrepareForMutation() {
         g_activeContext->FlushList();
     }
     directSubmissionSerial = 0;
+    ++contentSerial;
 }
 
 void pspPrimBuffer::MarkDirectSubmission() {
@@ -2597,7 +2598,10 @@ void pspContext::InvalidatePages(u32 handle) {
     // Create/update/destroy of the PSX VRAM image: no cached palette survives.
     if (handle == 1u) ++vramEpoch;
     for (auto& cache : pageCache) {
-        if (cache.handle == handle) cache.handle = 0;
+        if (cache.handle == handle) {
+            cache.handle = 0;
+            ++cache.fill;
+        }
     }
     // Retain invalidated storage/slots and pins: already queued draws still
     // reference that snapshot. GetDecodedPage reclaims it only after sync.
@@ -2662,6 +2666,7 @@ void pspContext::UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
             || (pageEnd > image->width && overlaps(0, pageEnd - image->width, minX, maxX));
         if (horizontal && overlaps(pageY, pageY + kPageSize, minY, maxY)) {
             cache.handle = 0;
+            ++cache.fill;
         }
         // Indexed texels do not depend on the CLUT. BindPage snapshots the
         // current palette, so palette-only updates must not evict T4/T8 pages.
@@ -2882,6 +2887,7 @@ pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
     target->tpage = tpage;
     target->zeroKey = zeroKey;
     target->age = cacheAge++;
+    ++target->fill;
     pageCacheHint[hintIndex] = static_cast<u8>(target - pageCache.data() + 1);
     target->inFlight = true;
     PspPerf::Mark(PspPerf::RuntimeStage::CacheReady, tpage);
@@ -3139,6 +3145,276 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
 #endif
 }
 
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY) \
+    && defined(PSP_INDEXED_PERSISTENT_INDICES) && !defined(PSP_DISABLE_RECORDED_DRAWS)
+constexpr bool kRecordedDraws = true;
+#else
+constexpr bool kRecordedDraws = false;
+#endif
+
+// GetDecodedPage's lookup without its side effects: the slot holding the
+// page, or -1 (also on a miss, where GetDecodedPage would decode).
+int pspContext::FindCachedPageSlot(u32 handle, u16 tpage) const {
+    tpage &= 0x019fu;
+    const bool zeroKey = ((tpage >> 7) & 3u) >= 2u && blendMode != PDDI_BLEND_NONE;
+    for (u32 slot = 0; slot < pageCache.size(); ++slot) {
+        const PageCache& cache = pageCache[slot];
+        if (cache.handle == handle && cache.tpage == tpage && cache.zeroKey == zeroKey) {
+            return static_cast<int>(slot);
+        }
+    }
+    return -1;
+}
+
+// BindPage's CLUT cache lookup without side effects: the current entry
+// for the key, or -1.
+int pspContext::FindCurrentClutEntry(u16 cba, u32 depth, u8 flags, u32 row) const {
+    for (u32 index = 0; index < kClutCacheEntries; ++index) {
+        const ClutCacheEntry& entry = clutCache[index];
+        if (entry.valid && entry.cba == cba && entry.depth == depth && entry.flags == flags
+            && entry.epoch == vramEpoch && entry.rowGeneration == vramRowGeneration[row]) {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+// A called list leaves texture, CLUT and alpha-test state the CPU-side
+// caches did not see.
+void pspContext::ForgetTextureState() {
+    ++g_guStateGeneration;
+    g_guCapabilityValid &= ~((1u << GU_TEXTURE_2D) | (1u << GU_ALPHA_TEST));
+    g_clutGeContentValid = false;
+    geClutEntry = kClutCacheNone;
+    pageBindingValid = false;
+    clutBindingValid = false;
+    pageTexScaleValid = false;
+}
+
+bool pspContext::RecordedDrawCurrent(pspPrimBuffer* buffer, bool packedUv) const {
+    const pspPrimBuffer::RecordedDraw& recorded = buffer->Recorded();
+    if (!recorded.valid || recorded.contentSerial != buffer->GetContentSerial()
+        || recorded.vramHandle != vramHandle
+        || recorded.blendMode != static_cast<u32>(blendMode)
+        || recorded.packedUv != packedUv
+        || recorded.indexCount != buffer->GetIndexCount()) {
+        return false;
+    }
+    for (const pspPrimBuffer::RecordedPage& page : recorded.pages) {
+        if (pageCache[page.slot].fill != page.fill || pageCache[page.slot].handle != vramHandle) {
+            return false;
+        }
+    }
+    for (const pspPrimBuffer::RecordedClut& clut : recorded.cluts) {
+        const ClutCacheEntry& entry = clutCache[clut.entry];
+        if (!entry.valid || entry.epoch != clut.epoch || clut.epoch != vramEpoch
+            || entry.rowGeneration != clut.rowGeneration
+            || vramRowGeneration[clut.row] != clut.rowGeneration) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Records the whole draw of a static buffer as a GE call list: per material
+// run, the state BindPage and SetPageTextureScale would set, then the indexed
+// draw on the persistent arrays. Only when every page and CLUT is already
+// cached, so no decode, upload or palette conversion can land in a list that
+// is replayed later; otherwise the normal path draws (and fills the caches).
+bool pspContext::RecordPrimBufferCallList(pspPrimBuffer* buffer, int indexedFormat,
+                                          bool packedUv) {
+    pspPrimBuffer::RecordedDraw& recorded = buffer->Recorded();
+    // The previous list may still be read by the GE in this display list.
+    if (recorded.submissionSerial == g_submissionSerial) return false;
+    VramImage* image = GetVram(vramHandle);
+    if (!image) return false;
+    const bool clutCacheable = vramHandle == 1u && static_cast<u32>(image->height) == kVramRows;
+    const u8 clutFlags = blendMode != PDDI_BLEND_NONE ? 2u : 0u;
+
+    struct Run {
+        u32 start;
+        u32 count;
+        int page;   // -1: untextured
+        int clut;   // -1: none (16-bit page)
+        u32 copy;   // offset in indexCopies, or kNoCopy (persistent indices)
+    };
+    constexpr u32 kNoCopy = 0xFFFFFFFFu;
+    static std::vector<Run> runs;
+    runs.clear();
+    std::vector<pspPrimBuffer::RecordedPage> pages;
+    std::vector<pspPrimBuffer::RecordedClut> cluts;
+    const u16* indices = buffer->GetIndices();
+    const u32 total = buffer->GetIndexCount();
+    for (u32 start = 0; start < total;) {
+        u32 runEnd = start + std::min(kDrawChunk, total - start);
+        runEnd -= (runEnd - start) % 3u;
+        if (runEnd <= start) break;
+        Run run{start, 0, -1, -1, kNoCopy};
+        if (start + 2 < total) {
+            bool valid = false;
+            u32 key = 0;
+            u32 limit = 0;
+            if (!buffer->FindMaterialRun(start, &valid, &key, &limit)) return false;
+            if (limit < runEnd) runEnd = limit;
+            if (valid) {
+                const u16 tpage = static_cast<u16>(key >> 16);
+                const u16 cba = static_cast<u16>(key & 0xffffu);
+                run.page = FindCachedPageSlot(vramHandle, tpage);
+                if (run.page < 0) return false;
+                const PageCache& page = pageCache[static_cast<u32>(run.page)];
+                pages.push_back({static_cast<u32>(run.page), page.fill});
+                if (page.format == GU_PSM_T4 || page.format == GU_PSM_T8) {
+                    if (!clutCacheable) return false;
+                    const u32 depth = (tpage >> 7) & 3u;
+                    const u32 row = ((cba >> 6) & 0x1ffu) % static_cast<u32>(image->height);
+                    run.clut = FindCurrentClutEntry(cba, depth, clutFlags, row);
+                    if (run.clut < 0) return false;
+                    const ClutCacheEntry& entry = clutCache[static_cast<u32>(run.clut)];
+                    cluts.push_back({static_cast<u32>(run.clut), entry.rowGeneration, entry.epoch,
+                                     static_cast<u16>(row)});
+                }
+            }
+        }
+        run.count = runEnd - start;
+        runs.push_back(run);
+        start = runEnd;
+    }
+    if (runs.empty()) return false;
+    u32 copiedIndices = 0;
+    for (Run& run : runs) {
+        if ((reinterpret_cast<std::uintptr_t>(indices + run.start) & 3u) == 0u) continue;
+        run.copy = copiedIndices;
+        copiedIndices += (run.count + 1u) & ~1u;  // keep the next copy word-aligned
+    }
+    if (copiedIndices != 0) {
+        recorded.indexCopies.resize(copiedIndices);
+        for (const Run& run : runs) {
+            if (run.copy == kNoCopy) continue;
+            std::copy(indices + run.start, indices + run.start + run.count,
+                      recorded.indexCopies.data() + run.copy);
+        }
+        WritebackDcacheRange(recorded.indexCopies.data(), copiedIndices * sizeof(u16));
+    }
+
+    // Per run at most: CLUT mode/load 4, texture mode/image 7, enables 2,
+    // draw 6 words; the shared texture state 16 more, and the return.
+    const std::size_t capacity = runs.size() * 24u + 32u;
+    if (recorded.words.size() < capacity) {
+        recorded.words.assign(capacity, 0u);
+        // The GE list is written through the uncached alias: no stale dirty
+        // line from the zero fill may be written back over it later.
+        sceKernelDcacheWritebackInvalidateRange(recorded.words.data(),
+            static_cast<unsigned int>(recorded.words.size() * sizeof(u32)));
+    }
+    EnsureListSpace(64u);
+
+    const PspPackedVertex* vertices = buffer->GetPackedVertices();
+    sceGuStart(GU_CALL, recorded.words.data());
+    int textured = -1;  // unknown, off, on
+    bool sharedState = false;
+    const void* boundPixels = nullptr;
+    int boundFormat = -1;
+    const void* boundClut = nullptr;
+    u32 boundClutDepth = 0;
+    for (const Run& run : runs) {
+        if (run.page >= 0) {
+            const PageCache& page = pageCache[static_cast<u32>(run.page)];
+            if (!sharedState) {
+                sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+                sceGuAmbientColor(0xffffffff);
+                sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+                sceGuTexWrap(GU_REPEAT, GU_REPEAT);
+                sceGuTexOffset(0.5f / 256.0f, 0.5f / 256.0f);
+                const float scale = packedUv ? (32768.0f / 256.0f) : (1.0f / 256.0f);
+                sceGuTexScale(scale, scale);
+                sceGuAlphaFunc(GU_GREATER, 0, 0xff);
+                sharedState = true;
+            }
+            if (textured != 1) {
+                sceGuEnable(GU_TEXTURE_2D);
+                sceGuEnable(GU_ALPHA_TEST);
+                textured = 1;
+            }
+            if (run.clut >= 0) {
+                const u16* palette = clutCachePalettes.data() + static_cast<u32>(run.clut) * 256u;
+                const u32 depth = clutCache[static_cast<u32>(run.clut)].depth;
+                if (palette != boundClut || depth != boundClutDepth) {
+                    sceGuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
+                    sceGuClutLoad(depth == 0 ? 1 : 16, palette);
+                    boundClut = palette;
+                    boundClutDepth = depth;
+                }
+            }
+            const void* pixels = page.gpuPixels ? page.gpuPixels : page.pixels;
+            if (pixels != boundPixels || static_cast<int>(page.format) != boundFormat) {
+                sceGuTexMode(static_cast<int>(page.format), 0, 0, 0);
+                sceGuTexImage(0, kPageSize, kPageSize, kPageSize, pixels);
+                boundPixels = pixels;
+                boundFormat = static_cast<int>(page.format);
+            }
+        }
+        else if (textured != 0) {
+            sceGuDisable(GU_TEXTURE_2D);
+            sceGuDisable(GU_ALPHA_TEST);
+            textured = 0;
+        }
+        const u16* runIndices = run.copy == kNoCopy
+            ? indices + run.start : recorded.indexCopies.data() + run.copy;
+        sceGuDrawArray(GU_TRIANGLES, indexedFormat, static_cast<int>(run.count),
+                       runIndices, vertices);
+    }
+    const int bytes = sceGuFinish();
+    if (bytes < 0 || static_cast<std::size_t>(bytes) > recorded.words.size() * sizeof(u32)) {
+        // Unreachable with the bound above; never call an overrun list.
+        recorded.valid = false;
+        return false;
+    }
+    PspPerf::CountRenderer(PspPerf::RendererCounter::RecordedDrawBuilds);
+    recorded.pages = std::move(pages);
+    recorded.cluts = std::move(cluts);
+    recorded.contentSerial = buffer->GetContentSerial();
+    recorded.vramHandle = vramHandle;
+    recorded.blendMode = static_cast<u32>(blendMode);
+    recorded.packedUv = packedUv;
+    recorded.indexCount = total;
+    recorded.runs = static_cast<u32>(runs.size());
+    recorded.valid = true;
+    return true;
+}
+
+// Draws a static buffer through its recorded call list (recording it first
+// when its content was unchanged since the previous draw). False: draw it
+// the normal way.
+bool pspContext::DrawRecordedPrimBuffer(pspPrimBuffer* buffer, int indexedFormat,
+                                        bool packedUv) {
+    if (!buffer->DrawnUnchanged()) return false;
+    if (!RecordedDrawCurrent(buffer, packedUv)
+        && !RecordPrimBufferCallList(buffer, indexedFormat, packedUv)) {
+        return false;
+    }
+    pspPrimBuffer::RecordedDraw& recorded = buffer->Recorded();
+    // Reserve before pinning: a fence here would release the pins.
+    EnsureListSpace(64u);
+    // Pin what the list reads until the GE consumed this display list.
+    for (const pspPrimBuffer::RecordedPage& page : recorded.pages) {
+        PageCache& cache = pageCache[page.slot];
+        cache.age = cacheAge++;
+        cache.inFlight = true;
+    }
+    for (const pspPrimBuffer::RecordedClut& clut : recorded.cluts) {
+        ClutCacheEntry& entry = clutCache[clut.entry];
+        entry.lastUseSerial = g_submissionSerial;
+        entry.lastUseTick = ++clutCacheClock;
+    }
+    sceGuCallList(recorded.words.data());
+    recorded.submissionSerial = g_submissionSerial;
+    buffer->MarkDirectSubmission();
+    ForgetTextureState();
+    PspPerf::CountRenderer(PspPerf::RendererCounter::RecordedDrawCalls);
+    PspPerf::RecordDrawSubmission(recorded.indexCount);
+    return true;
+}
+
 void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 indexCount) {
     PspPerf::ScopeTimer submitTimer(PspPerf::RendererCounter::SubmitUs);
     PspPerf::Mark(PspPerf::RuntimeStage::PrimBegin, indexOffset, indexCount);
@@ -3284,6 +3560,16 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         if (chunkEnd == end) return end;
         return chunkEnd - (triangleStrip ? 2u : (lineStrip ? 1u : 0u));
     };
+#if defined(PSP_ENABLE_NATIVE_INDEXED)
+    // Static page geometry (world blocks, unlit props): call the buffer's
+    // recorded GE list instead of rebinding and redrawing every run.
+    if (kRecordedDraws && start == 0 && end == total && isTriangles && vramHandle != 0
+        && !texInfoOverride && !realTextureMode && usePackedVertices
+        && directIndexedVertices && !replayingOpaqueQueue
+        && DrawRecordedPrimBuffer(buffer, nativeIndexedFormat, usePackedVertices)) {
+        return;
+    }
+#endif
 #if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
     // Dynamic model buffers are deliberately staged because their persistent
     // vertices are rewritten by CPU skinning every frame. The old staged path

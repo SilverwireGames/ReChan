@@ -17,6 +17,7 @@
 #define GU_DEPTH_TEST (1)
 #define GU_DITHER (6)
 #define GU_DIRECT (0)
+#define GU_CALL (1)
 #define GU_FALSE (0)
 #define GU_FIX (10) /* Note: behavior of 11-15 blend factors is identical to GU_FIX */
 #define GU_GEQUAL (7)

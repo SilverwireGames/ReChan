@@ -710,6 +710,76 @@ int main() {
         sameMaterials("sourced upload after another material writer");
     }
 
+#if !defined(PSP_PALETTE_REFERENCE)  // no CLUT cache there: nothing is recorded
+    if (kRecordedDraws) {
+        // A static page buffer is drawn normally, then recorded as a GE call
+        // list, then replayed: same draws, texture and CLUT as the normal
+        // path. A content change, a VRAM write over its page or a palette
+        // change must never replay a stale list.
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        std::vector<float> lanes(6 * 10, 0.0f);
+        for (u32 v = 0; v < 6; ++v) {
+            float* vertex = &lanes[v * 10];
+            vertex[0] = static_cast<float>(v); vertex[1] = static_cast<float>(v * 2); vertex[2] = 1.0f;
+            vertex[3] = vertex[4] = vertex[5] = 0.5f;
+            vertex[6] = static_cast<float>(v * 4); vertex[7] = static_cast<float>(v * 8);
+            vertex[8] = static_cast<float>(v < 3 ? 0x82 : 0x83);  // two T8 pages
+            vertex[9] = static_cast<float>(0x2674);
+        }
+        const u16 order[6] = {0, 1, 2, 3, 4, 5};
+        pspPrimBuffer page({PDDI_PRIM_TRIANGLES, kFormat, 6, 6});
+        page.SetVertexData(lanes.data(), 6);
+        page.SetIndices(order, 6);
+        struct Seen { std::vector<uint64_t> draws; const void* texture; const void* clut; int calls; };
+        const auto frame = [&]() {
+            const size_t before = FakeGe::drawSignatures.size();
+            const int callsBefore = FakeGe::callListCalls;
+            ctx.BeginFrame();
+            ctx.SetVRAMHandle(handle);
+            ctx.SetTexInfoOverride(false, 0);
+            ctx.SetBlendMode(PDDI_BLEND_NONE);
+            ctx.DrawPrimBuffer(&page);
+            Seen seen{{FakeGe::drawSignatures.begin() + before, FakeGe::drawSignatures.end()},
+                      FakeGe::texture, FakeGe::lastClut, FakeGe::callListCalls - callsBefore};
+            display.SwapBuffers();
+            return seen;
+        };
+        const Seen normal = frame();
+        require(normal.calls == 0 && normal.draws.size() == 6, "first draw takes the normal path");
+        const Seen recordedFrame = frame();
+        require(recordedFrame.calls == 1, "unchanged buffer recorded and called");
+        const Seen replayed = frame();
+        require(replayed.calls == 1, "recorded list replayed");
+        for (const Seen* seen : {&recordedFrame, &replayed}) {
+            require(seen->draws == normal.draws && seen->texture == normal.texture
+                && seen->clut == normal.clut, "recorded draw differs from the normal path");
+        }
+        // Content change (a position and the second triangle's page): drawn
+        // normally, then recorded again from the new content.
+        lanes[0] = 7.0f;
+        for (u32 v = 3; v < 6; ++v) lanes[v * 10 + 8] = static_cast<float>(0x84);
+        page.SetVertexData(lanes.data(), 6);
+        const Seen changed = frame();
+        require(changed.calls == 0 && changed.draws != normal.draws
+            && changed.texture != normal.texture, "mutated buffer replayed");
+        const Seen rerecorded = frame();
+        require(rerecorded.calls == 1 && rerecorded.draws == changed.draws
+            && rerecorded.texture == changed.texture,
+            "mutated buffer not recorded again from its new content");
+        // VRAM write over the second page: its slot is invalidated.
+        ctx.UpdateVRAMTextureRegion(handle, 1024, 512, image.data(), 4 * 64, 0, 4, 4);
+        require(frame().calls == 0, "replayed a list naming an invalidated page");
+        require(frame().calls == 1, "page refilled but list not recorded again");
+        // Palette row write: the CLUT entry is no longer current.
+        const u32 clutY = (0x2674u >> 6) & 0x1ffu;
+        const u32 clutX = (0x2674u & 0x3fu) * 16u;
+        ctx.UpdateVRAMTextureRegion(handle, 1024, 512, image.data(), static_cast<int>(clutX),
+                                    static_cast<int>(clutY), 16, 1);
+        require(frame().calls == 0, "replayed a list naming a stale CLUT");
+        require(frame().calls == 1, "palette refilled but list not recorded again");
+    }
+#endif
+
     {
         // Presentation under VBlanks at random points between and inside
         // frames: the display stubs reject any GE write to the buffer on
