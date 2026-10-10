@@ -64,6 +64,16 @@ struct STreeJoint {
 
     // PC-only: per-joint pddiPrimBuffer
     pddiPrimBuffer* meshBuffer = nullptr;
+
+    // PC-only: the rotation part (m[0..2], m[4..6], m[8..10]) of the last
+    // YZX matrix built for these exact angles. A character's skeleton is
+    // built several times per frame with the same pose; the sin/cos and the
+    // products are then skipped. Zero-filled arrays start invalid.
+    s16 rotationCacheX = 0;
+    s16 rotationCacheY = 0;
+    s16 rotationCacheZ = 0;
+    bool rotationCacheValid = false;
+    f32 rotationCache[9] = {};
 };
 
 // tSTree - parsed skeleton tree (replaces PSX tSTree + tPrimGrouping).

@@ -230,7 +230,35 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
 
         if (j.flags & STF_TRANSFORM) {
             Mat4 local;
-            p3dBuildRotMatrixYZX(j.rotationX, j.rotationY, j.rotationZ, local);
+            if (j.rotationCacheValid && j.rotationCacheX == j.rotationX
+                && j.rotationCacheY == j.rotationY && j.rotationCacheZ == j.rotationZ) {
+                // Same angles as the last build: the same rotation, exactly.
+                local.m[0] = j.rotationCache[0];
+                local.m[1] = j.rotationCache[1];
+                local.m[2] = j.rotationCache[2];
+                local.m[4] = j.rotationCache[3];
+                local.m[5] = j.rotationCache[4];
+                local.m[6] = j.rotationCache[5];
+                local.m[8] = j.rotationCache[6];
+                local.m[9] = j.rotationCache[7];
+                local.m[10] = j.rotationCache[8];
+            }
+            else {
+                p3dBuildRotMatrixYZX(j.rotationX, j.rotationY, j.rotationZ, local);
+                j.rotationCache[0] = local.m[0];
+                j.rotationCache[1] = local.m[1];
+                j.rotationCache[2] = local.m[2];
+                j.rotationCache[3] = local.m[4];
+                j.rotationCache[4] = local.m[5];
+                j.rotationCache[5] = local.m[6];
+                j.rotationCache[6] = local.m[8];
+                j.rotationCache[7] = local.m[9];
+                j.rotationCache[8] = local.m[10];
+                j.rotationCacheX = j.rotationX;
+                j.rotationCacheY = j.rotationY;
+                j.rotationCacheZ = j.rotationZ;
+                j.rotationCacheValid = true;
+            }
             local.SetTranslation((f32)j.translationX, (f32)j.translationY, (f32)j.translationZ);
             p3dMat4MulInto(*current, local, out);
             current = &out;
