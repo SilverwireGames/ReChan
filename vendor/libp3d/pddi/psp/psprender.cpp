@@ -1135,11 +1135,22 @@ bool pspPrimBuffer::PatchColours(const u32* colours, u32 count) {
         baseColoursValid = true;
     }
     const u32* source = colours ? colours : baseColours.data();
+    if (colours && colourPatchActive) {
+        bool same = true;
+        for (u32 i = 0; i < count && same; ++i) {
+            same = (kPackedStreamConsumed ? packedVertices[i].color : vertices[i].color) == colours[i];
+        }
+        if (same) return true;  // already holds them: no mutation
+    }
 
-    // Shared props are patched, drawn and restored inside one frame. Keep the
-    // draw list-owned (as SetDynamicVertexData did) so the restore never has
-    // to fence the GE; staged draws copy from the CPU view, no write-back.
-    PreferStagedIndexedVertices();
+    // A buffer the GE may still read in this list (an earlier instance drawn
+    // directly) would need a fence: stage it from now on, as SetVertexData
+    // does, so alternating colours between instances never fence again.
+    if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
+        stagedIndexedVertices = true;
+        stagedIndexedSerial = g_submissionSerial;
+        preferStagedIndexedVertices = true;
+    }
     PrepareForMutation();
     if (kPackedStreamConsumed) {
         for (u32 i = 0; i < count; ++i) packedVertices[i].color = source[i];
@@ -1181,6 +1192,13 @@ bool RestorePspPrimBufferColours(pddiPrimBuffer* base, u32 count) {
     if (!base) return false;
     return static_cast<pspPrimBuffer*>(base)->PatchColours(nullptr, count);
 }
+
+namespace {
+const pddiPrimBuffer* g_litColourDrawBuffer = nullptr;
+}
+
+void BeginPspLitColourDraw(pddiPrimBuffer* buffer) { g_litColourDrawBuffer = buffer; }
+void EndPspLitColourDraw() { g_litColourDrawBuffer = nullptr; }
 
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,
                                 u32 rawSize, const u32* uvOffsets,
@@ -3424,6 +3442,11 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     // 333 MHz CPU while preserving the backend's ownership invariant.
     auto* buffer = static_cast<pspPrimBuffer*>(base);
     if (!listOpen || !buffer || buffer->GetIndexCount() == 0) return;
+    // Lit colours stay in a prop buffer after its lit draw; every other draw
+    // of the buffer gets the base colours back.
+    if (buffer->HasPatchedColours() && base != g_litColourDrawBuffer) {
+        buffer->PatchColours(nullptr, buffer->GetVertexCount());
+    }
     // 3D geometry needs the depth buffer back: drop a pause backdrop stored
     // there (clears depth). The pause path itself only draws 2D over it.
     if (pauseBackdropValid) ReleasePauseBackdrop();

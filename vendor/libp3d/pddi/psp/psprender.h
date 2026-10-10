@@ -113,7 +113,10 @@ public:
                                 bool packedOnly);
     // Rewrites only the per-vertex colour lane. colours == nullptr restores
     // the colours captured before the first patch since the last upload.
+    // Patching the colours the buffer already holds changes nothing, so a
+    // lit prop under steady light stays static (and replayable).
     bool PatchColours(const u32* colours, u32 count);
+    bool HasPatchedColours() const { return colourPatchActive; }
     bool UsesStagedIndexedVertices() const;
     // Direct indexed submissions borrow the persistent vertex array until the
     // current GU list is fenced. These hooks keep mutation/destruction from
@@ -271,6 +274,11 @@ u32 MakePspGeometryColour(float r, float g, float b);
 bool PatchPspPrimBufferColours(pddiPrimBuffer* buffer, const u32* colours, u32 count);
 // Restores the colours captured by the first PatchPspPrimBufferColours().
 bool RestorePspPrimBufferColours(pddiPrimBuffer* buffer, u32 count);
+// Brackets the lit draw of a colour-patched buffer. The patch stays in place
+// after it (patching the same colours again is free); any other draw of that
+// buffer gets its base colours back first (pspContext::DrawPrimBuffer).
+void BeginPspLitColourDraw(pddiPrimBuffer* buffer);
+void EndPspLitColourDraw();
 
 // Pause backdrop: the world is drawn once, copied (as 5650) into the depth
 // buffer, which a 2D-only menu does not use, and later frames redraw only that

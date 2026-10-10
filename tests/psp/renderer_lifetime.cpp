@@ -406,7 +406,9 @@ int main() {
             "full upload must rebuild keys and float stream");
     }
 
-    // Lit props patch only the colour lane, then restore the base colours.
+    // Lit props patch only the colour lane. The patch stays after the lit
+    // draw: patching the same colours again changes nothing (the buffer stays
+    // static), and any other draw of the buffer gets the base colours back.
     {
         pspPrimBuffer prop({PDDI_PRIM_TRIANGLES,
             PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, 3, 3});
@@ -417,24 +419,48 @@ int main() {
         require(RestorePspPrimBufferColours(&prop, 3), "restore without patch is a no-op");
         require(!PatchPspPrimBufferColours(&prop, lit.data(), 2), "count mismatch accepted");
         ctx.BeginFrame();
+        ctx.SetVRAMHandle(0);
         const int syncsBeforePatch = FakeGe::syncs;
         require(PatchPspPrimBufferColours(&prop, lit.data(), 3), "colour patch rejected");
-        require(prop.UsesStagedIndexedVertices(), "patched prop must stay list-staged");
         require(prop.packedVertices[1].color == lit[1], "compact colour not patched");
-        ctx.SetVRAMHandle(0);
+        BeginPspLitColourDraw(&prop);
         ctx.DrawPrimBuffer(&prop); // float path while lit
+        EndPspLitColourDraw();
         require(prop.vertices[2].color == lit[2] && prop.vertices[2].u == 5.0f,
             "float stream must show the lit colour with unchanged UVs");
-        require(RestorePspPrimBufferColours(&prop, 3), "colour restore failed");
-        require(FakeGe::syncs == syncsBeforePatch, "colour patch/restore fenced the GU list");
+        const u32 litContent = prop.GetContentSerial();
+        require(PatchPspPrimBufferColours(&prop, lit.data(), 3)
+            && prop.GetContentSerial() == litContent && FakeGe::syncs == syncsBeforePatch,
+            "patching the same colours mutated the buffer");
+        BeginPspLitColourDraw(&prop);
+        ctx.DrawPrimBuffer(&prop);
+        EndPspLitColourDraw();
+        require(prop.packedVertices[0].color == lit[0], "lit colours not kept after the draw");
+        // Another draw of the buffer (not the lit one): base colours first.
+        // When the lit draw read the persistent arrays in this list (native
+        // indexed paths), this one restore fences once and the buffer is
+        // staged from then on.
+        const bool litDrawWasDirect = prop.directSubmissionSerial == g_submissionSerial;
+        ctx.DrawPrimBuffer(&prop);
         prop.RefreshFloatVertices();
         for (int i = 0; i < 3; ++i) {
             require(prop.packedVertices[i].color == base && prop.vertices[i].color == base,
-                "restore left a lit colour behind");
+                "unlit draw kept a lit colour");
         }
+        require(FakeGe::syncs == syncsBeforePatch + (litDrawWasDirect ? 1 : 0)
+            && prop.UsesStagedIndexedVertices() == litDrawWasDirect,
+            "restore after a direct lit draw must fence once and stage the buffer");
+        const int syncsStaged = FakeGe::syncs;
+        require(PatchPspPrimBufferColours(&prop, lit.data(), 3), "second patch");
+        BeginPspLitColourDraw(&prop);
+        ctx.DrawPrimBuffer(&prop);
+        EndPspLitColourDraw();
+        ctx.DrawPrimBuffer(&prop);
+        require(FakeGe::syncs == syncsStaged && prop.packedVertices[0].color == base,
+            "staged prop fenced or kept a lit colour");
         // Patch then restore without an intermediate float draw.
         require(PatchPspPrimBufferColours(&prop, lit.data(), 3)
-            && RestorePspPrimBufferColours(&prop, 3), "second patch cycle");
+            && RestorePspPrimBufferColours(&prop, 3), "patch/restore cycle");
         require(!prop.HasStaleFloatVertices() && prop.vertices[0].color == base
             && prop.packedVertices[0].color == base, "untouched float copy must stay current");
         // An upload while lit replaces the patch: restore must not undo it.

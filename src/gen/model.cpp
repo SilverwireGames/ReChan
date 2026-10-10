@@ -1491,7 +1491,10 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     std::vector<GeoRenderVertex>& litVerts = g_pspModelFrameScratch.litGeoVertices;
     litVerts.clear();
     // Lighting changes only the colours of the shared prop buffer: patch that
-    // lane and restore it after the draw instead of two full re-uploads.
+    // lane instead of a full re-upload. The patch stays after the draw, so a
+    // prop under steady light patches nothing next frame and its buffer stays
+    // static (a recorded GE list); the renderer restores the base colours
+    // before any other draw of the buffer.
     std::vector<u32>& litColours = g_pspModelFrameScratch.litGeoColours;
     const bool pspColoursPatched = applyLighting
         && BuildLitGeoColours(geo, litColours)
@@ -1519,21 +1522,20 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         LOG("[PSP GeoDraw] after lit verts");
     }
 
+#if defined(RC_PLATFORM_PSP)
+    if (pspColoursPatched) BeginPspLitColourDraw(geo->meshBuffer);
+#endif
     DrawTexturedMesh(geo->meshBuffer
 #if REAL_TEXTURE_RENDERING
                       , &geo->realTexGroups
 #endif
                       );
+#if defined(RC_PLATFORM_PSP)
+    if (pspColoursPatched) EndPspLitColourDraw();
+#endif
     if (pspGeoProbe) {
         LOG("[PSP GeoDraw] after draw");
     }
-
-#if defined(RC_PLATFORM_PSP)
-    if (pspColoursPatched
-        && !RestorePspPrimBufferColours(geo->meshBuffer, geo->dynamicVertCount)) {
-        geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
-    }
-#endif
     if (!litVerts.empty()) {
         geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
     }
