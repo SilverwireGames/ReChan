@@ -74,9 +74,13 @@ OBJS = $(SOURCES:.cpp=.o)
 INCDIR = $(ROOT)/src $(ROOT)/vendor/libp3d $(ROOT)/vendor/cgltf $(ROOT)/vendor/stb
 # Same submission path as the measured benchmark/telemetry builds
 # (scripts/build_psp_usb.sh): native indexed draws with list memory and
-# persistent indices. All three are covered by scripts/test_psp_renderer.sh.
+# persistent indices, and triple buffering (three RGB565 colour buffers; a
+# frame slower than one refresh no longer waits for the next VBlank).
+# All are covered by scripts/test_psp_renderer.sh. Drop PSP_TRIPLE_BUFFER for
+# the old two RGBA8888 buffers.
 DEFINES = -DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_SORT_OPAQUE_MATERIALS \
-	-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES
+	-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES \
+	-DPSP_TRIPLE_BUFFER
 
 # Small-data (gp-relative) addressing. -G0 (inherited from the PSPSDK sample
 # Makefiles) puts every global behind a lui+addiu/lw absolute pair. The module

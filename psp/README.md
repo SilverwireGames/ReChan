@@ -46,7 +46,8 @@ ssh dev@192.168.18.24 'docker run --rm --platform linux/amd64 \
   make -B -j12 BUILD_MODE=release BUILD_PRX=1 \
   DEFINES="-DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE \
   -DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY \
-  -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_SORT_OPAQUE_MATERIALS"'\'''
+  -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_SORT_OPAQUE_MATERIALS \
+  -DPSP_TRIPLE_BUFFER"'\'''
 ```
 
 O `rechan.prx` gerado pode ser exposto pelo `host0:` e iniciado com
@@ -96,7 +97,7 @@ REMOTE_ROOT=/tmp/rechan-psp-build
 git archive --format=tar HEAD | ssh "$REMOTE" \
   "mkdir -p '$REMOTE_ROOT' && tar -xf - -C '$REMOTE_ROOT'"
 ssh "$REMOTE" "rm -f '$REMOTE_ROOT/src/gen/psprender.cpp' '$REMOTE_ROOT/src/gen/psprender.h' '$REMOTE_ROOT/src/gen/psprender.o'"
-ssh "$REMOTE" "docker run --rm --platform linux/amd64 -e PSP_BUILD_JOBS=12 -v '$REMOTE_ROOT:/work' -w /work/psp ghcr.io/pspdev/pspdev:latest sh -c 'export PSPDEV=/usr/local/pspdev PSPSDK=/usr/local/pspdev/psp/sdk PATH=/usr/local/pspdev/bin:\$PATH; make -B -j12 BUILD_MODE=usb-debug BUILD_PRX=1 DEFINES=\"-DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_SORT_OPAQUE_MATERIALS -DPSP_AUTO_START_PHASE1\"'"
+ssh "$REMOTE" "docker run --rm --platform linux/amd64 -e PSP_BUILD_JOBS=12 -v '$REMOTE_ROOT:/work' -w /work/psp ghcr.io/pspdev/pspdev:latest sh -c 'export PSPDEV=/usr/local/pspdev PSPSDK=/usr/local/pspdev/psp/sdk PATH=/usr/local/pspdev/bin:\$PATH; make -B -j12 BUILD_MODE=usb-debug BUILD_PRX=1 DEFINES=\"-DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_SORT_OPAQUE_MATERIALS -DPSP_TRIPLE_BUFFER -DPSP_AUTO_START_PHASE1\"'"
 scp "$REMOTE:$REMOTE_ROOT/psp/EBOOT.PBP" "$REMOTE:$REMOTE_ROOT/psp/rechan.prx" "$REMOTE:$REMOTE_ROOT/psp/rechan.elf" dist/psp-debug/host/
 shasum -a 256 dist/psp-debug/host/EBOOT.PBP dist/psp-debug/host/rechan.prx dist/psp-debug/host/rechan.elf
 ```
