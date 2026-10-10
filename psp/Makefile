@@ -163,6 +163,7 @@ PSP_PROFILE_SOURCES ?= src/ai/humanoid.cpp src/ai/behaviour.cpp src/ai/player.cp
 	src/ai/thing.cpp src/gen/model.cpp src/gen/world.cpp src/gen/geometry.cpp \
 	src/gen/animmat.cpp src/gen/animmgr.cpp src/gen/lights.cpp src/gen/charmgr.cpp \
 	src/gen/shadows.cpp src/gen/game.cpp src/gen/ai.cpp \
+	src/fe/hud.cpp src/xclib/xclib.cpp src/extra/hudwsfix.cpp \
 	$(patsubst $(ROOT)/%,%,$(wildcard $(ROOT)/vendor/libp3d/p3d/*.cpp)) \
 	vendor/libp3d/pddi/psp/psprender.cpp
 PSP_PROFILE_OBJS = $(addprefix $(ROOT)/,$(PSP_PROFILE_SOURCES:.cpp=.o))

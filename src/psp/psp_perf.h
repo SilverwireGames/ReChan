@@ -140,6 +140,8 @@ void RecordAudioWorkerError();
 bool ShouldStop();
 void WriteReport();
 void WriteReportTo(const char* path, u32 scenario = 0, s32 level = -1);
+// Free-form number written as scenario_note= (e.g. enemies gathered).
+void SetScenarioNote(u32 note);
 // Transition-only breadcrumb. Unlike frame telemetry, this performs I/O only
 // at level/benchmark state boundaries and is safe to inspect over PSPLINK.
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex);

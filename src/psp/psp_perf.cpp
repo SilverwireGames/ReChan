@@ -139,6 +139,7 @@ void ResetHandlerMetrics() {
 }
 
 int g_mainThreadId = -1;  // SceUID of the thread that called Reset()
+u32 g_scenarioNote = 0;
 
 // The slowest frames since the measurement started, with what they spent the
 // time on, plus slowdown counts over the whole session (not just the window).
@@ -653,10 +654,11 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
     const std::size_t metadataOffset = std::strlen(report);
     std::snprintf(report + metadataOffset, sizeof(report) - metadataOffset,
         "schema_version=2\nbuild_stamp=%s %s\nrun_start_us=%llu\n"
-        "report_uptime_us=%llu\nscenario=%lu\nlevel=%ld\npalette_path=%s\n",
+        "report_uptime_us=%llu\nscenario=%lu\nlevel=%ld\nscenario_note=%lu\npalette_path=%s\n",
         __DATE__, __TIME__, static_cast<unsigned long long>(g_runStartUs),
         static_cast<unsigned long long>(sceKernelGetSystemTimeWide()),
         static_cast<unsigned long>(scenario), static_cast<long>(level),
+        static_cast<unsigned long>(g_scenarioNote),
 #if defined(PSP_PALETTE_REFERENCE)
         "reference"
 #else
@@ -759,6 +761,10 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
     }
     p3d::io::WriteTextFile(
         path && path[0] ? path : "PSP_PERF.TXT", std::string(report));
+}
+
+void SetScenarioNote(u32 note) {
+    g_scenarioNote = note;
 }
 
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex) {
@@ -883,6 +889,7 @@ bool ShouldStop() { return false; }
 void WriteReport() {}
 void WriteReportTo(const char*, u32, s32) {}
 void WriteState(const char*, s32, s32, s32) {}
+void SetScenarioNote(u32) {}
 void GetSnapshot(Snapshot* out) { if (out) *out = {}; }
 void Trace(const char*) {}
 

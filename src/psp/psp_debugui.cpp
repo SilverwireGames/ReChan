@@ -15,9 +15,21 @@
 
 #include "psp/psp_funcprof.h"
 
+#if defined(PSP_BENCH_CROWD)
+#include "ai/humanoid.h"
+#include "ai/player.h"
+#include "gen/ai.h"
+#endif
+
 namespace {
 
+#if defined(PSP_BENCH_COMBAT)
+// Combat benchmark: the normal follow camera and scripted fighting input
+// (pspGamepad::Poll); a longer warm-up lets nearby enemies engage first.
+constexpr u32 kWarmupFrames = 300;
+#else
 constexpr u32 kWarmupFrames = 180;
+#endif
 constexpr u32 kMeasurementFrames = 600;
 // Ten 60-frame segments make one complete route fit exactly inside the
 // 600-frame measurement window.
@@ -84,6 +96,52 @@ static u32 s_routeFrame = 0;
 static u32 s_measurementFrames = 0;
 static LVector s_baseEye = {};
 static LVector s_baseTarget = {};
+
+#if defined(PSP_BENCH_CROWD)
+// Crowd scenario: early in each scenario, move up to five of the level's
+// regular enemies (no bosses) into a ring around Jackie, so the measured
+// window renders and runs up to six fighting characters. Humanoid damage is
+// off in combat benchmarks, so the fight lasts the whole window.
+constexpr u32 kCrowdGatherFrame = 60;
+constexpr u32 kCrowdMax = 5;
+
+static bool IsCrowdCandidate(const Humanoid* humanoid) {
+    const u16 type = humanoid->thingType;
+    if (type < AITypes::TT_HUMANOID_FIRST || type > 28u) return false;
+    switch (type) {
+        case AITypes::TT_GRONTAR:
+        case AITypes::TT_PAUL:
+        case AITypes::TT_OSCAR:
+        case AITypes::TT_DANTE:
+        case AITypes::TT_BUTCH:
+            return false;
+        default:
+            return humanoid->health != 0;
+    }
+}
+
+static void GatherCrowd() {
+    Player* player = Player::s_player;
+    if (!player || !g_ai) return;
+    static constexpr s32 kRing[kCrowdMax][2] = {
+        { 350, 0 }, { 108, 333 }, { -283, 206 }, { -283, -206 }, { 108, -333 },
+    };
+    u32 moved = 0;
+    for (ccMinNode* node = g_ai->humanoidList.head; node && moved < kCrowdMax; node = node->next) {
+        Humanoid* humanoid = static_cast<Humanoid*>(static_cast<Thing*>(node));
+        if (humanoid == player || !IsCrowdCandidate(humanoid)) continue;
+        LVector target = player->pos;
+        target.x += kRing[moved][0];
+        target.z += kRing[moved][1];
+        humanoid->Teleport(target);
+        // Jackie's block is active: create the model now, as block activation
+        // would, instead of drawing the no-model debug box.
+        humanoid->Activate();
+        ++moved;
+    }
+    PspPerf::SetScenarioNote(moved);
+}
+#endif
 
 static s32 Lerp(s32 from, s32 to, u32 numerator, u32 denominator) {
     return from + static_cast<s32>((static_cast<s64>(to - from) * numerator) / denominator);
@@ -169,6 +227,11 @@ void UpdateBenchmarkCamera(Camera* camera) {
         s_baseCaptured = true;
     }
 
+#if defined(PSP_BENCH_CROWD)
+    if (s_routeFrame == kCrowdGatherFrame) {
+        GatherCrowd();
+    }
+#endif
     if (!s_measurementStarted && s_routeFrame == kWarmupFrames) {
         PspPerf::BeginMeasurementWindow();
         // Profile exactly the measured frames (no-op unless PSP_FUNC_PROFILE).
@@ -195,7 +258,13 @@ void UpdateBenchmarkCamera(Camera* camera) {
         s_baseTarget.y + Lerp(from.targetY, to.targetY, segmentFrame, kSegmentFrames),
         s_baseTarget.z + Lerp(from.targetZ, to.targetZ, segmentFrame, kSegmentFrames),
     };
+#if defined(PSP_BENCH_COMBAT)
+    (void)eye;
+    (void)target;
+    camera->ClearBenchmarkMode();
+#else
     camera->SetBenchmarkPose(eye, target);
+#endif
     ++s_routeFrame;
 #else
     (void)camera;
@@ -283,7 +352,14 @@ bool QueueNextBenchmarkScenario(Game* game) {
 #endif
 
 bool IsEnabled() { return false; }
-bool IsHumanoidDamageDisabled() { return false; }
+bool IsHumanoidDamageDisabled() {
+#if defined(PSP_BENCH_COMBAT)
+    // Nobody dies, so every scenario window stays a fight.
+    return true;
+#else
+    return false;
+#endif
+}
 bool ShouldBlockGameInput() {
 #if defined(PSP_BENCH_PHASE11_ONLY)
     return s_phase11Active;

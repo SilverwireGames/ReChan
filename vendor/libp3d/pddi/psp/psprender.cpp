@@ -1277,6 +1277,19 @@ void pspGamepad::Poll() {
         }
     }
 #endif
+#if defined(PSP_BENCH_COMBAT)
+    // Benchmark only: scripted combat input, no file I/O. Equal steps right
+    // and left keep Jackie near the checkpoint (walking on blindly found a
+    // deadly drop in scenario 6), with punches (Square) and kicks (Triangle)
+    // against the enemies around it.
+    static u32 benchCombatFrame = 0;
+    const u32 benchFrame = benchCombatFrame++;
+    data.Buttons = 0;
+    data.Lx = (benchFrame % 120u) < 60u ? 255 : 0;
+    data.Ly = 128;
+    if (benchFrame % 8u < 2u) data.Buttons |= PSP_CTRL_SQUARE;
+    if (benchFrame % 12u == 6u) data.Buttons |= PSP_CTRL_TRIANGLE;
+#endif
     buttons = data.Buttons;
 #if defined(PSP_GU_DIAGNOSTIC)
     static u32 pollProbe = 0;
