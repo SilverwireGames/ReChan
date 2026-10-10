@@ -12,7 +12,7 @@ enum class RendererCounter : u32 {
     GeometryDynamicPatches, GeometryDynamicPatchVertices, OpaqueQueuedDraws,
     OpaqueQueueFlushes, GeSyncUs, VblankUs, PaletteEntries,
     EntitiesUs, BlocksUs, SubmitUs, SkinPrepareUs, SkinLightUs, VertexPackUs,
-    LightEvaluations, LightCacheHits,
+    LightEvaluations, LightCacheHits, SkinnedVertices, SkinViewCulls,
     Count
 };
 

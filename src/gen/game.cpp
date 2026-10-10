@@ -39,6 +39,12 @@
 #include "pc/tim.h"
 #include "p3d/input.h"
 #include "p3d/context.h"
+#if defined(RC_PLATFORM_PSP)
+#include "pddi/psp/psprender.h"
+#endif
+#if defined(PSP_AUTOPLAY)
+#include "psp/psp_qa.h"
+#endif
 #include "fe/loadanim.h"
 #include "config.h"
 #include "p3d/input.h"
@@ -794,7 +800,7 @@ static void CustomMenuRender(feCustomMenuMgr* menuMgr) {
     }
 }
 
-static s32 CustomMenuDraw(feCustomMenuMgr* menuMgr) {
+static s32 CustomMenuDraw(feCustomMenuMgr* menuMgr, bool pauseBackdrop = false) {
     s32 result = menuMgr ? menuMgr->Invoke() : 1;
     feCustomMenuMgr* renderMgr = menuMgr;
     if (result == 8 || result == 4) {
@@ -802,7 +808,30 @@ static s32 CustomMenuDraw(feCustomMenuMgr* menuMgr) {
         renderMgr = nullptr;
     }
     g_display->BeginFrame();
+#if defined(RC_PLATFORM_PSP)
+    // Pause: game logic is stopped (gsMenuState runs no logic handlers), so
+    // the world, director overlays and HUD are identical every frame. Draw
+    // them once, keep a copy in VRAM and redraw only that copy plus the 2D
+    // menu. Any other frame (resume/quit) releases the copy first.
+    if (pauseBackdrop && renderMgr) {
+        if (!PspDrawPauseBackdrop()) {
+            Game::DrawEverythingHandlerCB(nullptr);
+            DrawDirectorOverlays(nullptr);
+            if (g_hud) {
+                g_hud->Display();
+            }
+            PspCapturePauseBackdrop();
+        }
+        renderMgr->Render();
+    }
+    else {
+        PspReleasePauseBackdrop();
+        CustomMenuRender(renderMgr);
+    }
+#else
+    (void)pauseBackdrop;
     CustomMenuRender(renderMgr);
+#endif
     g_display->EndFrame();
     return result;
 }
@@ -2041,7 +2070,7 @@ bool Game::gsMenuState(Game* game) {
     SyncPausedAnimationTicks();
 
 #if CUSTOM_MENU
-    s32 result = CustomMenuDraw(g_feCustomMenuMgr);
+    s32 result = CustomMenuDraw(g_feCustomMenuMgr, true);
 #else
     // PSX: GetCurLevelID(world)
     // PSX: level 7 (boss): menuMgr = gp[48] (feMenuMgr)
@@ -2261,6 +2290,9 @@ bool Game::gsQueueLevelLoad(Game* game) {
         static_cast<s32>(world->GetTargetLevelIndex()));
 #endif
     LOG("[Game] QueueLevelLoad: level load complete");
+#if defined(PSP_AUTOPLAY)
+    QaLogWorld("level_loaded");
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("queue level: world load done");
 #endif
@@ -2356,6 +2388,9 @@ bool Game::gsQueuePetalLoad(Game* game) {
 
     // PSX: LoadPetal(world, targetPetalIndex)
     world->LoadPetal(world->GetTargetPetalIndex());
+#if defined(PSP_AUTOPLAY)
+    QaLogWorld("petal_loaded");
+#endif
 
     // PSX: Camera setup data is prepared during World::LoadPetal
     // via ExecuteLoadCallbacks -> cameraLoadFunc -> SetupPaths.
@@ -2394,6 +2429,11 @@ bool Game::gsQueueLevelPetalLoad(Game* game) {
         return true;
     }
 
+#if defined(PSP_AUTOPLAY)
+    // QA: log the switch decision (current -> target) before ResetLevel runs.
+    QaLogWorld(world->GetCurrentLevelIndex() != world->GetTargetLevelIndex() ? "level_switch"
+        : (world->GetCurrentPetalIndex() != world->GetTargetPetalIndex() ? "petal_switch" : "petal_reload"));
+#endif
     if (world->GetCurrentLevelIndex() != world->GetTargetLevelIndex()) {
         game->SetState(GameState::QueueLevelLoad);
         world->ResetLevel();

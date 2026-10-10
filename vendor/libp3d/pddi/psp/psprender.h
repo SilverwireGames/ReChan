@@ -79,6 +79,10 @@ public:
     pddiPrimType GetPrimType() const override { return primType; }
 
     const PspVertex* GetVertices() const { return vertices.data(); }
+    // The float stream may be left stale while the GE consumes only the
+    // compact stream. Call before reading/submitting GetVertices().
+    void RefreshFloatVertices();
+    bool HasStaleFloatVertices() const { return floatStale; }
     const PspPackedVertex* GetPackedVertices() const { return packedVertices.data(); }
     const u16* GetIndices() const { return indices.data(); }
     bool HasValidIndices() const { return indicesValid; }
@@ -95,6 +99,9 @@ public:
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour,
                                 bool packedOnly);
+    // Rewrites only the per-vertex colour lane. colours == nullptr restores
+    // the colours captured before the first patch since the last upload.
+    bool PatchColours(const u32* colours, u32 count);
     bool UsesStagedIndexedVertices() const;
     // Direct indexed submissions borrow the persistent vertex array until the
     // current GU list is fenced. These hooks keep mutation/destruction from
@@ -121,6 +128,18 @@ private:
     // them for every triangle on the frame path.
     std::vector<u32> materialKeys;
     std::vector<u8> materialValid;
+    // Dynamic uploads usually keep the same tpage/CBA lanes. Remember their
+    // raw float bits so unchanged lanes skip the finite/range/key conversion.
+    std::vector<u64> materialRawBits;
+    bool materialRawBitsValid = false;
+    // True when the compact stream is current and the float stream is not.
+    bool floatStale = false;
+    // Colour patch state (PatchColours). Base colours are captured lazily on
+    // the first patch after a full/dynamic upload invalidates them.
+    std::vector<u32> baseColours;
+    bool baseColoursValid = false;
+    bool colourPatchActive = false;
+    bool colourPatchStaledFloat = false;
     // Native indexed GU draws can borrow this storage until the current
     // display list is fenced. Keep it aligned so the common path can avoid
     // copying every material run into sceGuGetMemory().
@@ -151,6 +170,24 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
                                         const void* data, u32 count,
                                         bool uvIsIntegral);
+// GU vertex colour for PSX fixed-point channels (packet byte / 128), exactly
+// as the buffer upload paths convert them.
+u32 MakePspGeometryColour(float r, float g, float b);
+// Temporary per-frame colour override (CPU-lit props): writes only the colour
+// lane instead of re-uploading every attribute. Returns false when the buffer
+// cannot take the fast path; the caller must then use SetVertexData.
+bool PatchPspPrimBufferColours(pddiPrimBuffer* buffer, const u32* colours, u32 count);
+// Restores the colours captured by the first PatchPspPrimBufferColours().
+bool RestorePspPrimBufferColours(pddiPrimBuffer* buffer, u32 count);
+
+// Pause backdrop: the world is drawn once, copied (as 5650) into the depth
+// buffer, which a 2D-only menu does not use, and later frames redraw only that
+// image plus the menu. The backdrop survives only while every frame draws it;
+// any 3D draw or a frame that skips it releases it and clears the depth.
+bool PspCapturePauseBackdrop();
+bool PspDrawPauseBackdrop();
+void PspReleasePauseBackdrop();
+bool PspHasPauseBackdrop();
 
 class pspTexture final : public pddiTexture {
 public:
@@ -305,6 +342,10 @@ public:
     void SetDepthClamp(bool) override {}
     void SetPolygonOffset(bool enable, f32 factor = 0.0f, f32 units = 0.0f) override;
     void SetScissor(int x, int y, int w, int h) override;
+    bool CapturePauseBackdrop();
+    bool DrawPauseBackdrop();
+    void ReleasePauseBackdrop();
+    bool HasPauseBackdrop() const { return pauseBackdropValid; }
     void SetMultisampleEnabled(bool) override {}
     void ResolveForOverlayPass() override {}
     pddiRenderTarget* CreateRenderTarget(int, int, pddiRenderTargetFormat, bool = false) override { return nullptr; }
@@ -433,6 +474,16 @@ private:
     // buffers already leave the same state active; avoid replaying the
     // cached wrapper calls once that state is known to be valid.
     bool gu3DStateReady = false;
+    // Setup2DState is called for every overlay batch. Once its state is in
+    // place, later batches only re-emit it if a 3D pass/setter changed it.
+    bool gu2DStateReady = false;
+    u32 gu2DMatrixSerial = 0;
+    // GU scissor last requested through SetScissor (full screen by default).
+    std::array<int, 4> scissorRect{{0, 0, 480, 272}};
+    // Pause backdrop state; see PspCapturePauseBackdrop().
+    bool pauseBackdropValid = false;
+    bool pauseBackdropUsedThisFrame = false;
+    bool pendingDepthClear = false;
     std::array<VramImage, 8> vramImages{};
     // A decoded 256x256 PSX page is 128 KiB. Sixteen resident pages keep the
     // active level inside the PSP user heap while avoiding render-path
@@ -492,6 +543,8 @@ private:
     void InvalidatePages(u32 handle);
     void Setup3DState();
     void Setup2DState();
+    void ClearDepthNow();
+    void DrawScreenCopy(u32 sourceFormat, const void* sourceTexture);
     void BindPage(float tpage, float cba, bool wordZeroKey = false,
                   bool packedUv = false);
     void SetPageTextureScale(bool packedUv);

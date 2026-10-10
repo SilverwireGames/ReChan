@@ -498,7 +498,8 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         "opaque_queued_draws_avg", "opaque_queue_flushes_avg",
         "ge_sync_avg_us", "vblank_avg_us", "palette_entries_avg",
         "entities_avg_us", "blocks_avg_us", "submit_avg_us", "skin_prepare_avg_us",
-        "skin_light_avg_us", "vertex_pack_avg_us", "light_evaluations_avg", "light_cache_hits_avg"
+        "skin_light_avg_us", "vertex_pack_avg_us", "light_evaluations_avg", "light_cache_hits_avg",
+        "skinned_vertices_avg", "skin_view_culls_avg"
     };
     static_assert(sizeof(rendererNames) / sizeof(rendererNames[0])
         == static_cast<u32>(RendererCounter::Count), "renderer schema mismatch");

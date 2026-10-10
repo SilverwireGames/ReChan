@@ -15,6 +15,7 @@
 #define GU_CW (0)
 #define GU_DEPTH_BUFFER_BIT (4)
 #define GU_DEPTH_TEST (1)
+#define GU_DITHER (6)
 #define GU_DIRECT (0)
 #define GU_FALSE (0)
 #define GU_FIX (10) /* Note: behavior of 11-15 blend factors is identical to GU_FIX */
@@ -31,6 +32,7 @@
 #define GU_POINTS (0)
 #define GU_PROJECTION (0)
 #define GU_PSM_4444 (2) /* Display, Texture, Palette */
+#define GU_PSM_5650 (0) /* Display, Texture, Palette */
 #define GU_PSM_5551 (1) /* Display, Texture, Palette */
 #define GU_PSM_8888 (3) /* Display, Texture, Palette */
 #define GU_PSM_T4 (4) /* Texture */
@@ -43,6 +45,7 @@
 #define GU_STENCIL_TEST (3)
 #define GU_SUBTRACT (1)
 #define GU_REVERSE_SUBTRACT (2)
+#define GU_TCC_RGB (0)
 #define GU_TCC_RGBA (1)
 #define GU_TEXTURE_16BIT GU_TEXTURE_SHIFT(2)
 #define GU_TEXTURE_2D (9)

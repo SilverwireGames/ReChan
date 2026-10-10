@@ -97,7 +97,15 @@ inline void sceGuSync(int, int) {
     FakeGe::reads.clear(); ++FakeGe::syncs;
 }
 inline void sceGuSwapBuffers() { ++FakeGe::swaps; }
-inline void sceGuClear(int) { FakeGe::emit(32); ++FakeGe::clears; }
+namespace FakeGe {
+inline int clearFlags = 0;
+inline void* drawBuffer = nullptr;
+inline int drawBufferFormat = GU_PSM_8888;
+}
+inline void sceGuClear(int flags) { FakeGe::emit(32); ++FakeGe::clears; FakeGe::clearFlags = flags; }
+inline void sceGuDrawBufferList(int format, void* buffer, int) {
+    FakeGe::emit(12); FakeGe::drawBufferFormat = format; FakeGe::drawBuffer = buffer;
+}
 inline void sceGuEnable(int state) {
     FakeGe::emit();
     if (state == GU_TEXTURE_2D) FakeGe::textureEnabled = true;
@@ -203,6 +211,7 @@ GE_COMMAND(sceGuFrontFace) GE_COMMAND(sceGuOffset) GE_COMMAND(sceGuScissor)
 GE_COMMAND(sceGuShadeModel) GE_COMMAND(sceGuTexEnvColor) GE_COMMAND(sceGuTexFilter)
 GE_COMMAND(sceGuTexOffset) GE_COMMAND(sceGuTexScale)
 GE_COMMAND(sceGuTexSync) GE_COMMAND(sceGuTexWrap) GE_COMMAND(sceGuViewport)
+GE_COMMAND(sceGuTexFlush)
 #undef GE_COMMAND
 #define SDK_NOOP(name) template<class... T> inline int name(T...) { return 0; }
 SDK_NOOP(guSwapBuffersBehaviour) SDK_NOOP(sceGuDisplay) SDK_NOOP(sceDisplayWaitVblankStart)

@@ -67,6 +67,18 @@ struct SkinData {
     u8 semiTransMode = 0;
 #if defined(RC_PLATFORM_PSP)
     bool pspPacketRangesOrdered = false;
+    // Lazily derived from the immutable skin vertices on the first skinned
+    // draw: per joint, the largest joint-local vertex distance (-1 = joint
+    // owns no vertex). Used only for conservative whole-character view
+    // rejection; one float per joint, never rebuilt.
+    bool pspJointRadiusBuilt = false;
+    u32 pspJointRadiusCount = 0;
+    f32* pspJointRadius = nullptr;
+    // Lazily derived once from the immutable skin vertices: every r/g/b is a
+    // PSX byte / 128, which lets the VFPU skinning use its short exact colour
+    // chain (see psp/psp_vfpu_skin.h). No allocation.
+    bool pspColourBytesBuilt = false;
+    bool pspColourBytes = false;
 #endif
 
     ~SkinData() {
@@ -76,6 +88,9 @@ struct SkinData {
         delete[] primVertCount;
         delete[] primPacketOffset;
         delete[] primPacketSize;
+#if defined(RC_PLATFORM_PSP)
+        delete[] pspJointRadius;
+#endif
     }
 };
 

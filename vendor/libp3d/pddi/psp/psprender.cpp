@@ -32,6 +32,16 @@ u32 g_matrixGeneration = 1;
 u32 g_guCapabilityValid = 0;
 u32 g_guCapabilityEnabled = 0;
 
+// The GE holds exactly one CLUT. g_clutGeRaw is the raw PSX row last uploaded
+// to it, with the flags that shape conversion. A BindPage whose raw row and
+// flags match is a no-op for the GE, even when its CBA differs.
+bool g_clutGeContentValid = false;
+u8 g_clutGeDepth = 0;
+bool g_clutGeWordZeroKey = false;
+bool g_clutGeBlend = false;
+u16 g_clutGeRaw[256];
+u16 g_clutRawScratch[256];
+
 // Every write to these states in this backend goes through the same cache,
 // including overlays and standalone textures. A list split preserves GE state;
 // a new frame invalidates the cache conservatively. Never cache TexImage or
@@ -40,6 +50,7 @@ static void ResetGuStateCache() {
     ++g_guStateGeneration;
     ++g_matrixGeneration;
     g_guCapabilityValid = 0;
+    g_clutGeContentValid = false;
 }
 
 static void GuCapability(int state, bool enable) {
@@ -72,7 +83,6 @@ PSP_CACHED_GU(AlphaFunc, (int f, int r, int m), (f, r, m))
 PSP_CACHED_GU(AmbientColor, (u32 c), (c))
 PSP_CACHED_GU(BlendFunc, (int op, int src, int dst, u32 sf, u32 df), (op, src, dst, sf, df))
 PSP_CACHED_GU(DepthFunc, (int f), (f))
-PSP_CACHED_GU(DepthMask, (int m), (m))
 PSP_CACHED_GU(DepthOffset, (u32 o), (o))
 PSP_CACHED_GU(FrontFace, (int f), (f))
 PSP_CACHED_GU(TexMode, (int f, int max, int a, int swizzle), (f, max, a, swizzle))
@@ -83,6 +93,38 @@ PSP_CACHED_GU(TexScale, (float u, float v), (u, v))
 PSP_CACHED_GU(TexOffset, (float u, float v), (u, v))
 PSP_CACHED_GU(ClutMode, (int f, int s, int m, int start), (f, s, m, start))
 #undef PSP_CACHED_GU
+
+// Same cache contract as PSP_CACHED_GU, but readable: Setup2DState checks it
+// to know whether its depth-mask state is still in place.
+int g_guDepthMaskValue = -1;
+u32 g_guDepthMaskGeneration = 0;
+static void GuDepthMask(int mask) {
+    if (kCacheGuState && g_guDepthMaskGeneration == g_guStateGeneration
+        && g_guDepthMaskValue == mask) return;
+    g_guDepthMaskValue = mask;
+    g_guDepthMaskGeneration = g_guStateGeneration;
+    PspPerf::CountRenderer(PspPerf::RendererCounter::GuStateWrites);
+    sceGuDepthMask(mask);
+}
+
+// Incremented by every GUM matrix load from the 3D path. Setup2DState replaces
+// the GUM matrices; it can skip that work while no 3D load happened since.
+u32 g_gumMatrixSerial = 1;
+// Capabilities Setup2DState disables. Their cached bits prove the 2D state.
+constexpr u32 k2DDisabledCapabilities = (1u << GU_DEPTH_TEST) | (1u << GU_CULL_FACE)
+    | (1u << GU_ALPHA_TEST) | (1u << GU_COLOR_TEST) | (1u << GU_STENCIL_TEST)
+    | (1u << GU_COLOR_LOGIC_OP) | (1u << GU_LIGHTING) | (1u << GU_CLIP_PLANES);
+// sceGuSwapBuffers alternates the draw target between the two colour
+// buffers; the pause backdrop needs the one currently being rendered.
+bool g_drawingSecondBuffer = false;
+
+// Only the list-memory native path submits PspPackedVertex. Elsewhere the
+// float stream is the one the GE (or the CPU staging copy) consumes.
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
+constexpr bool kPackedStreamConsumed = true;
+#else
+constexpr bool kPackedStreamConsumed = false;
+#endif
 
 #if defined(PSP_GU_DIAGNOSTIC)
 #define PSP_GU_DIAG(...) Log::Get().LogMessage(__VA_ARGS__)
@@ -310,6 +352,7 @@ static bool LoadGumMatrix(int mode, const Mat4& source) {
     }
     uploaded[mode] = source;
     generations[mode] = g_matrixGeneration;
+    ++g_gumMatrixSerial;
     PspPerf::CountRenderer(PspPerf::RendererCounter::MatrixUploads);
     ScePspFMatrix4 matrix;
     std::memcpy(&matrix, source.Data(), sizeof(matrix));
@@ -420,8 +463,28 @@ pspPrimBuffer::~pspPrimBuffer() {
     }
 }
 
+void pspPrimBuffer::RefreshFloatVertices() {
+    if (!floatStale) return;
+    // Only reached on the list-memory path, where the compact stream holds
+    // validated integral UVs; the round trip to float is exact.
+    const std::size_t count = std::min(vertices.size(), packedVertices.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const PspPackedVertex& source = packedVertices[i];
+        vertices[i] = {static_cast<float>(source.u), static_cast<float>(source.v),
+                       source.color, source.x, source.y, source.z};
+    }
+    floatStale = false;
+    // Staged submissions copy from the cached CPU view; only a direct indexed
+    // submission lets the GE read this persistent array.
+    if (!UsesStagedIndexedVertices()) {
+        WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    }
+}
+
 void pspPrimBuffer::RebuildPackedVertices() {
     packedVerticesValid = false;
+    baseColoursValid = false;
+    colourPatchActive = false;
     if (vertices.empty()
         || (vertexFormat & (PDDI_V_UV | PDDI_V_TEXINFO)) != (PDDI_V_UV | PDDI_V_TEXINFO)) {
         return;
@@ -501,27 +564,60 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
     const bool sourceWillBeStaged = UsesStagedIndexedVertices();
     PrepareForMutation();
     const float* source = static_cast<const float*>(data);
-    bool packedUvValid = packedVerticesValid;
+    if (materialRawBits.size() != count) {
+        materialRawBits.assign(count, 0u);
+        materialRawBitsValid = false;
+    }
+    const bool reuseMaterialKeys = materialRawBitsValid;
+    // List-memory builds submit page geometry through the compact stream
+    // only. With integral UVs, write just that stream and rebuild the float
+    // copy on demand (vramHandle == 0 draws). Other builds never read the
+    // compact stream, so stop maintaining it here.
+    const bool packedOnly = kPackedStreamConsumed && uvIsIntegral && packedVerticesValid;
+    bool packedUvValid = kPackedStreamConsumed && packedVerticesValid;
     for (u32 i = 0; i < count; ++i) {
         const float* input = source + static_cast<std::size_t>(i) * 10u;
+        // Suit animation rewrites few material lanes; skip the finite/range
+        // validation and key packing when the raw bits are unchanged.
+        u32 tpageBits = 0;
+        u32 cbaBits = 0;
+        std::memcpy(&tpageBits, input + 8, sizeof(tpageBits));
+        std::memcpy(&cbaBits, input + 9, sizeof(cbaBits));
+        const u64 rawMaterial = (static_cast<u64>(tpageBits) << 32) | cbaBits;
+        if (!reuseMaterialKeys || materialRawBits[i] != rawMaterial) {
+            materialRawBits[i] = rawMaterial;
+            const float tpage = input[8];
+            const float cba = input[9];
+            const bool materialIsValid = std::isfinite(tpage) && tpage >= 0.0f
+                && tpage <= 65535.0f && std::isfinite(cba) && cba >= 0.0f
+                && cba <= 65535.0f;
+            materialValid[i] = materialIsValid ? 1u : 0u;
+            materialKeys[i] = materialIsValid
+                ? (static_cast<u32>(static_cast<s32>(tpage)) << 16)
+                    | static_cast<u32>(static_cast<s32>(cba))
+                : 0u;
+        }
+
+        const u32 color = MakeGeometryColor(input[3], input[4], input[5]);
+        if (packedOnly) {
+            // Same values as the generic path below; see uvIsIntegral.
+            PspPackedVertex& packed = packedVertices[i];
+            packed.u = static_cast<s16>(input[6]);
+            packed.v = static_cast<s16>(input[7]);
+            packed.color = color;
+            packed.x = input[0];
+            packed.y = input[1];
+            packed.z = input[2];
+            continue;
+        }
+
         PspVertex& target = vertices[i];
         target.x = input[0];
         target.y = input[1];
         target.z = input[2];
-        target.color = MakeGeometryColor(input[3], input[4], input[5]);
+        target.color = color;
         target.u = input[6];
         target.v = input[7];
-        const float tpage = input[8];
-        const float cba = input[9];
-
-        const bool materialIsValid = std::isfinite(tpage) && tpage >= 0.0f
-            && tpage <= 65535.0f && std::isfinite(cba) && cba >= 0.0f
-            && cba <= 65535.0f;
-        materialValid[i] = materialIsValid ? 1u : 0u;
-        materialKeys[i] = materialIsValid
-            ? (static_cast<u32>(static_cast<s32>(tpage)) << 16)
-                | static_cast<u32>(static_cast<s32>(cba))
-            : 0u;
 
         if (!packedUvValid) continue;
         s16 u = 0;
@@ -550,9 +646,16 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
         packed.y = target.y;
         packed.z = target.z;
     }
-    packedVerticesValid = packedUvValid;
+    materialRawBitsValid = true;
+    packedVerticesValid = packedOnly || packedUvValid;
+    floatStale = packedOnly;
+    // Colours were rewritten: a pending colour patch no longer applies.
+    baseColoursValid = false;
+    colourPatchActive = false;
     if (!sourceWillBeStaged) {
-        WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+        if (!packedOnly) {
+            WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+        }
         if (packedVerticesValid) {
             WritebackDcacheRange(packedVertices.data(),
                 sizeof(PspPackedVertex) * packedVertices.size());
@@ -582,6 +685,8 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
     vertices.resize(count);
     materialKeys.resize(count, 0u);
     materialValid.resize(count, 0u);
+    materialRawBitsValid = false;
+    floatStale = false;
     RevalidateIndices();
 #if !defined(NDEBUG)
     if (probe < 12u) LOG("[PSP Prim] vertex resized #%lu", static_cast<unsigned long>(probe));
@@ -662,6 +767,12 @@ bool pspPrimBuffer::PatchDynamicAttributes(const u8* rawData, u32 rawSize,
         preferStagedIndexedVertices = true;
     }
     PrepareForMutation();
+    // This patch updates both streams from the float one; bring it current.
+    RefreshFloatVertices();
+    if (updateColour) {
+        baseColoursValid = false;
+        colourPatchActive = false;
+    }
     for (u32 i = 0; i < count; ++i) {
         if (updateUv && uvOffsets[i] != kInvalidOffset) {
             const u32 offset = uvOffsets[i];
@@ -758,6 +869,69 @@ bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,
     auto* buffer = static_cast<pspPrimBuffer*>(base);
     buffer->PreferStagedIndexedVertices();
     return buffer->SetDynamicVertexData(data, count, uvIsIntegral);
+}
+
+bool pspPrimBuffer::PatchColours(const u32* colours, u32 count) {
+    // Nothing to restore: never patched, or an upload already replaced it.
+    if (!colours && !colourPatchActive) return true;
+    if (count == 0 || count != vertices.size()) return false;
+    // The consumed stream must be current: the compact one on list-memory
+    // builds (float rebuilt from it on demand), the float one elsewhere.
+    if (kPackedStreamConsumed ? !packedVerticesValid : floatStale) return false;
+    if (colours && !baseColoursValid) {
+        if (baseColours.capacity() < count) baseColours.reserve(count);
+        baseColours.resize(count);
+        for (u32 i = 0; i < count; ++i) {
+            baseColours[i] = kPackedStreamConsumed ? packedVertices[i].color : vertices[i].color;
+        }
+        baseColoursValid = true;
+    }
+    const u32* source = colours ? colours : baseColours.data();
+
+    // Shared props are patched, drawn and restored inside one frame. Keep the
+    // draw list-owned (as SetDynamicVertexData did) so the restore never has
+    // to fence the GE; staged draws copy from the CPU view, no write-back.
+    PreferStagedIndexedVertices();
+    PrepareForMutation();
+    if (kPackedStreamConsumed) {
+        for (u32 i = 0; i < count; ++i) packedVertices[i].color = source[i];
+        if (colours) {
+            // The float copy keeps its base colours; mark it stale while lit.
+            colourPatchStaledFloat = !floatStale;
+            floatStale = true;
+        }
+        else if (floatStale && colourPatchStaledFloat) {
+            // Not rebuilt while lit: it still holds exactly the base colours.
+            floatStale = false;
+        }
+        else if (!floatStale) {
+            // Rebuilt from the lit stream during the patch: restore it too.
+            for (u32 i = 0; i < count; ++i) vertices[i].color = source[i];
+        }
+    }
+    else {
+        for (u32 i = 0; i < count; ++i) vertices[i].color = source[i];
+        if (packedVerticesValid) {
+            for (u32 i = 0; i < count; ++i) packedVertices[i].color = source[i];
+        }
+    }
+    if (!colours) colourPatchStaledFloat = false;
+    colourPatchActive = colours != nullptr;
+    return true;
+}
+
+u32 MakePspGeometryColour(float r, float g, float b) {
+    return MakeGeometryColor(r, g, b);
+}
+
+bool PatchPspPrimBufferColours(pddiPrimBuffer* base, const u32* colours, u32 count) {
+    if (!base || !colours) return false;
+    return static_cast<pspPrimBuffer*>(base)->PatchColours(colours, count);
+}
+
+bool RestorePspPrimBufferColours(pddiPrimBuffer* base, u32 count) {
+    if (!base) return false;
+    return static_cast<pspPrimBuffer*>(base)->PatchColours(nullptr, count);
 }
 
 bool UpdatePspPrimBufferDynamic(pddiPrimBuffer* base, const u8* rawData,
@@ -924,6 +1098,7 @@ bool pspDisplay::InitDisplay(const pddiDisplayInit&) {
     // Own a bounded layout instead of the SDK's monotonic static allocator
     // (which has no capacity check/reset and returns valid offset zero).
     g_staticVram = {};
+    g_drawingSecondBuffer = false;
     const u32 edramBytes = static_cast<u32>(sceGeEdramGetSize());
     if (edramBytes < kReservedEdramBytes) return false;
     const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
@@ -997,6 +1172,7 @@ void pspDisplay::SwapBuffers() {
     g_activeContext->EndFrame();
     g_activeContext->FinishList();
     sceGuSwapBuffers();
+    g_drawingSecondBuffer = !g_drawingSecondBuffer;
 #if defined(PSP_PERF_TELEMETRY)
     const u32 vblankStart = sceKernelGetSystemTimeLow();
 #endif
@@ -1039,6 +1215,35 @@ void pspGamepad::Poll() {
         return;
     }
     connected = true;
+#if defined(PSP_AUTOPLAY)
+    // QA only: scripted input so the game can be exercised without a person.
+    // Walks left/right/up/down in 2 s blocks and presses confirm, punch, kick and
+    // jump on staggered periods, so each phase gets walking, combat and dialogue.
+    static u32 autoFrame = 0;
+    const u32 autoF = autoFrame++;
+    const u32 autoPhase = (autoF / 120u) % 4u;
+    data.Buttons = 0;
+    data.Lx = 128;
+    data.Ly = 128;
+    if (autoPhase == 0u) data.Lx = 255;
+    else if (autoPhase == 1u) data.Ly = 0;
+    else if (autoPhase == 2u) data.Lx = 0;
+    else data.Ly = 255;
+    if (autoF % 45u == 0u) data.Buttons |= PSP_CTRL_CROSS;
+    if (autoF % 37u == 10u) data.Buttons |= PSP_CTRL_SQUARE;
+    if (autoF % 53u == 20u) data.Buttons |= PSP_CTRL_TRIANGLE;
+    if (autoF % 61u == 30u) data.Buttons |= PSP_CTRL_CIRCLE;
+    // Heartbeat that does not depend on the diagnostic log: one line every 300
+    // frames in AUTOPLAY_LOG.TXT (appended), so QA can prove input is reaching the game.
+    if (autoF % 300u == 0u) {
+        if (FILE* autoLog = std::fopen("AUTOPLAY_LOG.TXT", "a")) {
+            std::fprintf(autoLog, "frame=%lu phase=%lu buttons=%08lX\n",
+                         static_cast<unsigned long>(autoF), static_cast<unsigned long>(autoPhase),
+                         static_cast<unsigned long>(data.Buttons));
+            std::fclose(autoLog);
+        }
+    }
+#endif
     buttons = data.Buttons;
 #if defined(PSP_GU_DIAGNOSTIC)
     static u32 pollProbe = 0;
@@ -1152,6 +1357,14 @@ void pspContext::BeginFrame() {
     PspPerf::BeginFrame();
     ResetGuStateCache();
     gu3DStateReady = false;
+    gu2DStateReady = false;
+    // A pause backdrop lives only while consecutive frames draw it. If the
+    // previous frame did not, release it and clear depth below.
+    if (pauseBackdropValid && !pauseBackdropUsedThisFrame) {
+        pauseBackdropValid = false;
+        pendingDepthClear = true;
+    }
+    pauseBackdropUsedThisFrame = false;
     // A new direct list starts with a conservative texture key.  Keep the
     // key alive across 3D primitive buffers within this frame; Setup3DState
     // does not modify the texture registers, and invalidating it there turns
@@ -1171,6 +1384,7 @@ void pspContext::BeginFrame() {
     sceGuStart(GU_DIRECT, g_displayListStorage.words);
     listOpen = true;
     Setup3DState();
+    if (pendingDepthClear) ClearDepthNow();
 }
 
 void pspContext::EndFrame() {
@@ -1386,6 +1600,16 @@ void pspContext::Setup2DState() {
     EnsureListSpace();
     gu3DStateReady = false;
     pageBindingValid = false;
+    // Consecutive overlay batches: skip the ~15 state calls and GUM ortho
+    // rebuild while the cached GU state proves nothing changed them (a 3D
+    // setter, BindPage or matrix load since the last full setup).
+    if (kCacheGuState && gu2DStateReady && gu2DMatrixSerial == g_gumMatrixSerial
+        && (g_guCapabilityValid & k2DDisabledCapabilities) == k2DDisabledCapabilities
+        && (g_guCapabilityEnabled & k2DDisabledCapabilities) == 0u
+        && g_guDepthMaskGeneration == g_guStateGeneration
+        && g_guDepthMaskValue == GU_TRUE) {
+        return;
+    }
     ++g_matrixGeneration; // These direct GUM writes replace all 3D matrices.
     GuDisable(GU_DEPTH_TEST);
     GuDisable(GU_CULL_FACE);
@@ -1403,6 +1627,8 @@ void pspContext::Setup2DState() {
     sceGumLoadIdentity();
     sceGumMatrixMode(GU_MODEL);
     sceGumLoadIdentity();
+    gu2DStateReady = true;
+    gu2DMatrixSerial = g_gumMatrixSerial;
 }
 
 void pspContext::Clear(int flags) {
@@ -1413,8 +1639,119 @@ void pspContext::Clear(int flags) {
     sceGuClearDepth(0);
     int clearFlags = 0;
     if (flags & PDDI_BUFFER_COLOUR) clearFlags |= GU_COLOR_BUFFER_BIT;
-    if (flags & PDDI_BUFFER_DEPTH) clearFlags |= GU_DEPTH_BUFFER_BIT;
+    // The depth buffer holds the pause backdrop; menu frames are 2D only.
+    if ((flags & PDDI_BUFFER_DEPTH) && !pauseBackdropValid) clearFlags |= GU_DEPTH_BUFFER_BIT;
     if (clearFlags) sceGuClear(clearFlags);
+}
+
+void pspContext::ClearDepthNow() {
+    pendingDepthClear = false;
+    if (!listOpen) {
+        pendingDepthClear = true;
+        return;
+    }
+    FlushQueuedOpaqueDraws();
+    EnsureListSpace();
+    // Clear the complete surface even if a menu narrowed the scissor.
+    sceGuScissor(0, 0, kWidth, kHeight);
+    sceGuClearDepth(0);
+    sceGuClear(GU_DEPTH_BUFFER_BIT);
+    sceGuScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3]);
+}
+
+// Full-screen 1:1 copy into the current draw target in 64 px sprite strips
+// (texture-cache friendly), with blending/filtering off. Through-mode UVs are
+// texels, so TexScale/TexOffset do not apply.
+void pspContext::DrawScreenCopy(u32 sourceFormat, const void* sourceTexture) {
+    struct CopyVertex { u16 u, v; s16 x, y, z; };
+    constexpr int kStripWidth = 64;
+    constexpr int kStrips = (kWidth + kStripWidth - 1) / kStripWidth;
+    auto* strips = static_cast<CopyVertex*>(
+        AllocateListMemory(sizeof(CopyVertex) * kStrips * 2u));
+    if (!strips) return;
+    for (int strip = 0; strip < kStrips; ++strip) {
+        const int left = strip * kStripWidth;
+        const int right = std::min(left + kStripWidth, kWidth);
+        strips[strip * 2] = {static_cast<u16>(left), 0,
+                             static_cast<s16>(left), 0, 0};
+        strips[strip * 2 + 1] = {static_cast<u16>(right), static_cast<u16>(kHeight),
+                                 static_cast<s16>(right), static_cast<s16>(kHeight), 0};
+    }
+    WritebackDcacheRange(strips, sizeof(CopyVertex) * kStrips * 2u);
+    sceGuScissor(0, 0, kWidth, kHeight);
+    GuDisable(GU_BLEND);
+    GuDisable(GU_DITHER);
+    GuEnable(GU_TEXTURE_2D);
+    GuTexMode(static_cast<int>(sourceFormat), 0, 0, 0);
+    sceGuTexImage(0, kBufferWidth, kBufferWidth, kBufferWidth, sourceTexture);
+    GuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
+    GuTexFilter(GU_NEAREST, GU_NEAREST);
+    GuTexWrap(GU_CLAMP, GU_CLAMP);
+    // The source was rendered by the GE; order it before the texture fetch
+    // and drop any stale texture-cache lines.
+    sceGuTexSync();
+    sceGuTexFlush();
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
+                   kStrips * 2, nullptr, strips);
+    PspPerf::RecordDrawSubmission(static_cast<u32>(kStrips * 2));
+    sceGuScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3]);
+    // Texture/blend registers changed outside the page/3D caches.
+    SetBlend(blendMode);
+    pageBindingValid = false;
+    gu3DStateReady = false;
+}
+
+bool pspContext::CapturePauseBackdrop() {
+    if (!listOpen || !g_staticVram.initialized) return false;
+    EnsureListSpace(256u);
+    Setup2DState(); // depth test off and depth writes masked: depth is the target
+    const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
+    const auto drawOffset = reinterpret_cast<std::uintptr_t>(
+        g_drawingSecondBuffer ? g_staticVram.displayBuffer : g_staticVram.frameBuffer);
+    const auto depthOffset = reinterpret_cast<std::uintptr_t>(g_staticVram.depthBuffer);
+    // 512x272 RGB565 is exactly the 16-bit depth surface (278 KiB).
+    sceGuDrawBufferList(GU_PSM_5650, reinterpret_cast<void*>(depthOffset), kBufferWidth);
+    DrawScreenCopy(GU_PSM_8888, reinterpret_cast<const void*>(edramBase + drawOffset));
+    sceGuDrawBufferList(GU_PSM_8888, reinterpret_cast<void*>(drawOffset), kBufferWidth);
+    pauseBackdropValid = true;
+    pauseBackdropUsedThisFrame = true;
+    pendingDepthClear = false;
+    return true;
+}
+
+bool pspContext::DrawPauseBackdrop() {
+    if (!pauseBackdropValid || !listOpen) return false;
+    EnsureListSpace(256u);
+    Setup2DState();
+    const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
+    const auto depthOffset = reinterpret_cast<std::uintptr_t>(g_staticVram.depthBuffer);
+    DrawScreenCopy(GU_PSM_5650, reinterpret_cast<const void*>(edramBase + depthOffset));
+    pauseBackdropUsedThisFrame = true;
+    return true;
+}
+
+void pspContext::ReleasePauseBackdrop() {
+    if (!pauseBackdropValid) return;
+    pauseBackdropValid = false;
+    pauseBackdropUsedThisFrame = false;
+    // Restore a valid depth surface before any 3D draw of this frame.
+    ClearDepthNow();
+}
+
+bool PspCapturePauseBackdrop() {
+    return g_activeContext && g_activeContext->CapturePauseBackdrop();
+}
+
+bool PspDrawPauseBackdrop() {
+    return g_activeContext && g_activeContext->DrawPauseBackdrop();
+}
+
+void PspReleasePauseBackdrop() {
+    if (g_activeContext) g_activeContext->ReleasePauseBackdrop();
+}
+
+bool PspHasPauseBackdrop() {
+    return g_activeContext && g_activeContext->HasPauseBackdrop();
 }
 
 void pspContext::SetCullMode(pddiCullMode mode) {
@@ -1478,7 +1815,8 @@ void pspContext::SetScissor(int x, int y, int w, int h) {
     EnsureListSpace();
     const int right = std::clamp(x + w, 0, kWidth);
     const int bottom = std::clamp(y + h, 0, kHeight);
-    sceGuScissor(std::clamp(x, 0, kWidth), std::clamp(y, 0, kHeight), right, bottom);
+    scissorRect = {{std::clamp(x, 0, kWidth), std::clamp(y, 0, kHeight), right, bottom}};
+    sceGuScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3]);
 }
 
 void pspContext::ApplyShader(const pspShader* shader) {
@@ -1487,15 +1825,30 @@ void pspContext::ApplyShader(const pspShader* shader) {
 }
 
 void pspContext::SetPageTextureScale(bool packedUv) {
-    // GU 16-bit texture coordinates are normalized signed values. The PSX
-    // page path historically supplies float texels and scales them by 1/256;
-    // use the equivalent fixed-coordinate scale only while the compact UV
-    // stream is active. Include pageBindingValid because a 2D/real-texture
-    // pass may have changed GU state without changing this cache.
+    // In transform mode the GE normalizes 16-bit texture coordinates by
+    // 32768 (0x8000 == 1.0). The PSX page path historically supplies float
+    // texels and scales them by 1/256; use the equivalent fixed-coordinate
+    // scale only while the compact UV stream is active. It must be exactly
+    // 32768/256: 32767/256 maps every integer texel u to u * 32767/32768,
+    // just below u, so a triangle whose corners share one texel (PSX colour
+    // swatches, e.g. the player's arms) samples the texel above/left. Include
+    // pageBindingValid because a 2D/real-texture pass may have changed GU
+    // state without changing this cache.
+    //
+    // Half-texel offset: the PSX truncates an integral UV to that texel, but
+    // the GE's perspective-corrected nearest lookup lands a constant integral
+    // UV a hair below the texel corner on some pixels, so a swatch triangle
+    // (all three corners on one texel, e.g. the player's sleeves at (112,32))
+    // speckles with the texel above/left (hair). Sampling the texel centre
+    // keeps the same nearest texel for every integral UV. Offset is in
+    // normalized units (applied after TexScale); through-mode 2D ignores it,
+    // and pspTexture::Bind resets it to zero for real textures. GuTexOffset is
+    // state-cached, so issuing it ahead of the scale cache test is cheap.
+    GuTexOffset(0.5f / 256.0f, 0.5f / 256.0f);
     if (pageTexScaleValid && pageBindingValid && pageTexScalePacked == packedUv) {
         return;
     }
-    const float scale = packedUv ? (32767.0f / 256.0f) : (1.0f / 256.0f);
+    const float scale = packedUv ? (32768.0f / 256.0f) : (1.0f / 256.0f);
     GuTexScale(scale, scale);
     pageTexScaleValid = true;
     pageTexScalePacked = packedUv;
@@ -2168,30 +2521,45 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
         if (!reuseClut) {
             const u16* paletteSource = image->pixels
                 + (clutY % static_cast<u32>(image->height)) * image->width;
-            u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
-            PspPerf::CountRenderer(PspPerf::RendererCounter::PaletteEntries, paletteSize);
-#if defined(PSP_PALETTE_REFERENCE)
-            for (u32 i = 0; i < paletteSize; ++i) {
-                const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
-                palette[i] = ConvertPsxTexelToGu5551(word,
-                    wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
-            }
-#else
-            // Advance along the source row instead of dividing once per color.
+            // Gather the raw row once. Unlike the CBA key above, its contents
+            // decide whether the GE already holds the same converted palette.
             // Keep row wrapping for nonstandard widths and right-edge CLUTs.
             u32 sourceX = clutX % static_cast<u32>(image->width);
             for (u32 i = 0; i < paletteSize; ++i) {
-                const u16 word = paletteSource[sourceX];
-                palette[i] = ConvertPsxTexelToGu5551(word,
-                    wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+                g_clutRawScratch[i] = paletteSource[sourceX];
                 if (++sourceX == static_cast<u32>(image->width)) sourceX = 0;
             }
+            const bool sameGeContent = g_clutGeContentValid
+                && g_clutGeDepth == depth
+                && g_clutGeWordZeroKey == wordZeroKey
+                && g_clutGeBlend == blendUsesZeroKey
+                && std::memcmp(g_clutRawScratch, g_clutGeRaw,
+                               static_cast<std::size_t>(paletteSize) * sizeof(u16)) == 0;
+            if (!sameGeContent) {
+                u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
+                PspPerf::CountRenderer(PspPerf::RendererCounter::PaletteEntries, paletteSize);
+                for (u32 i = 0; i < paletteSize; ++i) {
+#if defined(PSP_PALETTE_REFERENCE)
+                    // Reference A/B: convert straight from the row, one divide per colour.
+                    const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
+#else
+                    const u16 word = g_clutRawScratch[i];
 #endif
-            WritebackDcacheRange(palette,
-                static_cast<std::size_t>(paletteSize) * sizeof(u16));
-            GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
-            sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
-            PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+                    palette[i] = ConvertPsxTexelToGu5551(word,
+                        wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+                }
+                WritebackDcacheRange(palette,
+                    static_cast<std::size_t>(paletteSize) * sizeof(u16));
+                GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
+                sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
+                PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+                std::memcpy(g_clutGeRaw, g_clutRawScratch,
+                            static_cast<std::size_t>(paletteSize) * sizeof(u16));
+                g_clutGeDepth = static_cast<u8>(depth);
+                g_clutGeWordZeroKey = wordZeroKey;
+                g_clutGeBlend = blendUsesZeroKey;
+                g_clutGeContentValid = true;
+            }
             clutBindingValid = true;
             lastClutHandle = vramHandle;
             lastClutCba = cba;
@@ -2240,6 +2608,9 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     // 333 MHz CPU while preserving the backend's ownership invariant.
     auto* buffer = static_cast<pspPrimBuffer*>(base);
     if (!listOpen || !buffer || buffer->GetIndexCount() == 0) return;
+    // 3D geometry needs the depth buffer back: drop a pause backdrop stored
+    // there (clears depth). The pause path itself only draws 2D over it.
+    if (pauseBackdropValid) ReleasePauseBackdrop();
 
     if (!replayingOpaqueQueue) {
         if (QueueOpaqueDraw(buffer, indexOffset, indexCount)) return;
@@ -2280,6 +2651,20 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     u32 end = indexCount ? start + std::min(indexCount, total - start) : total;
     if (end <= start) return;
 
+#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
+    // Restrict the compact stream to page-backed PSX geometry. Its UVs are
+    // integer texels; real-texture/glTF buffers commonly use fractional
+    // normalized coordinates and retain the float format.
+    const bool usePackedVertices = vramHandle != 0 && buffer->HasPackedVertices();
+#else
+    // The frame-arena variants do not have a packed arena yet.
+    const bool usePackedVertices = false;
+#endif
+#if defined(NDEBUG)
+    if (!usePackedVertices) buffer->RefreshFloatVertices();
+#else
+    buffer->RefreshFloatVertices(); // the colour probe below reads it
+#endif
     const PspVertex* vertices = buffer->GetVertices();
     const u16* indices = buffer->GetIndices();
     const u32 vertexCount = buffer->GetVertexCount();
@@ -2344,15 +2729,6 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
     const bool directIndexedVertices = !buffer->UsesStagedIndexedVertices()
         && blendMode != PDDI_BLEND_ALPHA
         && (reinterpret_cast<std::uintptr_t>(vertices) & 15u) == 0u;
-#if defined(PSP_ENABLE_NATIVE_INDEXED) && defined(PSP_INDEXED_LIST_MEMORY)
-    // Restrict the compact stream to page-backed PSX geometry. Its UVs are
-    // integer texels; real-texture/glTF buffers commonly use fractional
-    // normalized coordinates and retain the float format.
-    const bool usePackedVertices = vramHandle != 0 && buffer->HasPackedVertices();
-#else
-    // The frame-arena variants do not have a packed arena yet.
-    const bool usePackedVertices = false;
-#endif
 #if defined(PSP_ENABLE_NATIVE_INDEXED)
     const int nativeArrayFormat = (usePackedVertices ? GU_TEXTURE_16BIT : GU_TEXTURE_32BITF)
         | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D;
@@ -2481,6 +2857,19 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
 #endif
             }
             else {
+                // An untextured triangle (tpage < 0) starts this run. End the
+                // run at the next textured triangle; otherwise every textured
+                // face after it in the chunk is drawn untextured (hub gates:
+                // untextured edge strips precede the textured door faces).
+                for (u32 cursor = start + 3; cursor + 2 < runEnd; cursor += 3) {
+                    if (buffer->HasMaterialKey(indices[cursor])) {
+                        runEnd = cursor;
+                        break;
+                    }
+                }
+                // BindPage skips an unchanged page/CLUT, which would leave
+                // texturing disabled for the next run on the previous page.
+                pageBindingValid = false;
         GuDisable(GU_TEXTURE_2D);
         GuDisable(GU_ALPHA_TEST);
             }

@@ -2,6 +2,15 @@
 #include "psp/psp_perf.h"
 #if defined(RC_PLATFORM_PSP)
 #include "psp/psp_packet_lookup.h"
+#include "psp/psp_skin_view_cull.h"
+#include "psp/psp_vfpu_skin.h"
+#include "pddi/psp/psprender.h"
+// VFPU skinning/lighting (psp/psp_vfpu_skin.h). The transform-cache
+// experiment owns the scalar loop, so it keeps the scalar path.
+#if defined(PSP_VFPU_SKIN_KERNELS) && !defined(PSP_DISABLE_VFPU_SKIN) \
+    && !defined(PSP_SKIN_TRANSFORM_CACHE)
+#define RC_PSP_VFPU_SKIN 1
+#endif
 #endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_SKIN_TRANSFORM_CACHE)
 #include "psp/psp_skin_transform_cache.h"
@@ -32,17 +41,20 @@
 #if REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
 #endif
+#include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <new>
 #include <vector>
 
 #include "extra/shadowcsm.h"
 
 namespace {
 
-template <typename T>
-void ResizeRetainedScratch(std::vector<T>& buffer, std::size_t count) {
+template <typename T, typename Alloc>
+void ResizeRetainedScratch(std::vector<T, Alloc>& buffer, std::size_t count) {
     if (buffer.capacity() < count) {
         buffer.reserve(count);
     }
@@ -62,16 +74,341 @@ struct PspModelFrameScratch {
 #if defined(PSP_SKIN_TRANSFORM_CACHE)
     PspSkinTransformCache transforms;
 #endif
-    std::vector<Mat4> jointMatrices;
+    // 16-byte aligned so the VFPU kernels can lv.q a joint matrix directly.
+    std::vector<Mat4, PspVfpuSkin::Align16Allocator<Mat4>> jointMatrices;
     std::vector<Mat4> attackJointMatrices;
     std::vector<Mat4> partJointMatrices;
     std::vector<u16> litScratch;
     std::vector<u8> litWritten;
     std::vector<f32> skinVertexData;
     std::vector<GeoRenderVertex> litGeoVertices;
+    std::vector<u32> litGeoColours;
 };
 
 PspModelFrameScratch g_pspModelFrameScratch;
+
+// Whole-character view rejection (see psp/psp_skin_view_cull.h). The joint
+// radii are derived once from the immutable load-time skin vertices; a
+// failed build (bad joint index, non-finite data, no memory) never culls.
+bool PspSkinOutsideView(SkinData* skin, const Mat4* jointMatrices, u32 jointCount,
+                        const Mat4& modelWorld) {
+#if defined(PSP_DISABLE_SKIN_VIEW_CULL)
+    (void)skin;
+    (void)jointMatrices;
+    (void)jointCount;
+    (void)modelWorld;
+    return false;
+#else
+    if (!p3d::context || !skin || !skin->verts) {
+        return false;
+    }
+    if (!skin->pspJointRadiusBuilt) {
+        skin->pspJointRadiusBuilt = true;
+        const u32 slots = PspSkinViewCull::JointSlotCount(skin->verts, skin->numVerts);
+        f32* radii = slots ? new (std::nothrow) f32[slots] : nullptr;
+        if (radii && PspSkinViewCull::FillJointRadii(skin->verts, skin->numVerts, radii, slots)) {
+            skin->pspJointRadius = radii;
+            skin->pspJointRadiusCount = slots;
+        }
+        else {
+            delete[] radii;
+        }
+    }
+    if (!skin->pspJointRadius) {
+        return false;
+    }
+    const Mat4 clip = p3d::context->GetProjectionMatrix()
+        * p3d::context->GetViewMatrix() * modelWorld;
+    return PspSkinViewCull::OutsideView(clip, skin->pspJointRadius,
+                                        skin->pspJointRadiusCount,
+                                        jointMatrices, jointCount);
+#endif
+}
+
+// Inputs of the per-vertex skinning loop; all immutable while it runs.
+struct PspSkinLoop {
+    const SkinVertex* verts;
+    const Mat4* joints;
+    const u16* lit;
+    const u8* litMask;
+    u32 litLimit;
+};
+
+// Scalar loop: the fallback and the self-test reference. Same arithmetic as
+// the generic loop in DrawableSTree::Display. The PSP build uses
+// -fno-strict-aliasing, so every float store there forced the compiler to
+// reload vertData/skin/scratch pointers and float constants per lane; hoist
+// them into restrict locals instead. `outData` is vertex `begin`'s output.
+void PspSkinVerticesScalar(const PspSkinLoop& loop, u32 begin, u32 end, f32* outData) {
+    const SkinVertex* __restrict skinVerts = loop.verts;
+    const Mat4* __restrict joints = loop.joints;
+    f32* __restrict out = outData;
+    const u16* __restrict lit = loop.lit;
+    const u8* __restrict litMask = loop.litMask;
+    const u32 litLimit = loop.litLimit;
+    for (u32 i = begin; i < end; i++, out += 10) {
+        const SkinVertex& sv = skinVerts[i];
+        f32 wx, wy, wz;
+#if defined(PSP_SKIN_TRANSFORM_CACHE)
+        g_pspModelFrameScratch.transforms.Transform(
+            sv.sourceIndex, sv.jointIdx, joints[sv.jointIdx],
+            sv.lx, sv.ly, sv.lz, wx, wy, wz);
+#else
+        Mat4TransformPoint(joints[sv.jointIdx], sv.lx, sv.ly, sv.lz, wx, wy, wz);
+#endif
+        f32 litR = sv.r;
+        f32 litG = sv.g;
+        f32 litB = sv.b;
+        const u32 sourceIndex = static_cast<u32>(sv.sourceIndex);
+        if (sourceIndex < litLimit && litMask[sourceIndex] != 0u) {
+            const u16 rg = lit[sourceIndex * 2u + 0u];
+            const u16 b = lit[sourceIndex * 2u + 1u];
+            const u32 lightR = static_cast<u32>(rg & 0xFFu);
+            const u32 lightG = static_cast<u32>((rg >> 8) & 0xFFu);
+            const u32 lightB = static_cast<u32>(b & 0xFFu);
+
+            u32 baseR = static_cast<u32>(sv.r * 128.0f + 0.5f);
+            u32 baseG = static_cast<u32>(sv.g * 128.0f + 0.5f);
+            u32 baseB = static_cast<u32>(sv.b * 128.0f + 0.5f);
+            if (baseR > 255u) baseR = 255u;
+            if (baseG > 255u) baseG = 255u;
+            if (baseB > 255u) baseB = 255u;
+
+            u32 modR = (baseR * lightR + 64u) >> 7;
+            u32 modG = (baseG * lightG + 64u) >> 7;
+            u32 modB = (baseB * lightB + 64u) >> 7;
+            if (modR > 255u) modR = 255u;
+            if (modG > 255u) modG = 255u;
+            if (modB > 255u) modB = 255u;
+
+            litR = static_cast<f32>(modR) / 128.0f;
+            litG = static_cast<f32>(modG) / 128.0f;
+            litB = static_cast<f32>(modB) / 128.0f;
+        }
+
+        out[0] = wx;
+        out[1] = wy;
+        out[2] = wz;
+        out[3] = litR;
+        out[4] = litG;
+        out[5] = litB;
+        out[6] = sv.u;
+        out[7] = sv.v;
+        out[8] = sv.tpage;
+        out[9] = sv.cba;
+    }
+}
+
+#if defined(RC_PSP_VFPU_SKIN)
+static_assert(sizeof(SkinVertex) == PspVfpuSkin::kVertexStrideBytes
+              && offsetof(SkinVertex, lx) == 0 && offsetof(SkinVertex, lz) == 8
+              && offsetof(SkinVertex, r) == PspVfpuSkin::kVertexColourOffset
+              && offsetof(SkinVertex, b) == PspVfpuSkin::kVertexColourOffset + 8
+              && offsetof(SkinVertex, u) == PspVfpuSkin::kVertexAttribOffset
+              && offsetof(SkinVertex, cba) == PspVfpuSkin::kVertexAttribOffset + 12,
+              "VFPU skin kernels read SkinVertex fields by byte offset");
+
+// Untested until the first lit character draw compares both paths.
+enum class PspVfpuSkinMode : u8 { Untested, Enabled, Disabled };
+PspVfpuSkinMode g_pspVfpuSkinMode = PspVfpuSkinMode::Untested;
+
+} // namespace
+
+// Self-test outcome, RAM only (release builds do not log): read the symbol
+// with the PSPLink debugger. magic == 'VFPU' once the test has run.
+struct PspVfpuSkinSelfTestRecord {
+    u32 magic;
+    u32 passed;
+    u32 vertices;
+    u32 litSources;
+    u32 byteColours;
+    u32 maxPositionDiffMicro;
+    u32 positionFailures;
+    u32 colourDiff;   // 1/128 colour units
+    u32 lightDiff;    // lit scratch channel units
+    u32 attribMismatches;
+};
+extern "C" {
+PspVfpuSkinSelfTestRecord g_pspVfpuSkinSelfTestRecord = {};
+}
+
+namespace {
+
+bool PspSkinColoursAreBytes(SkinData* skin) {
+    if (!skin->pspColourBytesBuilt) {
+        skin->pspColourBytesBuilt = true;
+        bool bytes = true;
+        for (u32 i = 0; i < skin->numVerts && bytes; i++) {
+            const SkinVertex& sv = skin->verts[i];
+            bytes = PspVfpuSkin::IsColourByte(sv.r) && PspVfpuSkin::IsColourByte(sv.g)
+                && PspVfpuSkin::IsColourByte(sv.b);
+        }
+        skin->pspColourBytes = bytes;
+    }
+    return skin->pspColourBytes;
+}
+
+// VFPU equivalent of PspSkinVerticesScalar. Positions differ from the FPU
+// sum by at most a few ulps; colours and attributes are bit-identical.
+template <bool ByteColours>
+void PspSkinVerticesVfpu(const PspSkinLoop& loop, u32 begin, u32 end, f32* out) {
+    const SkinVertex* sv = loop.verts + begin;
+    const Mat4* joints = loop.joints;
+    const u16* lit = loop.lit;
+    const u8* litMask = loop.litMask;
+    const u32 litLimit = loop.litLimit;
+    PspVfpuSkin::BeginVertices();
+    u32 loadedJoint = 0xFFFFFFFFu;
+    for (u32 i = begin; i < end; i++, sv++, out += 10) {
+        const u32 joint = sv->jointIdx;
+        if (joint != loadedJoint) {
+            loadedJoint = joint;
+            PspVfpuSkin::LoadJoint(&joints[joint]);
+        }
+        const u32 sourceIndex = static_cast<u32>(sv->sourceIndex);
+        if (sourceIndex < litLimit && litMask[sourceIndex] != 0u) {
+            const u32 rg = lit[sourceIndex * 2u + 0u];
+            const u32 b = lit[sourceIndex * 2u + 1u];
+            if (ByteColours) {
+                PspVfpuSkin::SkinLitByteVertex(sv, out, rg & 0xFFu, (rg >> 8) & 0xFFu, b & 0xFFu);
+            }
+            else {
+                PspVfpuSkin::SkinLitVertex(sv, out, rg & 0xFFu, (rg >> 8) & 0xFFu, b & 0xFFu);
+            }
+        }
+        else {
+            PspVfpuSkin::SkinUnlitVertex(sv, out);
+        }
+    }
+}
+
+// VFPU equivalent of the RP_XformVertsLitCBF_CL joint loop in Display: same
+// joint range clamping, same lighting matrices, bit-identical lit scratch.
+// Returns the last joint the callback would have been called for, or -1.
+// Kept out of line: inside Display the light state would not fit in registers.
+__attribute__((noinline))
+s32 PspLightJointsVfpu(const OriginalSTree* renderSource, const STreeData* skel,
+                       const Mat4* joints, const Mat4& lightingWorld, u32 sourceVertCount,
+                       u16* scratch, u8* written) {
+    PspPerf::ScopeTimer lightTimer(PspPerf::RendererCounter::SkinLightUs);
+    const HardwareLight* const lights[3] = {
+        GetCurrentPortHardwareLight(0),
+        GetCurrentPortHardwareLight(1),
+        GetCurrentPortHardwareLight(2),
+    };
+    const PspVfpuSkin::LightState state =
+        PspVfpuSkin::MakeLightState(GetCurrentPortAmbientLightColour(), lights);
+    const u8* vertexList = renderSource->primGeom->GetVertexList();
+    s32 lastJoint = -1;
+    for (u32 jointIndex = 0; jointIndex < skel->numJoints; jointIndex++) {
+        const STreeJoint& joint = skel->joints[jointIndex];
+        if (joint.primGeomCount == 0) {
+            continue;
+        }
+        const u32 startIndex = static_cast<u32>(joint.primGeomStartIdx);
+        const u32 endIndex = startIndex + static_cast<u32>(joint.primGeomCount);
+        if (startIndex >= sourceVertCount) {
+            continue;
+        }
+        const u32 clampedEnd = (endIndex > sourceVertCount) ? sourceVertCount : endIndex;
+        if (clampedEnd <= startIndex) {
+            continue;
+        }
+        std::memset(written + startIndex, 1, clampedEnd - startIndex);
+        lastJoint = static_cast<s32>(jointIndex);
+        if (!vertexList) {
+            continue;  // The callback writes nothing without a vertex list.
+        }
+        const Mat4 lightingMatrix = lightingWorld * joints[jointIndex];
+        PspVfpuSkin::LightRange(state, lightingMatrix, vertexList, startIndex, clampedEnd, scratch);
+        PspPerf::CountRenderer(PspPerf::RendererCounter::LightEvaluations, clampedEnd - startIndex);
+    }
+    return lastJoint;
+}
+
+// One-time comparison of the VFPU kernels with the scalar path on a real
+// character. Any contract violation keeps the scalar path for the session.
+struct PspVfpuSkinSelfTest {
+    bool lightCompared = false;
+    u32 litVertices = 0;
+    u32 lightDiff = 0;       // max |channel| difference of the lit scratch
+    u32 colourDiff = 0;      // max output colour difference, in 1/128 units
+    u32 attribMismatches = 0;
+    u32 positionFailures = 0;
+    f32 maxPositionDiff = 0.0f;
+    u32 vertices = 0;
+
+    void CompareLight(const u16* expected, const u16* actual, const u8* written, u32 count) {
+        lightCompared = true;
+        for (u32 v = 0; v < count; v++) {
+            if (!written[v]) {
+                continue;
+            }
+            litVertices++;
+            const u32 e = expected[v * 2u] | (static_cast<u32>(expected[v * 2u + 1u]) << 16);
+            const u32 a = actual[v * 2u] | (static_cast<u32>(actual[v * 2u + 1u]) << 16);
+            for (u32 shift = 0; shift < 24; shift += 8) {
+                const s32 d = static_cast<s32>((e >> shift) & 0xFFu) - static_cast<s32>((a >> shift) & 0xFFu);
+                const u32 magnitude = static_cast<u32>(d < 0 ? -d : d);
+                lightDiff = magnitude > lightDiff ? magnitude : lightDiff;
+            }
+        }
+    }
+
+    void CompareVertices(const PspSkinLoop& loop, u32 begin, const f32* expected,
+                         const f32* actual, u32 count) {
+        for (u32 n = 0; n < count; n++, expected += 10, actual += 10) {
+            vertices++;
+            const SkinVertex& sv = loop.verts[begin + n];
+            const Mat4& m = loop.joints[sv.jointIdx];
+            for (u32 axis = 0; axis < 3; axis++) {
+                if (!std::isfinite(expected[axis])) {
+                    continue;  // Degenerate joint: nothing meaningful to compare.
+                }
+                // Allow a few ulps of the summed term magnitudes (vhtfm4 dot).
+                const f32 scale = std::fabs(m.m[axis] * sv.lx) + std::fabs(m.m[4 + axis] * sv.ly)
+                    + std::fabs(m.m[8 + axis] * sv.lz) + std::fabs(m.m[12 + axis]);
+                const f32 diff = std::fabs(expected[axis] - actual[axis]);
+                if (!(diff <= 1.0e-3f + 4.0e-6f * scale)) {
+                    positionFailures++;
+                }
+                if (diff > maxPositionDiff || diff != diff) {
+                    maxPositionDiff = diff;
+                }
+            }
+            for (u32 c = 3; c < 6; c++) {
+                const f32 d = std::fabs(expected[c] - actual[c]) * 128.0f;
+                const u32 units = (d == d && d < 65536.0f) ? static_cast<u32>(d + 0.5f) : 65535u;
+                colourDiff = units > colourDiff ? units : colourDiff;
+            }
+            if (std::memcmp(expected + 6, actual + 6, 4 * sizeof(f32)) != 0) {
+                attribMismatches++;
+            }
+        }
+    }
+
+    // The scalar outputs are the ones drawn this frame either way.
+    bool Passed() const {
+        return vertices > 0 && (!lightCompared || litVertices > 0) && lightDiff <= 1u
+            && colourDiff <= 1u && attribMismatches == 0 && positionFailures == 0;
+    }
+};
+
+// Runs the VFPU vertex kernels in fixed-size chunks against the scalar output.
+void PspVfpuSkinSelfTestVertices(PspVfpuSkinSelfTest& test, const PspSkinLoop& loop,
+                                 u32 vertCount, const f32* scalarOut, bool byteColours) {
+    static f32 chunk[64 * 10];
+    for (u32 begin = 0; begin < vertCount; begin += 64u) {
+        const u32 end = (vertCount - begin > 64u) ? begin + 64u : vertCount;
+        PspSkinVerticesVfpu<false>(loop, begin, end, chunk);
+        test.CompareVertices(loop, begin, scalarOut + begin * 10u, chunk, end - begin);
+        if (byteColours) {
+            PspSkinVerticesVfpu<true>(loop, begin, end, chunk);
+            test.CompareVertices(loop, begin, scalarOut + begin * 10u, chunk, end - begin);
+        }
+    }
+}
+#endif // RC_PSP_VFPU_SKIN
 
 } // namespace
 #endif
@@ -800,15 +1137,12 @@ static const Mat4* FindJointWorldMatrixByHash(const STreeData* skeleton,
     return nullptr;
 }
 
-static bool BuildLitGeoVerts(OriginalGeo* geo, std::vector<GeoRenderVertex>& outVerts) {
-    if (!geo || !geo->dynamicVerts || geo->dynamicVertCount == 0 || !geo->dynamicVertSourceIndex
-        || !geo->primGeom || !geo->primGeom->GetVertexList()) {
-        return false;
-    }
+static bool CanLightGeo(const OriginalGeo* geo) {
+    return geo && geo->dynamicVerts && geo->dynamicVertCount != 0 && geo->dynamicVertSourceIndex
+        && geo->primGeom && geo->primGeom->GetVertexList();
+}
 
-    const u8* sourceVerts = geo->primGeom->GetVertexList();
-    outVerts.assign(geo->dynamicVerts, geo->dynamicVerts + geo->dynamicVertCount);
-
+static Mat4 GetGeoLightingWorld() {
     const Mat4 world = p3d::context ? p3d::context->GetWorldMatrix() : Mat4();
     Mat4 lightingWorld = world;
     const f32 basisXLen = std::sqrt(
@@ -828,39 +1162,81 @@ static bool BuildLitGeoVerts(OriginalGeo* geo, std::vector<GeoRenderVertex>& out
         lightingWorld.m[9] *= invScale;
         lightingWorld.m[10] *= invScale;
     }
+    return lightingWorld;
+}
 
+// Lights one dynamic vertex in place (r/g/b, PSX fixed point / 128). Vertices
+// without a valid source normal keep their base colour.
+static void LightGeoVertexColour(const OriginalGeo* geo, const u8* sourceVerts,
+                                 const Mat4& lightingWorld, u32 i,
+                                 f32* r, f32* g, f32* b) {
+    const u32 sourceIndex = static_cast<u32>(geo->dynamicVertSourceIndex[i]);
+    if (sourceIndex >= geo->primGeom->numVerts) {
+        return;
+    }
+
+    const u8* sourceVertex = sourceVerts + sourceIndex * 8u;
+    const u8 normalIndex = static_cast<u8>((p3dReadU32LE(sourceVertex + 4u) >> 16) & 0xFFu);
+
+    u8 litR = 0;
+    u8 litG = 0;
+    u8 litB = 0;
+    ComputePsxLitColourFromNormalIndex(normalIndex, &lightingWorld, &litR, &litG, &litB);
+    const u8 litI = static_cast<u8>((static_cast<u32>(litR)
+        + static_cast<u32>(litG)
+        + static_cast<u32>(litB)
+        + 1u) / 3u);
+
+    u32 baseR = static_cast<u32>(*r * 128.0f + 0.5f);
+    u32 baseG = static_cast<u32>(*g * 128.0f + 0.5f);
+    u32 baseB = static_cast<u32>(*b * 128.0f + 0.5f);
+    if (baseR > 255u) baseR = 255u;
+    if (baseG > 255u) baseG = 255u;
+    if (baseB > 255u) baseB = 255u;
+
+    *r = static_cast<f32>(ModulatePsxColourChannel(static_cast<u8>(baseR), litI)) / 128.0f;
+    *g = static_cast<f32>(ModulatePsxColourChannel(static_cast<u8>(baseG), litI)) / 128.0f;
+    *b = static_cast<f32>(ModulatePsxColourChannel(static_cast<u8>(baseB), litI)) / 128.0f;
+}
+
+static bool BuildLitGeoVerts(OriginalGeo* geo, std::vector<GeoRenderVertex>& outVerts) {
+    if (!CanLightGeo(geo)) {
+        return false;
+    }
+
+    const u8* sourceVerts = geo->primGeom->GetVertexList();
+    outVerts.assign(geo->dynamicVerts, geo->dynamicVerts + geo->dynamicVertCount);
+    const Mat4 lightingWorld = GetGeoLightingWorld();
     for (u32 i = 0; i < geo->dynamicVertCount; i++) {
-        const u32 sourceIndex = static_cast<u32>(geo->dynamicVertSourceIndex[i]);
-        if (sourceIndex >= geo->primGeom->numVerts) {
-            continue;
-        }
-
-        const u8* sourceVertex = sourceVerts + sourceIndex * 8u;
-        const u8 normalIndex = static_cast<u8>((p3dReadU32LE(sourceVertex + 4u) >> 16) & 0xFFu);
-
-        u8 litR = 0;
-        u8 litG = 0;
-        u8 litB = 0;
-        ComputePsxLitColourFromNormalIndex(normalIndex, &lightingWorld, &litR, &litG, &litB);
-        const u8 litI = static_cast<u8>((static_cast<u32>(litR)
-            + static_cast<u32>(litG)
-            + static_cast<u32>(litB)
-            + 1u) / 3u);
-
-        u32 baseR = static_cast<u32>(outVerts[i].r * 128.0f + 0.5f);
-        u32 baseG = static_cast<u32>(outVerts[i].g * 128.0f + 0.5f);
-        u32 baseB = static_cast<u32>(outVerts[i].b * 128.0f + 0.5f);
-        if (baseR > 255u) baseR = 255u;
-        if (baseG > 255u) baseG = 255u;
-        if (baseB > 255u) baseB = 255u;
-
-        outVerts[i].r = static_cast<f32>(ModulatePsxColourChannel(static_cast<u8>(baseR), litI)) / 128.0f;
-        outVerts[i].g = static_cast<f32>(ModulatePsxColourChannel(static_cast<u8>(baseG), litI)) / 128.0f;
-        outVerts[i].b = static_cast<f32>(ModulatePsxColourChannel(static_cast<u8>(baseB), litI)) / 128.0f;
+        LightGeoVertexColour(geo, sourceVerts, lightingWorld, i,
+                             &outVerts[i].r, &outVerts[i].g, &outVerts[i].b);
     }
 
     return true;
 }
+
+#if defined(RC_PLATFORM_PSP)
+// Same lighting as BuildLitGeoVerts, emitted directly as GU vertex colours so
+// the renderer can patch only the colour lane of the shared prop buffer.
+static bool BuildLitGeoColours(OriginalGeo* geo, std::vector<u32>& outColours) {
+    if (!CanLightGeo(geo)) {
+        return false;
+    }
+
+    const u8* sourceVerts = geo->primGeom->GetVertexList();
+    ResizeRetainedScratch(outColours, geo->dynamicVertCount);
+    const Mat4 lightingWorld = GetGeoLightingWorld();
+    for (u32 i = 0; i < geo->dynamicVertCount; i++) {
+        f32 r = geo->dynamicVerts[i].r;
+        f32 g = geo->dynamicVerts[i].g;
+        f32 b = geo->dynamicVerts[i].b;
+        LightGeoVertexColour(geo, sourceVerts, lightingWorld, i, &r, &g, &b);
+        outColours[i] = MakePspGeometryColour(r, g, b);
+    }
+
+    return true;
+}
+#endif
 
 static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     if (!geo || !geo->meshBuffer) {
@@ -903,10 +1279,18 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
 #if defined(RC_PLATFORM_PSP)
     std::vector<GeoRenderVertex>& litVerts = g_pspModelFrameScratch.litGeoVertices;
     litVerts.clear();
+    // Lighting changes only the colours of the shared prop buffer: patch that
+    // lane and restore it after the draw instead of two full re-uploads.
+    std::vector<u32>& litColours = g_pspModelFrameScratch.litGeoColours;
+    const bool pspColoursPatched = applyLighting
+        && BuildLitGeoColours(geo, litColours)
+        && PatchPspPrimBufferColours(geo->meshBuffer, litColours.data(),
+                                     geo->dynamicVertCount);
 #else
     std::vector<GeoRenderVertex> litVerts;
+    constexpr bool pspColoursPatched = false;
 #endif
-    if (applyLighting && BuildLitGeoVerts(geo, litVerts)) {
+    if (applyLighting && !pspColoursPatched && BuildLitGeoVerts(geo, litVerts)) {
 #if defined(RC_PLATFORM_PSP)
         if (!UpdatePspPrimBufferDynamicVertices(geo->meshBuffer,
                                                 litVerts.data(),
@@ -933,6 +1317,12 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         LOG("[PSP GeoDraw] after draw");
     }
 
+#if defined(RC_PLATFORM_PSP)
+    if (pspColoursPatched
+        && !RestorePspPrimBufferColours(geo->meshBuffer, geo->dynamicVertCount)) {
+        geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
+    }
+#endif
     if (!litVerts.empty()) {
         geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
     }
@@ -1167,7 +1557,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
     if (skel && skin && skin->numVerts > 0 && skel->joints && skinnedBuffer) {
         PspPerf::ScopeTimer skinTimer(PspPerf::RendererCounter::SkinPrepareUs);
 #if defined(RC_PLATFORM_PSP)
-        std::vector<Mat4>& jointMatrices = g_pspModelFrameScratch.jointMatrices;
+        auto& jointMatrices = g_pspModelFrameScratch.jointMatrices;
         ResizeRetainedScratch(jointMatrices, skel->numJoints);
         skel->ComputeWorldMatricesWithCallbacks(jointMatrices.data());
 #else
@@ -1175,6 +1565,16 @@ void DrawableSTree::Display(u32 /*flags*/) {
         skel->ComputeWorldMatricesWithCallbacks(jointMatrices);
 #endif
         const Mat4 modelWorld = p3d::context->GetWorldMatrix();
+#if defined(RC_PLATFORM_PSP)
+        // Joint callbacks above still ran (attack capture, overrides). Only
+        // the purely visual light/skin/pack/draw work is skipped, and only
+        // when no vertex can reach the screen.
+        if (PspSkinOutsideView(skin, jointMatrices.data(), skel->numJoints, modelWorld)) {
+            PspPerf::CountRenderer(PspPerf::RendererCounter::SkinViewCulls);
+            return;
+        }
+        PspPerf::CountRenderer(PspPerf::RendererCounter::SkinnedVertices, skin->numVerts);
+#endif
         Mat4 lightingWorld = modelWorld;
         {
             const f32 basisXLen = std::sqrt(
@@ -1216,6 +1616,22 @@ void DrawableSTree::Display(u32 /*flags*/) {
         u8 normalIndexMin = 255;
         u8 normalIndexMax = 0;
         bool haveNormalIndexRange = false;
+#if defined(RC_PSP_VFPU_SKIN)
+        // The first character draw with a lighting callback runs both paths
+        // and compares them; it draws the scalar results.
+        const bool vfpuSelfTest = g_pspVfpuSkinMode == PspVfpuSkinMode::Untested
+            && renderSource->xformVertsCallback && renderSource->primGeom
+            && renderSource->primGeom->numVerts > 0;
+        const bool vfpuEnabled = g_pspVfpuSkinMode == PspVfpuSkinMode::Enabled;
+#if defined(PSP_NORMAL_LIGHT_CACHE)
+        // The normal-cache experiment lives in the callback; keep measuring it.
+        const bool vfpuLight = false;
+#else
+        const bool vfpuLight = (vfpuSelfTest || vfpuEnabled)
+            && renderSource->xformVertsCallback == RP_XformVertsLitCBF_CL;
+#endif
+        PspVfpuSkinSelfTest vfpuTest;
+#endif
         if (renderSource->xformVertsCallback && renderSource->primGeom && renderSource->primGeom->numVerts > 0) {
             const u32 sourceVertCount = renderSource->primGeom->numVerts;
             const u8* sourceVertexList = renderSource->primGeom->GetVertexList();
@@ -1224,6 +1640,30 @@ void DrawableSTree::Display(u32 /*flags*/) {
             std::fill(litScratch.begin(), litScratch.end(), 0u);
             std::fill(litWritten.begin(), litWritten.end(), 0u);
 
+#if defined(RC_PSP_VFPU_SKIN)
+            std::vector<u16> vfpuTestLit;
+            if (vfpuLight) {
+                u16* target = litScratch.data();
+                if (vfpuSelfTest) {
+                    vfpuTestLit.assign(sourceVertCount * 2u, 0u);
+                    target = vfpuTestLit.data();
+                }
+                const s32 lastJoint = PspLightJointsVfpu(renderSource, skel, jointMatrices.data(),
+                                                         lightingWorld, sourceVertCount, target,
+                                                         litWritten.data());
+                if (!vfpuSelfTest && lastJoint >= 0) {
+                    // Keep the callback's side effects (lit-scratch owner used
+                    // by RP_FixUpPolysCBF_CL, light-state trace) without
+                    // lighting any vertex a second time.
+                    STreeJoint emptyJoint = skel->joints[lastJoint];
+                    emptyJoint.primGeomCount = 0;
+                    renderSource->xformVertsCallback(renderSource->primGeom, &emptyJoint,
+                                                     reinterpret_cast<u32*>(&lightingWorld),
+                                                     litScratch.data());
+                }
+            }
+            if (!vfpuLight || vfpuSelfTest) {
+#endif
             for (u32 jointIndex = 0; jointIndex < skel->numJoints; jointIndex++) {
                 STreeJoint* joint = &skel->joints[jointIndex];
                 if (joint->primGeomCount == 0) {
@@ -1264,6 +1704,13 @@ void DrawableSTree::Display(u32 /*flags*/) {
                                                  reinterpret_cast<u32*>(&lightingMatrix),
                                                  litScratch.data());
             }
+#if defined(RC_PSP_VFPU_SKIN)
+            }
+            if (vfpuLight && vfpuSelfTest) {
+                vfpuTest.CompareLight(litScratch.data(), vfpuTestLit.data(), litWritten.data(),
+                                      sourceVertCount);
+            }
+#endif
 
             hasLitScratch = true;
             for (u32 sourceIndex = 0; sourceIndex < sourceVertCount; sourceIndex++) {
@@ -1306,6 +1753,60 @@ void DrawableSTree::Display(u32 /*flags*/) {
 #else
         std::vector<f32> vertData(skin->numVerts * 10);
 #endif
+#if defined(RC_PLATFORM_PSP)
+        {
+            const PspSkinLoop loop = {
+                skin->verts,
+                jointMatrices.data(),
+                litScratch.data(),
+                litWritten.data(),
+                (hasLitScratch && renderSource->primGeom)
+                    ? static_cast<u32>(renderSource->primGeom->numVerts) : 0u,
+            };
+#if defined(RC_PSP_VFPU_SKIN)
+            if (vfpuEnabled) {
+                if (PspSkinColoursAreBytes(skin)) {
+                    PspSkinVerticesVfpu<true>(loop, 0, skin->numVerts, vertData.data());
+                }
+                else {
+                    PspSkinVerticesVfpu<false>(loop, 0, skin->numVerts, vertData.data());
+                }
+            }
+            else
+#endif
+            {
+                PspSkinVerticesScalar(loop, 0, skin->numVerts, vertData.data());
+            }
+#if defined(RC_PSP_VFPU_SKIN)
+            if (vfpuSelfTest) {
+                const bool byteColours = PspSkinColoursAreBytes(skin);
+                PspVfpuSkinSelfTestVertices(vfpuTest, loop, skin->numVerts, vertData.data(),
+                                            byteColours);
+                const bool passed = vfpuTest.Passed();
+                g_pspVfpuSkinMode = passed ? PspVfpuSkinMode::Enabled : PspVfpuSkinMode::Disabled;
+                PspVfpuSkinSelfTestRecord& record = g_pspVfpuSkinSelfTestRecord;
+                const f32 positionMicros = vfpuTest.maxPositionDiff * 1.0e6f;
+                record.passed = passed ? 1u : 0u;
+                record.vertices = vfpuTest.vertices;
+                record.litSources = vfpuTest.litVertices;
+                record.byteColours = byteColours ? 1u : 0u;
+                record.maxPositionDiffMicro = (positionMicros >= 0.0f && positionMicros < 4.0e9f)
+                    ? static_cast<u32>(positionMicros) : 0xFFFFFFFFu;
+                record.positionFailures = vfpuTest.positionFailures;
+                record.colourDiff = vfpuTest.colourDiff;
+                record.lightDiff = vfpuTest.lightDiff;
+                record.attribMismatches = vfpuTest.attribMismatches;
+                record.magic = 0x56465055u;  // "VFPU": written last
+                LOG("[PSP VFPU skin] self-test %s: verts=%u litSources=%u byteColours=%u "
+                    "maxPosDiff=%uE-6 posFailures=%u colourDiff=%u lightDiff=%u attribMismatches=%u",
+                    record.passed ? "PASS (VFPU enabled)" : "FAIL (scalar kept)",
+                    record.vertices, record.litSources, record.byteColours,
+                    record.maxPositionDiffMicro, record.positionFailures, record.colourDiff,
+                    record.lightDiff, record.attribMismatches);
+            }
+#endif
+        }
+#else
         for (u32 i = 0; i < skin->numVerts; i++) {
             const SkinVertex& sv = skin->verts[i];
             const Mat4& m = jointMatrices[sv.jointIdx];
@@ -1359,6 +1860,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
             vertData[i * 10 + 8] = sv.tpage;
             vertData[i * 10 + 9] = sv.cba;
         }
+#endif
 
         ApplyCompositeSuitFrameToVerts(renderSource ? renderSource->compositeAnim : nullptr,
                            static_cast<s32>(suitIndex),

@@ -302,7 +302,182 @@ int main() {
     require(FakeGe::clears == 0, "internal fence cleared the framebuffer");
     uint64_t signature = 0;
     for (auto value : FakeGe::drawSignatures) signature = signature * 31 + value;
+    // The cross-variant summary covers the scenes above; the focused checks
+    // below must not perturb it.
+    const int summaryDraws = FakeGe::draws, summaryCopies = FakeGe::copies;
+    const int summaryCluts = FakeGe::cluts, summarySyncs = FakeGe::syncs;
+    const size_t summaryPeak = FakeGe::peak;
+
+    // Dynamic uploads: list-memory builds write only the compact stream and
+    // rebuild the float one on demand; others keep only the float stream.
+    // Unchanged material lanes skip key conversion.
+    {
+        pspPrimBuffer lazy({PDDI_PRIM_TRIANGLES,
+            PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, 3, 3});
+        lazy.SetVertexData(dynamicA.data(), 3);
+        lazy.SetIndices(ids, 3);
+        require(lazy.HasPackedVertices() && !lazy.HasStaleFloatVertices(), "full upload state");
+        require(UpdatePspPrimBufferDynamicVertices(&lazy, dynamicB.data(), 3, true),
+            "dynamic upload rejected");
+        const u32 litB = MakeGeometryColor(1.0f, 0.5f, 1.0f);
+        if (kPackedStreamConsumed) {
+            require(lazy.HasStaleFloatVertices() && lazy.vertices[0].x == 0.0f
+                && lazy.packedVertices[0].x == 2.0f && lazy.packedVertices[1].u == 15
+                && lazy.packedVertices[0].color == litB, "compact-only dynamic upload");
+            lazy.RefreshFloatVertices();
+        }
+        else {
+            require(!lazy.HasPackedVertices() && !lazy.HasStaleFloatVertices(),
+                "unused compact stream must not be maintained");
+        }
+        require(!lazy.HasStaleFloatVertices() && lazy.vertices[0].x == 2.0f
+            && lazy.vertices[1].u == 15.0f && lazy.vertices[2].v == 16.0f
+            && lazy.vertices[0].color == litB, "float stream rebuilt exactly");
+        lazy.materialKeys[0] = 0xdeadbeefu;
+        std::array<float, 30> suit = dynamicB;
+        suit[1 * 10 + 9] = 7.0f;
+        require(UpdatePspPrimBufferDynamicVertices(&lazy, suit.data(), 3, true), "suit upload");
+        require(lazy.GetMaterialKey(0) == 0xdeadbeefu, "unchanged material lane recomputed");
+        require(lazy.GetMaterialKey(1) == ((2u << 16) | 7u), "changed material lane ignored");
+        suit[2 * 10 + 8] = -1.0f;
+        require(UpdatePspPrimBufferDynamicVertices(&lazy, suit.data(), 3, true)
+            && !lazy.HasMaterialKey(2), "invalid material lane accepted");
+        lazy.SetVertexData(dynamicA.data(), 3);
+        require(lazy.GetMaterialKey(0) == (2u << 16) && !lazy.HasStaleFloatVertices(),
+            "full upload must rebuild keys and float stream");
+    }
+
+    // Lit props patch only the colour lane, then restore the base colours.
+    {
+        pspPrimBuffer prop({PDDI_PRIM_TRIANGLES,
+            PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, 3, 3});
+        prop.SetVertexData(dynamicA.data(), 3);
+        prop.SetIndices(ids, 3);
+        const u32 base = MakePspGeometryColour(1.0f, 1.0f, 1.0f);
+        const std::array<u32, 3> lit = {0xff102030u, 0xff405060u, 0xff708090u};
+        require(RestorePspPrimBufferColours(&prop, 3), "restore without patch is a no-op");
+        require(!PatchPspPrimBufferColours(&prop, lit.data(), 2), "count mismatch accepted");
+        ctx.BeginFrame();
+        const int syncsBeforePatch = FakeGe::syncs;
+        require(PatchPspPrimBufferColours(&prop, lit.data(), 3), "colour patch rejected");
+        require(prop.UsesStagedIndexedVertices(), "patched prop must stay list-staged");
+        require(prop.packedVertices[1].color == lit[1], "compact colour not patched");
+        ctx.SetVRAMHandle(0);
+        ctx.DrawPrimBuffer(&prop); // float path while lit
+        require(prop.vertices[2].color == lit[2] && prop.vertices[2].u == 5.0f,
+            "float stream must show the lit colour with unchanged UVs");
+        require(RestorePspPrimBufferColours(&prop, 3), "colour restore failed");
+        require(FakeGe::syncs == syncsBeforePatch, "colour patch/restore fenced the GU list");
+        prop.RefreshFloatVertices();
+        for (int i = 0; i < 3; ++i) {
+            require(prop.packedVertices[i].color == base && prop.vertices[i].color == base,
+                "restore left a lit colour behind");
+        }
+        // Patch then restore without an intermediate float draw.
+        require(PatchPspPrimBufferColours(&prop, lit.data(), 3)
+            && RestorePspPrimBufferColours(&prop, 3), "second patch cycle");
+        require(!prop.HasStaleFloatVertices() && prop.vertices[0].color == base
+            && prop.packedVertices[0].color == base, "untouched float copy must stay current");
+        // An upload while lit replaces the patch: restore must not undo it.
+        require(PatchPspPrimBufferColours(&prop, lit.data(), 3), "third patch");
+        prop.SetVertexData(dynamicB.data(), 3);
+        require(RestorePspPrimBufferColours(&prop, 3)
+            && prop.vertices[0].color == MakeGeometryColor(1.0f, 0.5f, 1.0f),
+            "restore overwrote a newer upload");
+        display.SwapBuffers();
+    }
+
+    // Setup2DState skips re-emitting its state between overlay batches, but
+    // not after a 3D setter or matrix load changed it.
+    {
+        ctx.BeginFrame();
+        ctx.Setup2DState();
+        const size_t afterFirst2D = FakeGe::used;
+        ctx.Setup2DState();
+        require(FakeGe::used == afterFirst2D, "repeated 2D setup emitted GU state");
+        ctx.SetCullMode(PDDI_CULL_NORMAL);
+        const size_t afterCull = FakeGe::used;
+        ctx.Setup2DState();
+        require(FakeGe::used > afterCull
+            && (g_guCapabilityEnabled & k2DDisabledCapabilities) == 0u,
+            "2D setup must undo a 3D setter");
+        ctx.EnableZBuffer(true);
+        ctx.SetBlendMode(PDDI_BLEND_NONE);
+        ctx.Setup3DState();
+        require(FakeGe::depthMask == GU_FALSE, "3D depth writes restored");
+        ctx.Setup2DState();
+        require(FakeGe::depthMask == GU_TRUE, "2D must mask depth writes again");
+        ctx.SetCullMode(PDDI_CULL_NONE);
+        ctx.EnableZBuffer(false);
+        ctx.SetBlendMode(PDDI_BLEND_ALPHA);
+        ctx.DrawPrimBuffer(&buffer, 0, 3); // uploads the 3D matrices
+        require(ctx.gu2DMatrixSerial != g_gumMatrixSerial, "3D draw must load its matrices");
+        const u32 generationBefore2D = g_matrixGeneration;
+        ctx.Setup2DState();
+        require(ctx.gu2DMatrixSerial == g_gumMatrixSerial
+            && g_matrixGeneration != generationBefore2D,
+            "2D setup must rebuild GUM state after a 3D matrix load");
+        ctx.EnableZBuffer(true);
+        ctx.SetBlendMode(PDDI_BLEND_NONE);
+        display.SwapBuffers();
+    }
+
+    // Pause backdrop: captured once into the depth surface, redrawn alone on
+    // later frames; any 3D draw or a frame that skips it releases it.
+    {
+        const auto edram = reinterpret_cast<uintptr_t>(sceGeEdramGetAddr());
+        const auto depth = reinterpret_cast<uintptr_t>(g_staticVram.depthBuffer);
+        ctx.BeginFrame();
+        const void* drawTarget = g_drawingSecondBuffer
+            ? g_staticVram.displayBuffer : g_staticVram.frameBuffer;
+        ctx.Clear(PDDI_BUFFER_ALL);
+        require(FakeGe::clearFlags == (GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT), "normal clear");
+        require(!PspDrawPauseBackdrop(), "backdrop drawn before capture");
+        require(PspCapturePauseBackdrop() && PspHasPauseBackdrop(), "capture failed");
+        require(FakeGe::texture == reinterpret_cast<const void*>(edram
+            + reinterpret_cast<uintptr_t>(drawTarget)) && FakeGe::textureFormat == GU_PSM_8888,
+            "capture must read the frame being drawn");
+        require(FakeGe::drawBufferFormat == GU_PSM_8888 && FakeGe::drawBuffer == drawTarget
+            && FakeGe::depthMask == GU_TRUE, "capture must restore the colour target");
+        display.SwapBuffers();
+        for (int frame = 0; frame < 3; ++frame) {
+            ctx.BeginFrame();
+            require(PspHasPauseBackdrop(), "backdrop lost between pause frames");
+            const int clearsBefore = FakeGe::clears;
+            ctx.Clear(PDDI_BUFFER_ALL);
+            require(FakeGe::clears == clearsBefore + 1
+                && FakeGe::clearFlags == GU_COLOR_BUFFER_BIT, "pause frame cleared the backdrop");
+            require(PspDrawPauseBackdrop(), "backdrop draw failed");
+            require(FakeGe::texture == reinterpret_cast<const void*>(edram + depth)
+                && FakeGe::textureFormat == GU_PSM_5650 && FakeGe::lastStride == 10,
+                "backdrop must sample the 5650 depth-surface copy");
+            display.SwapBuffers();
+        }
+        // Resume: the first 3D draw gets a cleared depth buffer back.
+        ctx.BeginFrame();
+        ctx.Clear(PDDI_BUFFER_ALL);
+        ctx.DrawPrimBuffer(&buffer, 0, 3);
+        require(!PspHasPauseBackdrop() && FakeGe::clearFlags == GU_DEPTH_BUFFER_BIT,
+            "3D draw must release the backdrop and clear depth");
+        display.SwapBuffers();
+        // A frame that does not redraw it releases it at the next BeginFrame.
+        ctx.BeginFrame();
+        require(PspCapturePauseBackdrop(), "recapture failed");
+        display.SwapBuffers();
+        ctx.BeginFrame();
+        display.SwapBuffers();
+        const int clearsBefore = FakeGe::clears;
+        ctx.BeginFrame();
+        require(!PspHasPauseBackdrop() && FakeGe::clears == clearsBefore + 1
+            && FakeGe::clearFlags == GU_DEPTH_BUFFER_BIT, "stale backdrop not released");
+        ctx.Clear(PDDI_BUFFER_ALL);
+        require(FakeGe::clearFlags == (GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT),
+            "depth clear not restored after pause");
+        PspReleasePauseBackdrop(); // idempotent
+        display.SwapBuffers();
+    }
+
     std::printf("PASS: draws=%d copies=%d cluts=%d syncs=%d peak_list=%zu signature=%016llx\n",
-        FakeGe::draws, FakeGe::copies, FakeGe::cluts, FakeGe::syncs, FakeGe::peak,
+        summaryDraws, summaryCopies, summaryCluts, summarySyncs, summaryPeak,
         static_cast<unsigned long long>(signature));
 }
