@@ -244,15 +244,17 @@ u32 EncodeGuDrawArray(int prim, int vtype, int count, u32 indices, u32 vertices,
 }
 
 // sceGuDrawArray moves the GE stall address after every draw, a syscall.
-// Publish draws in groups instead: the same words without the update, and a
-// real sceGuDrawArray every kDrawsPerStallUpdate draws. sceGuGetMemory also
-// updates the stall, and sceGuFinish publishes the rest before any sync.
+// PSP_DRAWS_PER_STALL_UPDATE=N publishes draws in groups instead: the same
+// words without the update, and a real sceGuDrawArray every N draws
+// (sceGuGetMemory also updates the stall; sceGuFinish publishes the rest
+// before any sync). Research only: on the PSP-3000 benchmark, groups of 4
+// made submission ~0.8 ms/frame slower than one update per draw (the GE
+// then reads in bursts while the CPU writes the list), so the default is 1.
 // Only 32-bit targets can encode their pointers as GE addresses.
-// PSP_DRAWS_PER_STALL_UPDATE=1 restores one update per draw (A/B).
 #if defined(PSP_DRAWS_PER_STALL_UPDATE)
 constexpr u32 kDrawsPerStallUpdate = PSP_DRAWS_PER_STALL_UPDATE;
 #else
-constexpr u32 kDrawsPerStallUpdate = 4;
+constexpr u32 kDrawsPerStallUpdate = 1;
 #endif
 u32 g_drawsSinceStallUpdate = 0;
 
