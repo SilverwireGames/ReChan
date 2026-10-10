@@ -616,6 +616,39 @@ int main() {
     }
 
     {
+        // An upload identical to the one a buffer holds is a no-op (effect
+        // animations re-send unchanged frames); any other writer in between
+        // makes the same upload take effect again.
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        constexpr u32 kCount = 6;
+        std::vector<float> data(kCount * 10u);
+        for (u32 v = 0; v < kCount; ++v) {
+            float* lane = &data[v * 10u];
+            for (int c = 0; c < 3; ++c) lane[c] = static_cast<float>(v + c);
+            for (int c = 3; c < 6; ++c) lane[c] = 0.25f * static_cast<float>(c);
+            lane[6] = static_cast<float>(v * 9u);
+            lane[7] = static_cast<float>(v * 5u);
+            lane[8] = 1.0f;
+            lane[9] = static_cast<float>(v % 2u);
+        }
+        pspPrimBuffer buffer({PDDI_PRIM_TRIANGLES, kFormat, kCount, 6});
+        buffer.SetVertexData(data.data(), kCount);
+        buffer.SetVertexData(data.data(), kCount);  // second upload keeps the input
+        const u32 serial = buffer.GetContentSerial();
+        buffer.SetVertexData(data.data(), kCount);
+        require(buffer.GetContentSerial() == serial, "identical upload mutated the buffer");
+        std::vector<u32> lit(kCount, 0xFF102030u);
+        require(buffer.PatchColours(lit.data(), kCount), "colour patch refused");
+        buffer.SetVertexData(data.data(), kCount);
+        require(buffer.GetContentSerial() != serial && !buffer.HasPatchedColours(),
+            "upload after a colour patch was skipped");
+        const PspVertex expected = buffer.GetVertices()[3];
+        data[3u * 10u + 3u] = 1.5f;  // one colour changes
+        buffer.SetVertexData(data.data(), kCount);
+        require(buffer.GetVertices()[3].color != expected.color, "changed upload was skipped");
+    }
+
+    {
         // A re-sent SetVertexData builds the compact stream in its own pass
         // once the storage exists; a fresh buffer (first upload) derives it
         // with RebuildPackedVertices. Both must hold the same streams, keys and

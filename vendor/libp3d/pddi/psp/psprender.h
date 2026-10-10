@@ -73,6 +73,8 @@ public:
     ~pspPrimBuffer() override;
 
     void SetVertexData(const void* data, u32 count) override;
+    // Floats per vertex of the SetVertexData layout for this buffer's format.
+    std::size_t VertexInputStride() const;
     void SetIndices(const u16* indices, u32 count) override;
     u32 GetIndexCount() const override { return static_cast<u32>(indices.size()); }
     u32 GetVertexCount() const override { return static_cast<u32>(vertices.size()); }
@@ -232,6 +234,12 @@ private:
     bool packedLaneKeysCopied = false;
     // True when the compact stream is current and the float stream is not.
     bool floatStale = false;
+    // The last SetVertexData input, kept once a buffer is uploaded a second
+    // time (per-frame effect geometry): an identical upload is a no-op.
+    // Every other vertex/colour/material writer invalidates it.
+    std::vector<float> lastVertexInput;
+    bool lastVertexInputValid = false;
+    u32 vertexDataUploads = 0;
     // Colour patch state (PatchColours). Base colours are captured lazily on
     // the first patch after a full/dynamic upload invalidates them.
     std::vector<u32> baseColours;

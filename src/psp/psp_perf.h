@@ -52,6 +52,8 @@ enum class RendererCounter : u32 {
     // Director overlay pass (DrawDirectorOverlays): its time, the effects it
     // displayed and the effects list it walked to find them.
     DirectorOverlayUs, OverlayEffectDraws, OverlayEffectWalk,
+    // SetVertexData calls that repeated the buffer's current input.
+    VertexUploadSkips,
     Count
 };
 

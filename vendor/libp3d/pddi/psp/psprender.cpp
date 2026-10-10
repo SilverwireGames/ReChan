@@ -739,6 +739,7 @@ bool pspPrimBuffer::UpdateDynamicMaterials(const float* tpage, u32 tpageStride,
 
 bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
                                          bool uvIsIntegral) {
+    lastVertexInputValid = false;
     PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
     // Model skinning supplies the canonical position/colour/UV/tpage/CBA
     // layout.  Keep this fast path deliberately strict; unexpected formats
@@ -832,6 +833,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
 }
 
 PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count, bool exclusive) {
+    lastVertexInputValid = false;
     constexpr u32 kDynamicFormat = PDDI_V_POSITION | PDDI_V_COLOUR
         | PDDI_V_UV | PDDI_V_TEXINFO;
     // SetDynamicVertexData's compact-only path (uvIsIntegral) and nothing else.
@@ -900,9 +902,25 @@ void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
     }
 }
 
+std::size_t pspPrimBuffer::VertexInputStride() const {
+    return ((vertexFormat & PDDI_V_POSITION) ? 3u : 0u)
+        + ((vertexFormat & PDDI_V_COLOUR) ? 3u : 0u)
+        + ((vertexFormat & PDDI_V_UV) ? 2u : 0u)
+        + ((vertexFormat & PDDI_V_TEXINFO) ? 2u : 0u);
+}
+
 void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
     PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
     if (!data) return;
+    const std::size_t inputFloats = static_cast<std::size_t>(count) * VertexInputStride();
+    if (lastVertexInputValid && lastVertexInput.size() == inputFloats
+        && std::memcmp(lastVertexInput.data(), data, inputFloats * sizeof(float)) == 0) {
+        // The same input as the upload the buffer holds (effect animations
+        // re-send unchanged frames): nothing would change, and its recorded
+        // draw stays valid.
+        PspPerf::CountRenderer(PspPerf::RendererCounter::VertexUploadSkips);
+        return;
+    }
     if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
         stagedIndexedVertices = true;
         stagedIndexedSerial = g_submissionSerial;
@@ -982,6 +1000,10 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
         materialValid[i] = PackMaterialKey(tpage, cba, &materialKeys[i]) ? 1u : 0u;
     }
     WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    if (++vertexDataUploads >= 2u) {
+        lastVertexInput.assign(source, source + inputFloats);
+        lastVertexInputValid = true;
+    }
     if (packedOk) {
         const std::size_t allocatedBytes = packedVertices.capacity() * sizeof(PspPackedVertex);
         if (allocatedBytes > packedVerticesAllocatedBytes) {
@@ -1005,6 +1027,7 @@ bool pspPrimBuffer::PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                            u32 count, bool updateUv,
                                            bool updateColour,
                                            bool packedOnly) {
+    lastVertexInputValid = false;
     if (!rawData || count != vertices.size()
         || (updateUv && !uvOffsets) || (updateColour && !colourOffsets)) {
         return false;
@@ -1232,6 +1255,7 @@ bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,
 }
 
 bool pspPrimBuffer::PatchColours(const u32* colours, u32 count) {
+    lastVertexInputValid = false;
     // Nothing to restore: never patched, or an upload already replaced it.
     if (!colours && !colourPatchActive) return true;
     if (count == 0 || count != vertices.size()) return false;
