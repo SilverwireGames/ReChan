@@ -139,6 +139,13 @@ else
 CXXFLAGS += -O3 -DNDEBUG
 endif
 
+# Optional optimization override for A/B measurement on hardware, e.g.
+# PSP_OPT=-Os: appended after the mode's flags, so its -O level wins.
+PSP_OPT ?=
+ifneq ($(PSP_OPT),)
+CXXFLAGS += $(PSP_OPT)
+endif
+
 # Optional link-time optimization for A/B measurement on hardware (off by
 # default): make -C psp BUILD_MODE=release PSP_LTO=1. The link step must see
 # the same optimization level, so the mode's -O flag is forwarded to LDFLAGS.
