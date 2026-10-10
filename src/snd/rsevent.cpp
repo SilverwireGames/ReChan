@@ -13,6 +13,11 @@
 #include "gen/blockmgr.h"
 #include "ai/player.h"
 #include "p3d/fileio.h"
+#if defined(RC_PLATFORM_PSP)
+#include "psp/psp_memory.h"
+#include <pspthreadman.h>
+#include <atomic>
+#endif
 #include <cstdlib>
 #if MOD_LOADER
 #include "extra/modloader.h"
@@ -397,6 +402,69 @@ static bool SelectDialogClip(s32 character, s32 dialogID, DialogClipSelection* o
     return true;
 }
 
+#if defined(RC_PLATFORM_PSP)
+// RSDIALOG.DLG stays open between clips: reopening the 33 MB container (open,
+// then a seek to its end for the size) cost up to ~130 ms per voice in combat.
+static p3d::io::FileHandle g_dialogClipFile;
+
+// Recently played clips' ADPCM, large heap only: combat grunts repeat often.
+struct DialogClipCacheEntry {
+    u32 start = 0;
+    u32 lastUse = 0;
+    std::vector<u8> data;
+};
+static constexpr u32 kDialogClipCacheBudget = 3u * 1024u * 1024u;
+static std::vector<DialogClipCacheEntry> g_dialogClipCache;
+static u32 g_dialogClipCacheBytes = 0;
+static u32 g_dialogClipCacheClock = 0;
+
+static const std::vector<u8>* FindCachedDialogClip(u32 start, u32 size) {
+    for (DialogClipCacheEntry& entry : g_dialogClipCache) {
+        if (entry.start == start && entry.data.size() == size) {
+            entry.lastUse = ++g_dialogClipCacheClock;
+            return &entry.data;
+        }
+    }
+    return nullptr;
+}
+
+static void CacheDialogClip(u32 start, const std::vector<u8>& data) {
+    if (!PspHasLargeHeap() || data.size() > kDialogClipCacheBudget / 4u) return;
+    while (!g_dialogClipCache.empty()
+        && g_dialogClipCacheBytes + data.size() > kDialogClipCacheBudget) {
+        auto oldest = g_dialogClipCache.begin();
+        for (auto it = g_dialogClipCache.begin(); it != g_dialogClipCache.end(); ++it) {
+            if (it->lastUse < oldest->lastUse) oldest = it;
+        }
+        g_dialogClipCacheBytes -= static_cast<u32>(oldest->data.size());
+        g_dialogClipCache.erase(oldest);
+    }
+    DialogClipCacheEntry entry;
+    entry.start = start;
+    entry.lastUse = ++g_dialogClipCacheClock;
+    entry.data = data;
+    g_dialogClipCacheBytes += static_cast<u32>(entry.data.size());
+    g_dialogClipCache.push_back(std::move(entry));
+}
+
+static bool ReadDialogClip(u32 start, std::vector<u8>& out) {
+    // One retry with a fresh handle (e.g. after the Memory Stick was reset).
+    for (u32 attempt = 0; attempt < 2u; ++attempt) {
+        if (!g_dialogClipFile.IsOpen()
+            && !g_dialogClipFile.Open("SOUND/DIALOG/RSDIALOG.DLG", p3d::io::FileHandle::Mode::Read)) {
+            return false;
+        }
+        if (g_dialogClipFile.Seek(start, SEEK_SET)
+            && g_dialogClipFile.Read(out.data(), out.size()) == out.size()) {
+            return true;
+        }
+        g_dialogClipFile.Close();
+    }
+    return false;
+}
+#endif
+
+
 static AudioSample LoadDialogSampleFromSelection(s32 character, s32 dialogID,
                                                  const DialogClipSelection& selection) {
     if (selection.start >= g_dialogFileSize
@@ -425,14 +493,17 @@ static AudioSample LoadDialogSampleFromSelection(s32 character, s32 dialogID,
 
     const u32 clipSize = selection.ByteSize();
 #if defined(RC_PLATFORM_PSP)
-    std::vector<u8> clipData(clipSize);
-    p3d::io::FileHandle file;
-    if (!file.Open("SOUND/DIALOG/RSDIALOG.DLG", p3d::io::FileHandle::Mode::Read)
-        || !file.Seek(selection.start, SEEK_SET)
-        || file.Read(clipData.data(), clipData.size()) != clipData.size()) {
-        return AUDIO_SAMPLE_INVALID;
+    const std::vector<u8>* cachedClip = FindCachedDialogClip(selection.start, clipSize);
+    std::vector<u8> clipData;
+    if (!cachedClip) {
+        clipData.resize(clipSize);
+        if (!ReadDialogClip(selection.start, clipData)) {
+            return AUDIO_SAMPLE_INVALID;
+        }
+        CacheDialogClip(selection.start, clipData);
     }
-    std::vector<s16> pcm = SpuAdpcm::Decode(clipData.data(), clipSize, true);
+    std::vector<s16> pcm = SpuAdpcm::Decode(
+        cachedClip ? cachedClip->data() : clipData.data(), clipSize, true);
 #else
     const u8* clipData = &g_dialogFileData[selection.start];
     std::vector<s16> pcm = SpuAdpcm::Decode(clipData, clipSize, true);
@@ -484,10 +555,145 @@ struct DialogEntry {
     AudioSample sample;
     AudioVoice voice;
     bool valid;
+#if defined(RC_PLATFORM_PSP)
+    // Non-zero while the dialog worker is still reading this entry's clip.
+    u32 asyncSerial;
+#endif
 };
 
 static constexpr s32 DIALOG_ENTRY_COUNT = 64;
 static DialogEntry g_dialogEntries[DIALOG_ENTRY_COUNT] = {};
+
+#if defined(RC_PLATFORM_PSP)
+// Voice clips not in the cache are read and decoded by a low-priority worker
+// thread, as the PSX streamed them from CD: a seek inside the 33 MB container
+// measured 50-100 ms on the Memory Stick, a whole stall of the game thread.
+// The dialog state machine already waits for a CD completion before it plays a
+// loaded clip (CompletePendingDialogLoad), so that completion simply waits for
+// the worker. The worker never allocates: the game thread opens the file and
+// sizes both buffers before submitting a job.
+struct DialogAsyncJob {
+    u32 serial = 0;
+    s32 entryHandle = 0;
+    u32 start = 0;
+    u32 size = 0;
+    std::vector<u8> adpcm;
+    std::vector<s16> pcm;
+    u32 pcmSamples = 0;
+    bool ok = false;
+};
+static constexpr u32 kDialogJobIdle = 0;
+static constexpr u32 kDialogJobRunning = 1;
+static constexpr u32 kDialogJobDone = 2;
+static constexpr int kDialogWorkerPriority = 0x26;  // below the music worker (0x24)
+static DialogAsyncJob g_dialogJob;
+static std::atomic<u32> g_dialogJobState{kDialogJobIdle};
+static u32 g_dialogJobSerial = 0;
+static SceUID g_dialogJobSema = -1;
+static SceUID g_dialogWorkerThread = -1;
+static p3d::io::FileHandle g_dialogWorkerFile;
+
+static int DialogWorkerEntry(SceSize, void*) {
+    while (sceKernelWaitSema(g_dialogJobSema, 1, nullptr) >= 0) {
+        if (g_dialogJobState.load(std::memory_order_acquire) != kDialogJobRunning) continue;
+        DialogAsyncJob& job = g_dialogJob;
+        job.ok = false;
+        job.pcmSamples = 0;
+        if (g_dialogWorkerFile.Seek(job.start, SEEK_SET)
+            && g_dialogWorkerFile.Read(job.adpcm.data(), job.size) == job.size) {
+            // Same decode as SpuAdpcm::Decode(..., stopAtEnd = true).
+            s32 prev0 = 0;
+            s32 prev1 = 0;
+            const u32 blocks = job.size / 16u;
+            for (u32 block = 0; block < blocks; ++block) {
+                const bool ended = SpuAdpcm::DecodeBlock(job.adpcm.data() + block * 16u,
+                    job.pcm.data() + job.pcmSamples, prev0, prev1);
+                job.pcmSamples += 28u;
+                if (ended) break;
+            }
+            job.ok = job.pcmSamples != 0;
+        }
+        g_dialogJobState.store(kDialogJobDone, std::memory_order_release);
+    }
+    return sceKernelExitThread(0);
+}
+
+static bool EnsureDialogWorker() {
+    if (g_dialogWorkerThread >= 0) return true;
+    g_dialogJobSema = sceKernelCreateSema("ReChainDialogJob", 0, 0, 1, nullptr);
+    if (g_dialogJobSema < 0) return false;
+    g_dialogWorkerThread = sceKernelCreateThread("ReChainDialog", DialogWorkerEntry,
+        kDialogWorkerPriority, 0x4000, PSP_THREAD_ATTR_USER, nullptr);
+    if (g_dialogWorkerThread < 0 || sceKernelStartThread(g_dialogWorkerThread, 0, nullptr) < 0) {
+        if (g_dialogWorkerThread >= 0) sceKernelDeleteThread(g_dialogWorkerThread);
+        sceKernelDeleteSema(g_dialogJobSema);
+        g_dialogWorkerThread = -1;
+        g_dialogJobSema = -1;
+        return false;
+    }
+    return true;
+}
+
+static DialogEntry* FindDialogEntry(s32 handle);
+
+// Attaches a finished job's clip to its entry (game thread). Returns false
+// while the worker is still reading; wait = true blocks until it is done.
+static bool FinishDialogAsyncLoad(bool wait) {
+    u32 state = g_dialogJobState.load(std::memory_order_acquire);
+    if (state == kDialogJobIdle) return true;
+    while (state == kDialogJobRunning) {
+        if (!wait) return false;
+        sceKernelDelayThread(1000);
+        state = g_dialogJobState.load(std::memory_order_acquire);
+    }
+
+    DialogAsyncJob& job = g_dialogJob;
+    DialogEntry* entry = FindDialogEntry(job.entryHandle);
+    const bool entryWaiting = entry && entry->valid && entry->asyncSerial == job.serial;
+    if (job.ok) {
+        CacheDialogClip(job.start, job.adpcm);
+    }
+    else {
+        g_dialogWorkerFile.Close();  // reopened by the next submission
+    }
+    if (entryWaiting) {
+        entry->asyncSerial = 0;
+        if (job.ok) {
+            entry->sample = AudioEngine::LoadSample(job.pcm.data(), job.pcmSamples, DIALOG_RATE, 1);
+        }
+    }
+    g_dialogJobState.store(kDialogJobIdle, std::memory_order_release);
+    return true;
+}
+
+// Starts reading entry's clip in the background. False when the clip should
+// load synchronously instead (cached, or the worker/file is unavailable).
+static bool SubmitDialogAsyncLoad(DialogEntry* entry, const DialogClipSelection& selection) {
+    const u32 clipSize = selection.ByteSize();
+    if (!entry || clipSize < 16u || FindCachedDialogClip(selection.start, clipSize)) return false;
+    FinishDialogAsyncLoad(true);  // one job at a time
+    if (!EnsureDialogWorker()) return false;
+    if (!g_dialogWorkerFile.IsOpen()
+        && !g_dialogWorkerFile.Open("SOUND/DIALOG/RSDIALOG.DLG", p3d::io::FileHandle::Mode::Read)) {
+        return false;
+    }
+
+    DialogAsyncJob& job = g_dialogJob;
+    if (++g_dialogJobSerial == 0) ++g_dialogJobSerial;
+    job.serial = g_dialogJobSerial;
+    job.entryHandle = entry->handle;
+    job.start = selection.start;
+    job.size = clipSize;
+    job.adpcm.resize(clipSize);
+    job.pcm.resize(static_cast<std::size_t>(clipSize / 16u) * 28u);
+    job.pcmSamples = 0;
+    job.ok = false;
+    entry->asyncSerial = job.serial;
+    g_dialogJobState.store(kDialogJobRunning, std::memory_order_release);
+    sceKernelSignalSema(g_dialogJobSema, 1);
+    return true;
+}
+#endif
 static s32 g_nextDialogHandle = 1;
 // PSX: dword_800D8808 - default dialog handle used by jcsIsPlaying__Fv.
 static s32 g_primaryDialogHandle = 0;
@@ -1050,6 +1256,9 @@ static void ProcessDialogPlayingStates() {
 
 // PSX: DialogTask__FP6_RTASK (JCSDLG.CPP:1957, 0x80043808)
 static void ProcessDialogTask() {
+#if defined(RC_PLATFORM_PSP)
+    FinishDialogAsyncLoad(false);
+#endif
     CompletePendingDialogLoad(false);
 
     ProcessDialogLoadedStates();
@@ -1303,6 +1512,9 @@ static DialogEntry* AllocateDialogEntry() {
             g_dialogEntries[i].sample = AUDIO_SAMPLE_INVALID;
             g_dialogEntries[i].voice = AUDIO_VOICE_INVALID;
             g_dialogEntries[i].valid = true;
+#if defined(RC_PLATFORM_PSP)
+            g_dialogEntries[i].asyncSerial = 0;
+#endif
             return &g_dialogEntries[i];
         }
     }
@@ -1321,6 +1533,9 @@ static DialogEntry* AllocateDialogEntry() {
     entry->sample = AUDIO_SAMPLE_INVALID;
     entry->voice = AUDIO_VOICE_INVALID;
     entry->valid = true;
+#if defined(RC_PLATFORM_PSP)
+    entry->asyncSerial = 0;
+#endif
     return entry;
 }
 
@@ -1330,6 +1545,11 @@ static s32 PlayDialogHandle(DialogEntry* entry, const LVector* posPtr) {
         return 0;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    if (entry->asyncSerial != 0) {
+        FinishDialogAsyncLoad(true);
+    }
+#endif
     if (entry->sample == AUDIO_SAMPLE_INVALID) {
         return 0;
     }
@@ -1593,6 +1813,13 @@ static bool CompletePendingDialogLoad(bool force) {
         }
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // The clip is still being read: complete on a later task tick.
+    if (!FinishDialogAsyncLoad(force)) {
+        return false;
+    }
+#endif
+
     const u32 completedSerial = g_dialogLoadSerial;
     if (DialogTraceEnabled()) {
         LOG("[DialogTrace] CD-DONE serial=%u state=%d pendingState=%d completionState=%d force=%d",
@@ -1694,8 +1921,19 @@ static s32 StartLoadDialog(s32 existingHandle, s32 character, s32 dialogId, s32 
     entry->character = character;
     entry->dialogId = dialogId;
     entry->priority = priority;
+#if defined(RC_PLATFORM_PSP)
+    entry->asyncSerial = 0;
+    // The sample is attached when the worker finishes, before the pending
+    // CD completion below is allowed to fire.
+    const bool loadingAsync = SubmitDialogAsyncLoad(entry, loadInfo.selection);
+    if (!loadingAsync) {
+        entry->sample = LoadDialogSampleFromSelection(character, dialogId, loadInfo.selection);
+    }
+    if (!loadingAsync && entry->sample == AUDIO_SAMPLE_INVALID) {
+#else
     entry->sample = LoadDialogSampleFromSelection(character, dialogId, loadInfo.selection);
     if (entry->sample == AUDIO_SAMPLE_INVALID) {
+#endif
         ReleaseDialogEntry(entry);
         SetDlgStatus(11);
         return 0;

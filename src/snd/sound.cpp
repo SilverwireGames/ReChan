@@ -8,6 +8,7 @@
 #include <utility>
 #if defined(RC_PLATFORM_PSP)
 #include "p3d/fileio.h"
+#include "psp/psp_memory.h"
 #endif
 #if MOD_LOADER
 #include "extra/modloader.h"
@@ -102,17 +103,31 @@ void Sound::SetupSound() {
         // mixer and most effects stayed silent; samples load on first use instead.
         {
             RsdFormat::WaxIndex index = RsdFormat::ParseWaxIndex(fileData, fileSize);
-            delete[] fileData;
 
             u32 count = (u32)index.sampleDescs.size();
             if (count > MAX_SAMPLES_PER_BANK) count = MAX_SAMPLES_PER_BANK;
-            if (count == 0) continue;
+            if (count == 0) {
+                delete[] fileData;
+                continue;
+            }
 
             BankInfo& info = banks[i];
             info.numSamples = count;
             info.adpcmSpuBase = index.spuBase;
             info.adpcmFileOffset = index.adpcmFileOffset;
             info.adpcmLength = index.adpcmLength;
+            // The whole bank file was just read: keep its ADPCM (~0.1-0.2 MB,
+            // 3.9 MB for all banks) when the heap allows. A first-use effect
+            // then decodes from RAM instead of an open/seek/read on the Memory
+            // Stick, which measured 20-130 ms per effect in combat.
+            info.residentAdpcm.clear();
+            if (PspHasLargeHeap() && index.adpcmLength != 0
+                && index.adpcmFileOffset <= fileSize
+                && index.adpcmLength <= fileSize - index.adpcmFileOffset) {
+                info.residentAdpcm.assign(fileData + index.adpcmFileOffset,
+                    fileData + index.adpcmFileOffset + index.adpcmLength);
+            }
+            delete[] fileData;
             for (u32 j = 0; j < count; j++) {
                 const RsdFormat::SampleDesc& desc = index.sampleDescs[j];
                 info.samples[j] = AUDIO_SAMPLE_INVALID;
@@ -250,29 +265,54 @@ AudioSample Sound::LoadPspWaxSample(u32 bankIndex, u32 sampleIndex) {
     const u32 byteOff = spuAddr - info.adpcmSpuBase;
     if (byteOff >= info.adpcmLength) return AUDIO_SAMPLE_INVALID;
 
-    char path[32];
-    snprintf(path, sizeof(path), "SOUND/FX/RS%04X.WAX", static_cast<unsigned int>(bankIndex));
-    p3d::io::FileHandle file;
-    if (!file.Open(path, p3d::io::FileHandle::Mode::Read)) return AUDIO_SAMPLE_INVALID;
-    if (!file.Seek((int64_t)(info.adpcmFileOffset + byteOff), SEEK_SET)) return AUDIO_SAMPLE_INVALID;
-
-    // Gather whole 16-byte ADPCM blocks until (and including) the END-flagged block.
-    std::vector<u8> adpcm;
-    u8 chunk[16 * 32];
-    u32 remaining = info.adpcmLength - byteOff;
-    bool ended = false;
-    while (!ended && remaining >= 16) {
-        const u32 readBytes = std::min<u32>(remaining, sizeof(chunk)) & ~15u;
-        if (file.Read(chunk, readBytes) != readBytes) break;
-        for (u32 off = 0; off < readBytes && !ended; off += 16) {
-            adpcm.insert(adpcm.end(), chunk + off, chunk + off + 16);
-            ended = (chunk[off + 1] & 0x01) != 0;
+    // Whole 16-byte ADPCM blocks from byteOff up to (and including) the
+    // END-flagged block, or to the last whole block of the bank.
+    std::vector<s16> pcm;
+    if (info.residentAdpcm.size() == info.adpcmLength) {
+        const u8* const start = info.residentAdpcm.data() + byteOff;
+        u32 length = 0;
+        while (length + 16u <= info.adpcmLength - byteOff) {
+            const bool ended = (start[length + 1u] & 0x01) != 0;
+            length += 16u;
+            if (ended) break;
         }
-        remaining -= readBytes;
+        if (length == 0) return AUDIO_SAMPLE_INVALID;
+        pcm = SpuAdpcm::Decode(start, length, true);
     }
-    if (adpcm.empty()) return AUDIO_SAMPLE_INVALID;
+    else {
+        // Small heap (PSPLink PRX): read from the bank file, kept open across
+        // effects of the same bank, in larger reads.
+        static p3d::io::FileHandle bankFile;
+        static u32 bankFileIndex = MAX_WAX_BANKS;
+        if (bankFileIndex != bankIndex || !bankFile.IsOpen()) {
+            char path[32];
+            snprintf(path, sizeof(path), "SOUND/FX/RS%04X.WAX", static_cast<unsigned int>(bankIndex));
+            bankFile.Close();
+            bankFileIndex = MAX_WAX_BANKS;
+            if (!bankFile.Open(path, p3d::io::FileHandle::Mode::Read)) return AUDIO_SAMPLE_INVALID;
+            bankFileIndex = bankIndex;
+        }
+        if (!bankFile.Seek((int64_t)(info.adpcmFileOffset + byteOff), SEEK_SET)) {
+            bankFile.Close();
+            return AUDIO_SAMPLE_INVALID;
+        }
 
-    std::vector<s16> pcm = SpuAdpcm::Decode(adpcm.data(), (u32)adpcm.size(), true);
+        std::vector<u8> adpcm;
+        u8 chunk[16 * 128];
+        u32 remaining = info.adpcmLength - byteOff;
+        bool ended = false;
+        while (!ended && remaining >= 16) {
+            const u32 readBytes = std::min<u32>(remaining, sizeof(chunk)) & ~15u;
+            if (bankFile.Read(chunk, readBytes) != readBytes) break;
+            for (u32 off = 0; off < readBytes && !ended; off += 16) {
+                adpcm.insert(adpcm.end(), chunk + off, chunk + off + 16);
+                ended = (chunk[off + 1] & 0x01) != 0;
+            }
+            remaining -= readBytes;
+        }
+        if (adpcm.empty()) return AUDIO_SAMPLE_INVALID;
+        pcm = SpuAdpcm::Decode(adpcm.data(), (u32)adpcm.size(), true);
+    }
     if (pcm.empty()) return AUDIO_SAMPLE_INVALID;
     const u32 frames = (u32)pcm.size();
 

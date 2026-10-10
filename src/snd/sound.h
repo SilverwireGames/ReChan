@@ -3,6 +3,8 @@
 #include "gen/manager.h"
 #include "pc/audio.h"
 
+#include <vector>
+
 // WAX banks: RS0000..RS0015 = 22 banks total (hex names)
 // PSX architecture: all banks share SPU base 0x1010, 71 descriptors each.
 // Only ONE bank is active at a time, selected by sound location.
@@ -36,6 +38,9 @@ public:
         u32 adpcmSpuBase = 0;
         u32 adpcmFileOffset = 0;
         u32 adpcmLength = 0;
+        // The bank's ADPCM region, kept from the boot-time read when the large
+        // heap allows it, so playing a new effect never touches the Memory Stick.
+        std::vector<u8> residentAdpcm;
 #endif
     };
 
