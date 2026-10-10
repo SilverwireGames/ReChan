@@ -585,7 +585,12 @@ struct DialogAsyncJob {
 static constexpr u32 kDialogJobIdle = 0;
 static constexpr u32 kDialogJobRunning = 1;
 static constexpr u32 kDialogJobDone = 2;
-static constexpr int kDialogWorkerPriority = 0x26;  // below the music worker (0x24)
+// Above the game thread (0x20), which with triple buffering rarely blocks, and
+// below the music worker (0x1C). The decode yields between slices so a clip
+// never takes the CPU from a frame in one piece.
+static constexpr int kDialogWorkerPriority = 0x1E;
+static constexpr u32 kDialogDecodeSliceBlocks = 128;  // 3584 samples
+static constexpr SceUInt kDialogDecodeYieldUs = 500;
 static DialogAsyncJob g_dialogJob;
 static std::atomic<u32> g_dialogJobState{kDialogJobIdle};
 static u32 g_dialogJobSerial = 0;
@@ -610,6 +615,9 @@ static int DialogWorkerEntry(SceSize, void*) {
                     job.pcm.data() + job.pcmSamples, prev0, prev1);
                 job.pcmSamples += 28u;
                 if (ended) break;
+                if ((block + 1u) % kDialogDecodeSliceBlocks == 0u) {
+                    sceKernelDelayThread(kDialogDecodeYieldUs);
+                }
             }
             job.ok = job.pcmSamples != 0;
         }

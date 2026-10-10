@@ -35,10 +35,12 @@ constexpr u32 kInvalidBuffer = 0xFFFFFFFFu;
 constexpr u32 kCursorFractionBits = 30;
 constexpr u64 kCursorOne = 1ull << kCursorFractionBits;
 constexpr u32 kCursorFractionMask = static_cast<u32>(kCursorOne - 1u);
-// The callback thread created by pspaudiolib runs at a higher priority. Keep
-// the decoder below it, but above the normal game thread so the next pair is
+// The callback thread created by pspaudiolib runs at 0x12. Keep the decoder
+// below it, but above the game thread (crt0 default 0x20) so the next pair is
 // prepared during the current pair instead of arriving late at a boundary.
-constexpr int kMusicWorkerPriority = 0x24;
+// At 0x24 it only ran while the game thread blocked: with triple buffering
+// that thread no longer sleeps on VBlank, and most music callbacks underran.
+constexpr int kMusicWorkerPriority = 0x1C;
 constexpr int kMusicWorkerStackSize = 0x4000;
 
 struct Sample {
