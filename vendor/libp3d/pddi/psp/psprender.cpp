@@ -248,7 +248,12 @@ u32 EncodeGuDrawArray(int prim, int vtype, int count, u32 indices, u32 vertices,
 // real sceGuDrawArray every kDrawsPerStallUpdate draws. sceGuGetMemory also
 // updates the stall, and sceGuFinish publishes the rest before any sync.
 // Only 32-bit targets can encode their pointers as GE addresses.
+// PSP_DRAWS_PER_STALL_UPDATE=1 restores one update per draw (A/B).
+#if defined(PSP_DRAWS_PER_STALL_UPDATE)
+constexpr u32 kDrawsPerStallUpdate = PSP_DRAWS_PER_STALL_UPDATE;
+#else
 constexpr u32 kDrawsPerStallUpdate = 4;
+#endif
 u32 g_drawsSinceStallUpdate = 0;
 
 static void GuDrawArray(int prim, int vtype, int count, const void* indices,
