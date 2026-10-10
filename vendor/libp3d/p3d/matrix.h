@@ -561,6 +561,17 @@ inline Mat4 Mat4::operator*(const Mat4& b) const {
     return r;
 }
 
+// r = a * b written straight into r (no returned temporary): the same
+// product as operator*. r must not alias a or b.
+inline void p3dMat4MulInto(const Mat4& a, const Mat4& b, Mat4& r) {
+#if defined(P3D_VFPU_MAT4)
+    if (!g_p3dMat4Mul) g_p3dMat4Mul = p3dVfpuMat4Select();
+    g_p3dMat4Mul(a.m, b.m, r.m);
+#else
+    p3dMat4MulScalar(a.m, b.m, r.m);
+#endif
+}
+
 // transform point (rotation + translation)
 inline void Mat4TransformPoint(const Mat4& m, f32 ix, f32 iy, f32 iz,
                                f32& ox, f32& oy, f32& oz) {

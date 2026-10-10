@@ -138,6 +138,8 @@ union UninitMat4 {
     UninitMat4() {}
 };
 
+static const Mat4 kSkeletonIdentity;
+
 static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices, bool invokeCallbacks) {
     if (!skeleton || !skeleton->joints || skeleton->numJoints == 0) {
         return;
@@ -148,9 +150,14 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
     PspPerf::CountRenderer(PspPerf::RendererCounter::SkeletonJoints, skeleton->numJoints);
 #endif
 
-    UninitMat4 matStack[32];
+    // The current matrix is never copied: it points at the identity, at an
+    // output already written this build (the stack keeps such pointers), or
+    // at a capture slot. Each joint's products are written straight into its
+    // output. Same products in the same order as copying matrices around.
+    const Mat4* stack[32];
     s32 stackTop = 0;
-    Mat4 current;
+    const Mat4* current = &kSkeletonIdentity;
+    UninitMat4 product;  // MULT_MATRIX result when a TRANSFORM follows
 
     // Capture/load buffer keys are the raw dword offsets loaded from the joint chunk.
     s32 captureKeys[64];
@@ -174,6 +181,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
 
     for (u32 i = 0; i < skeleton->numJoints; i++) {
         STreeJoint& j = skeleton->joints[i];
+        Mat4& out = outMatrices[i];
         const bool preserveJointState = invokeCallbacks
             && ((j.flags & (STF_PRE_CALLBACK_MASK | STF_POST_CALLBACK_MASK)) != 0);
 
@@ -203,7 +211,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
 
         if (j.flags & STF_PUSH_MATRIX) {
             if (stackTop < 32) {
-                matStack[stackTop++].value = current;
+                stack[stackTop++] = current;
             }
         }
 
@@ -211,36 +219,43 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
 #if defined(RC_PLATFORM_PSP)
             PspPerf::ScopeTimer callbackTimer(PspPerf::RendererCounter::SkelCallbackUs);
 #endif
-            j.preCallback(&j, i, current);
+            j.preCallback(&j, i, *current);
         }
 
         if ((j.flags & STF_MULT_MATRIX) && j.useOverrideMatrix) {
-            current = current * j.overrideMatrix;
+            Mat4& target = (j.flags & STF_TRANSFORM) ? product.value : out;
+            p3dMat4MulInto(*current, j.overrideMatrix, target);
+            current = &target;
         }
 
         if (j.flags & STF_TRANSFORM) {
             Mat4 local;
             p3dBuildRotMatrixYZX(j.rotationX, j.rotationY, j.rotationZ, local);
             local.SetTranslation((f32)j.translationX, (f32)j.translationY, (f32)j.translationZ);
-            current = current * local;
+            p3dMat4MulInto(*current, local, out);
+            current = &out;
         }
 
         if (j.renderScale != 1.0f) {
-            current.ScaleRotation(j.renderScale);
+            if (current != &out) {
+                out = *current;
+                current = &out;
+            }
+            out.ScaleRotation(j.renderScale);
         }
 
         if (invokeCallbacks && (j.flags & STF_POST_CALLBACK_MASK) && j.postCallback) {
 #if defined(RC_PLATFORM_PSP)
             PspPerf::ScopeTimer callbackTimer(PspPerf::RendererCounter::SkelCallbackUs);
 #endif
-            j.postCallback(&j, i, current);
+            j.postCallback(&j, i, *current);
         }
 
         if (j.flags & STF_CAPTURE_MATRIX) {
             if (j.captureBufferIdx >= 0) {
                 s32 slot = findCaptureSlot(j.captureBufferIdx);
                 if (slot >= 0) {
-                    captureValues[slot].value = current;
+                    captureValues[slot].value = *current;
                     captureValid[slot] = true;
                 }
             }
@@ -250,16 +265,21 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
             if (j.captureBufferIdx >= 0) {
                 s32 slot = findCaptureSlot(j.captureBufferIdx);
                 if (slot >= 0 && captureValid[slot]) {
-                    current = captureValues[slot].value;
+                    // Copied now: a later capture may rewrite the slot.
+                    out = captureValues[slot].value;
+                    current = &out;
                 }
             }
         }
 
-        outMatrices[i] = current;
+        if (current != &out) {
+            out = *current;
+            current = &out;
+        }
 
         if (j.flags & STF_POP_MATRIX) {
             if (stackTop > 0) {
-                current = matStack[--stackTop].value;
+                current = stack[--stackTop];
             }
         }
 
