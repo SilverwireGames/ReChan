@@ -149,6 +149,14 @@ public:
     static bool ResolveActionPrompt(Action action, ResolvedPrompt& out) {
         out = {};
 
+#if defined(RC_PLATFORM_PSP)
+        // The PSP has no keyboard and no Xbox sheet. Its pad is not always reported
+        // as "active", so never fall back to keyboard glyphs: use PSP text labels.
+        const s32 pspButton = g_actionInput ? g_actionInput->GetGamepadButtonBinding(action) : GpBtn::NONE;
+        CopyText(out.fallback, (s32)sizeof(out.fallback), PspButtonToLabel(pspButton));
+        return out.HasFallback();
+#endif
+
         const bool useGamepad = g_actionInput && g_actionInput->IsGamepadActive();
         if (useGamepad) {
             const s32 button = g_actionInput ? g_actionInput->GetGamepadButtonBinding(action) : GpBtn::NONE;
@@ -195,6 +203,14 @@ public:
 
     static bool ResolveDesktopBindingCodePrompt(s32 code, ResolvedPrompt& out) {
         out = {};
+
+#if defined(RC_PLATFORM_PSP)
+        // Desktop binding codes name keyboard keys or mouse buttons, which the
+        // PSP does not have. Never load the keyboard atlas on PSP and draw
+        // nothing (no icon, no fallback text) so the token simply disappears.
+        (void)code;
+        return false;
+#endif
 
         if (code == 0) {
             CopyText(out.fallback, (s32)sizeof(out.fallback), "-");
@@ -382,6 +398,27 @@ private:
             case KEY_SLASH: return "/";
             case KEY_GRAVE: return "`";
             default: return nullptr;
+        }
+    }
+
+    // Short PSP names for the GpBtn layout (A = Cross, B = Circle, X = Square, Y = Triangle).
+    // Cross/Circle use the usual one-letter "X"/"O" so a three-prompt help bar
+    // fits 480px; D-pad directions are named so "LEFT/RIGHT Adjust" is unambiguous.
+    static const char* PspButtonToLabel(s32 button) {
+        switch (button) {
+            case GpBtn::A: return "X";
+            case GpBtn::B: return "O";
+            case GpBtn::X: return "SQUARE";
+            case GpBtn::Y: return "TRIANGLE";
+            case GpBtn::LB: return "L";
+            case GpBtn::RB: return "R";
+            case GpBtn::Back: return "SELECT";
+            case GpBtn::Start: return "START";
+            case GpBtn::DpadLeft: return "LEFT";
+            case GpBtn::DpadRight: return "RIGHT";
+            case GpBtn::DpadUp: return "UP";
+            case GpBtn::DpadDown: return "DOWN";
+            default: return "";
         }
     }
 

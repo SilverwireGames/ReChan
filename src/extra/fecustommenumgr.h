@@ -375,6 +375,14 @@ struct TitleDebrisParticle {
     u8 r = 255, g = 200, b = 60;
 };
 
+#if defined(RC_PLATFORM_PSP)
+// Normalized UV rect of a texture's non-transparent texels (plus a one-texel
+// bilinear margin). Defaults to the whole texture.
+struct TitleLayerBounds {
+    f32 u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+};
+#endif
+
 class feCustomMenuMgr {
 public:
     void Init(CustomText* textSystem);
@@ -480,6 +488,9 @@ private:
     void RenderActivePopupContent(s32 panelX, s32 panelW, s32 firstY, f32 popupAlpha) const;
 
     void LoadControllerOverlayTexture();
+#if defined(RC_PLATFORM_PSP)
+    void ReleaseControllerOverlayTexture();
+#endif
     void LoadMenuOrnamentTexture();
     void LoadSplashTextures();
     bool EnsureTitleScreenEffects(f32 drawW, f32 drawH);
@@ -499,7 +510,14 @@ private:
     static constexpr f32 kTitleFistLightExposure = 3.0f;
 
     // frontend
+#if defined(RC_PLATFORM_PSP)
+    // PSP menu icons are packed at their on-screen size (package_psp.sh) so the
+    // whole resident menu set costs ~11 KiB instead of 128 KiB per texture.
+    static constexpr const char* kMenuOrnamentTexturePath = "psp/textures/frontend/menu/menu_ornament.ptex";
+    static constexpr const char* kPspControllerOverlayTexturePath = "psp/textures/frontend/menu/controller_overlay_ps.ptex";
+#else
     static constexpr const char* kMenuOrnamentTexturePath = "pc/textures/frontend/menu_ornament.png";
+#endif
 #if defined(RC_PLATFORM_PSP)
     // PSP packages contain a pre-scaled 480x272 frontend set.  Loading the
     // desktop 1920x1080 PNGs would need several megabytes of transient RGBA
@@ -507,6 +525,8 @@ private:
     static constexpr const char* kTitleScreenBackgroundTexturePath = "psp/textures/frontend/background.ptex";
     static constexpr const char* kTitleScreenJackieTexturePath = "psp/textures/frontend/jackie.ptex";
     static constexpr const char* kTitleScreenLogoTexturePath = "psp/textures/frontend/jcslogo.ptex";
+    // PSP-only "PSP EDITION" badge, authored at 4x and packed to 16-bit .ptex.
+    static constexpr const char* kTitleScreenEditionTexturePath = "psp/textures/frontend/psp_edition.ptex";
 #else
     static constexpr const char* kTitleScreenBackgroundTexturePath = "pc/textures/frontend/background.png";
     static constexpr const char* kTitleScreenJackieTexturePath = "pc/textures/frontend/jackie.png";
@@ -519,17 +539,32 @@ private:
     static constexpr const char* kGameOverTexturePath = "pc/textures/frontend/game_over.png";
     static constexpr const char* kLoadingBarTexturePath = "pc/textures/frontend/loading_bar.png";
 #endif
+#if defined(RC_PLATFORM_PSP)
+    static constexpr const char* kSliderOTexturePath = "psp/textures/frontend/menu/slider_o.ptex";
+    static constexpr const char* kSliderFTexturePath = "psp/textures/frontend/menu/slider_f.ptex";
+#else
     static constexpr const char* kSliderOTexturePath = "pc/textures/frontend/slider_o.png";
     static constexpr const char* kSliderFTexturePath = "pc/textures/frontend/slider_f.png";
+#endif
 
     // collectibles
+#if defined(RC_PLATFORM_PSP)
+    static constexpr const char* kRedDragonTexturePath = "psp/textures/frontend/menu/red_dragon.ptex";
+    static constexpr const char* kGoldDragonTexturePath = "psp/textures/frontend/menu/gold_dragon.ptex";
+    static constexpr const char* kGreyDragonTexturePath = "psp/textures/frontend/menu/grey_dragon.ptex";
+#else
     static constexpr const char* kRedDragonTexturePath = "pc/textures/collectibles/red_dragon.png";
     static constexpr const char* kGoldDragonTexturePath = "pc/textures/collectibles/gold_dragon.png";
     static constexpr const char* kGreyDragonTexturePath = "pc/textures/collectibles/grey_dragon.png";
+#endif
     static constexpr const char* kBowlTexturePath = "pc/textures/collectibles/bowl.png";
     static constexpr const char* kMilkTexturePath = "pc/textures/collectibles/milk.png";
     static constexpr const char* kNoodleBoxTexturePath = "pc/textures/collectibles/noodlebox.png";
+#if defined(RC_PLATFORM_PSP)
+    static constexpr const char* kTakeTexturePath = "psp/textures/frontend/menu/take.ptex";
+#else
     static constexpr const char* kTakeTexturePath = "pc/textures/collectibles/take.png";
+#endif
 
     static constexpr f32 kSplashScreenAspect = 16.0f / 9.0f;
 
@@ -565,6 +600,18 @@ private:
     tTexture* m_titleScreenBackgroundTexture = nullptr;
     tTexture* m_titleScreenJackieTexture = nullptr;
     tTexture* m_titleScreenLogoTexture = nullptr;
+#if defined(RC_PLATFORM_PSP)
+    tTexture* m_titleScreenEditionTexture = nullptr;
+    // Opaque UV rect of the full-screen Jackie/logo layers (~18% of the
+    // screen each). Drawing only this rect skips ~80% of their RAM-sourced
+    // texture fetch and blend fill on the GE without changing the output.
+    TitleLayerBounds m_titleJackieBounds;
+    TitleLayerBounds m_titleLogoBounds;
+    // Soft white disc tinted per spark: one batched quad per layer instead of
+    // two unbatched 8-segment triangle fans (and 64 sin/cos) per particle.
+    tTexture* m_titleDebrisDotTexture = nullptr;
+    void LoadTitleDebrisDotTexture();
+#endif
     pddiBaseShader* m_titleScreenGlowShader = nullptr;
     pddiBaseShader* m_titleScreenGodRaysShader = nullptr;
     pddiBaseShader* m_titleScreenCompositeShader = nullptr;

@@ -389,7 +389,7 @@ public:
             }
 
             if (state.promptsEnabled && c == '<') {
-                PromptToken token = HandlePromptToken(text, tokenStart, penX, lineTop, lineHeight,
+                PromptToken token = HandlePromptToken(*font, state, text, tokenStart, penX, lineTop, lineHeight,
                     state.color.a, false);
                 if (token.matched) {
                     if (pendingSpace > 0.0f && lineConsumed > 0.0f) {
@@ -399,7 +399,7 @@ public:
                     }
 
                     if (token.width > 0.0f) {
-                        HandlePromptToken(text, tokenStart, penX, lineTop, lineHeight,
+                        HandlePromptToken(*font, state, text, tokenStart, penX, lineTop, lineHeight,
                             state.color.a, true);
                     }
 
@@ -585,7 +585,7 @@ private:
             }
 
             if (state.promptsEnabled && c == '<') {
-                PromptToken token = HandlePromptToken(text, tokenStart, 0.0f, 0.0f,
+                PromptToken token = HandlePromptToken(font, state, text, tokenStart, 0.0f, 0.0f,
                                                       lineHeight, state.color.a, false);
                 if (token.matched) {
                     width += token.width;
@@ -621,7 +621,30 @@ private:
         return width;
     }
 
-    PromptToken HandlePromptToken(Utf8TextView text, s32 start, f32 x, f32 y,
+    // Measures/draws ASCII fallback text (e.g. "START", "CROSS") with the active font.
+    f32 MeasureFallbackWidth(const FontRecord& font, const char* fallback, f32 scaleX) const {
+        f32 width = 0.0f;
+        for (s32 i = 0; fallback[i] != '\0'; i++) {
+            const u32 codepoint = (u8)fallback[i];
+            const stbtt_packedchar* glyph = FindGlyph(font, codepoint);
+            if (glyph) {
+                width += GlyphAdvance(font, codepoint, (u8)fallback[i + 1], *glyph, scaleX);
+            }
+        }
+        return width;
+    }
+
+    void DrawFallbackText(const char* fallback, f32 x, f32 y, const TextRenderState& state,
+        u8 alpha) const {
+        TextRenderState fallbackState = state;
+        fallbackState.promptsEnabled = false;
+        fallbackState.wrapWidth = 0.0f;
+        fallbackState.color.a = alpha;
+        Draw(Utf8TextView(fallback), x, y, fallbackState);
+    }
+
+    PromptToken HandlePromptToken(const FontRecord& font, const TextRenderState& state,
+        Utf8TextView text, s32 start, f32 x, f32 y,
         f32 lineHeight, u8 alpha, bool draw) const {
         PromptToken token = {};
 
@@ -633,10 +656,20 @@ private:
         if (PromptIcons::ParseInlineActionToken(text.data, start, &consumed, &action)) {
             token.matched = true;
             token.consumed = consumed;
-            if (PromptIcons::ResolveActionPrompt(action, prompt) && prompt.HasIcon()) {
-                token.width = PromptIcons::GetDrawWidth(prompt, lineHeight);
-                if (draw) {
-                    PromptIcons::DrawPrompt(prompt, x, y, lineHeight, alpha);
+            if (PromptIcons::ResolveActionPrompt(action, prompt)) {
+                if (prompt.HasIcon()) {
+                    token.width = PromptIcons::GetDrawWidth(prompt, lineHeight);
+                    if (draw) {
+                        PromptIcons::DrawPrompt(prompt, x, y, lineHeight, alpha);
+                    }
+#if defined(RC_PLATFORM_PSP)
+                } else if (prompt.HasFallback()) {
+                    // PSP has no glyph sheet for this action: draw its name in text instead.
+                    token.width = MeasureFallbackWidth(font, prompt.fallback, state.scaleX);
+                    if (draw) {
+                        DrawFallbackText(prompt.fallback, x, y, state, alpha);
+                    }
+#endif
                 }
             }
             return token;
@@ -646,10 +679,19 @@ private:
         if (PromptIcons::ParseInlineDesktopBindingToken(text.data, start, &consumed, &code)) {
             token.matched = true;
             token.consumed = consumed;
-            if (PromptIcons::ResolveDesktopBindingCodePrompt(code, prompt) && prompt.HasIcon()) {
-                token.width = PromptIcons::GetDrawWidth(prompt, lineHeight);
-                if (draw) {
-                    PromptIcons::DrawPrompt(prompt, x, y, lineHeight, alpha);
+            if (PromptIcons::ResolveDesktopBindingCodePrompt(code, prompt)) {
+                if (prompt.HasIcon()) {
+                    token.width = PromptIcons::GetDrawWidth(prompt, lineHeight);
+                    if (draw) {
+                        PromptIcons::DrawPrompt(prompt, x, y, lineHeight, alpha);
+                    }
+#if defined(RC_PLATFORM_PSP)
+                } else if (prompt.HasFallback()) {
+                    token.width = MeasureFallbackWidth(font, prompt.fallback, state.scaleX);
+                    if (draw) {
+                        DrawFallbackText(prompt.fallback, x, y, state, alpha);
+                    }
+#endif
                 }
             }
             return token;
@@ -710,7 +752,7 @@ private:
             }
 
             if (state.promptsEnabled && c == '<') {
-                PromptToken token = HandlePromptToken(text, tokenStart, 0.0f, 0.0f,
+                PromptToken token = HandlePromptToken(font, state, text, tokenStart, 0.0f, 0.0f,
                     lineHeight, state.color.a, false);
                 if (token.matched) {
                     if (pendingSpace > 0.0f && lineWidth > 0.0f) {

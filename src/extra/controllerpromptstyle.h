@@ -23,6 +23,9 @@ static constexpr ControllerPromptStyleInfo kControllerPromptStyles[ControllerPro
 
 #if defined(RC_PLATFORM_SWITCH)
 static constexpr ControllerPromptStyle kDefaultControllerPromptStyle = ControllerPromptStyle_Switch;
+#elif defined(RC_PLATFORM_PSP)
+// PSP has one fixed glyph set (PlayStation); it is not user-selectable.
+static constexpr ControllerPromptStyle kDefaultControllerPromptStyle = ControllerPromptStyle_PlayStation;
 #else
 static constexpr ControllerPromptStyle kDefaultControllerPromptStyle = ControllerPromptStyle_Default;
 #endif
@@ -40,6 +43,11 @@ public:
 
     // Returns true if the style actually changed.
     static bool SetStyle(s32 style) {
+#if defined(RC_PLATFORM_PSP)
+        // Ignores saved values from other platforms; the PSP style never changes.
+        (void)style;
+        return false;
+#endif
         style = ClampControllerPromptStyle(style);
         if (style == s_style) {
             return false;

@@ -98,11 +98,19 @@ for name in background jackie jcslogo loading_bar game_over; do
         "$psp_frontend/${name}.ptex" 480 272
 done
 
+# "PSP EDITION 1.0.0" badge: authored at 408x52, packed at 102x13 (bottom-left of
+# the title screen). Keeping the 4x source only in the PC tree avoids runtime scaling.
+generate_ptex \
+    "$output_root/data/pc/textures/frontend/psp_edition.png" \
+    "$psp_frontend/psp_edition.ptex" 102 13
+
 # Every image used by the custom frontend/HUD is also prepared beside its
 # original PC path.  LoadFromImagePath() transparently replaces .png with
 # .ptex on PSP, so no desktop asset is overwritten and the PSP never falls
 # back to stb_image for these assets.  Keep each source aspect ratio while
-# clamping the largest side to the GE's 512-pixel texture limit.
+# clamping the largest side to the GE's 512-pixel texture limit.  Art that
+# already fits (menu_ornament, slider_o/f at 256x256) keeps its source size:
+# never upscale, since a 512x512 16-bit copy costs 512 KiB instead of 128 KiB.
 psp_native_assets="
 pc/textures/frontend/controller_overlay_default.png
 pc/textures/frontend/controller_overlay_ps.png
@@ -132,7 +140,10 @@ for relative_path in $psp_native_assets; do
         -show_entries stream=width,height -of csv=p=0 "$source_path")
     source_width=${dimensions%,*}
     source_height=${dimensions#*,}
-    if [ "$source_width" -ge "$source_height" ]; then
+    if [ "$source_width" -le 512 ] && [ "$source_height" -le 512 ]; then
+        target_width=$source_width
+        target_height=$source_height
+    elif [ "$source_width" -ge "$source_height" ]; then
         target_width=512
         target_height=$(( (source_height * 512 + source_width / 2) / source_width ))
     else
@@ -150,6 +161,20 @@ for relative_path in $psp_native_assets; do
     fi
     generate_ptex "$source_path" "$output_path" "$target_width" "$target_height"
 done
+
+# Custom-menu copies packed at their on-screen size (480x272).  The menu keeps
+# these resident (~11 KiB) instead of 128 KiB per 256x256 icon; the controller
+# overlay (128x128, 32 KiB) is only loaded while the Controller page is open.
+psp_menu="$psp_frontend/menu"
+mkdir -p "$psp_menu"
+generate_ptex "$output_root/data/pc/textures/frontend/slider_o.png" "$psp_menu/slider_o.ptex" 16 16
+generate_ptex "$output_root/data/pc/textures/frontend/slider_f.png" "$psp_menu/slider_f.ptex" 16 16
+generate_ptex "$output_root/data/pc/textures/frontend/menu_ornament.png" "$psp_menu/menu_ornament.ptex" 32 32
+for name in take red_dragon gold_dragon grey_dragon; do
+    generate_ptex "$output_root/data/pc/textures/collectibles/${name}.png" "$psp_menu/${name}.ptex" 32 32
+done
+generate_ptex "$output_root/data/pc/textures/frontend/controller_overlay_ps.png" \
+    "$psp_menu/controller_overlay_ps.ptex" 128 128
 
 echo "PSP native frontend/HUD assets: 16-bit PSTX set generated beside pc/*.png."
 

@@ -148,7 +148,8 @@ void HUD::Display() {
 #endif
     // Custom HUD rendering path replaces FE section overlays while preserving
     // all original HUD state/update behavior.
-#if CUSTOM_MENU && !defined(RC_PLATFORM_PSP)
+// PSP uses the legacy section HUD unless PSP_CUSTOM_HUD opts in to the PC HUD.
+#if CUSTOM_MENU && (!defined(RC_PLATFORM_PSP) || defined(PSP_CUSTOM_HUD))
     #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: hud custom begin");
     #endif

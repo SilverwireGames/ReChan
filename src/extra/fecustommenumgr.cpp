@@ -41,8 +41,79 @@
 #include "extra/dialogpreview.h"
 #include "extra/prompticons.h"
 #include "extra/shadowcsm.h"
+#if defined(RC_PLATFORM_PSP)
+#include "pddi/psp/psprender.h"
+#endif
 
 feCustomMenuMgr* g_feCustomMenuMgr = nullptr;
+
+#if defined(RC_PLATFORM_PSP)
+// Scans the resident 4444 pixels once at load time. The title layers are
+// 480x272 full-screen images whose visible content covers ~18% of the frame;
+// the bounds let DrawTitleScreen skip the fully transparent remainder.
+static TitleLayerBounds ComputeOpaqueBounds(tTexture* texture) {
+    TitleLayerBounds bounds;
+    if (!texture || !texture->GetTexture()) {
+        return bounds;
+    }
+
+    const auto* native = static_cast<const pspTexture*>(texture->GetTexture());
+    const u16* pixels = native->GetPixels();
+    const s32 width = texture->GetWidth();
+    const s32 height = texture->GetHeight();
+    const s32 stride = native->GetStorageWidth();
+    if (!pixels || width <= 0 || height <= 0 || stride < width) {
+        return bounds;
+    }
+
+    s32 minX = width;
+    s32 minY = height;
+    s32 maxX = -1;
+    s32 maxY = -1;
+    for (s32 y = 0; y < height; y++) {
+        const u16* row = pixels + (size_t)y * (size_t)stride;
+        for (s32 x = 0; x < width; x++) {
+            if ((row[x] & 0xF000u) == 0) {
+                continue;
+            }
+            minX = std::min(minX, x);
+            maxX = std::max(maxX, x);
+            minY = std::min(minY, y);
+            maxY = std::max(maxY, y);
+        }
+    }
+
+    if (maxX < 0) {
+        // Fully transparent: an empty rect makes the draw a no-op.
+        bounds.u1 = bounds.u0;
+        bounds.v1 = bounds.v0;
+        return bounds;
+    }
+
+    // One transparent texel of margin keeps bilinear edge samples identical
+    // to the full-quad draw (same UV mapping, only clipped geometry).
+    minX = std::max<s32>(0, minX - 1);
+    minY = std::max<s32>(0, minY - 1);
+    maxX = std::min<s32>(width, maxX + 2);
+    maxY = std::min<s32>(height, maxY + 2);
+    bounds.u0 = (f32)minX / (f32)width;
+    bounds.v0 = (f32)minY / (f32)height;
+    bounds.u1 = (f32)maxX / (f32)width;
+    bounds.v1 = (f32)maxY / (f32)height;
+    return bounds;
+}
+
+// Draws only the bounded part of a texture that would otherwise be stretched
+// over (x, y, w, h); pixel-for-pixel equivalent to the full quad.
+static void DrawBoundedQuad(tTexture* texture, const TitleLayerBounds& bounds,
+                            f32 x, f32 y, f32 w, f32 h, u8 alpha) {
+    ScreenDraw::DrawQuad(texture,
+                         x + bounds.u0 * w, y + bounds.v0 * h,
+                         (bounds.u1 - bounds.u0) * w, (bounds.v1 - bounds.v0) * h,
+                         bounds.u0, bounds.v0, bounds.u1, bounds.v1,
+                         255, 255, 255, alpha);
+}
+#endif
 
 static f32 UiAnimSeconds() {
     return (f32)Time::GetTimeInSeconds();
@@ -605,7 +676,7 @@ void feCustomMenuMgr::BuildPages() {
     SetEntries(feOpts, {
         Button("FE_CTL", EntryEvent_GoPage, MenuPage_Controller),
         // Key Bindings is a keyboard-remapping page; no console has a keyboard.
-#if !defined(RC_PLATFORM_SWITCH)
+#if !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
         Button("FE_KBD", EntryEvent_GoPage, MenuPage_KeyBindings),
 #endif
         Button("FE_DIS", EntryEvent_GoPage, MenuPage_Display),
@@ -625,11 +696,16 @@ void feCustomMenuMgr::BuildPages() {
 
     auto& feCtrl = AddPage(MenuPage_Controller, "FE_CTL", "Menu_Controller", MenuPage_Options, 0, false, DEF_CONTROLLER_WINDOW_W, DEF_CONTROLLER_WINDOW_H);
     SetEntries(feCtrl, {
+        // The PSP has no rumble motor or lightbar, so these settings are hidden there.
+#if !defined(RC_PLATFORM_PSP)
         Toggle("FE_CSH", EntryBinding_Shock),
         Slider("FE_VIB", EntryBinding_Vibration, 5, 0, 100),
         Toggle("FE_LGT", EntryBinding_Lightbar),
+#endif
         List("FE_CCF", EntryBinding_PlayerConfig, 1, 0, 2),
+#if !defined(RC_PLATFORM_PSP)
         List("FE_BPTS", EntryBinding_ControllerPromptStyle, 1, 0, ControllerPromptStyle_Count - 1),
+#endif
         Button("FE_BCK", EntryEvent_Back),
                }, 0, 42);
 
@@ -640,19 +716,23 @@ void feCustomMenuMgr::BuildPages() {
                }, 0, 64);
 
     auto& feDisplay = AddPage(MenuPage_Display, "FE_DIS", "Menu_GameOption", MenuPage_Options, 2, false, -1, -1);
+    // PSP keeps only the language entry: resolution, window mode, VSync, frame
+    // rate, MSAA and shadow quality are desktop-only settings.
     SetEntries(feDisplay, {
-#if !defined(RC_PLATFORM_SWITCH)
+#if !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
         List("FE_RES", EntryBinding_DisplayResolution, 1, 0, 64),
         List("FE_FSC", EntryBinding_DisplayScreenMode, 1, 0, 2),
 #endif
+#if !defined(RC_PLATFORM_PSP)
         Toggle("FE_VYS", EntryBinding_DisplayVsync),
-#if HIGH_FPS_PLAY_PRESENTATION
+#endif
+#if HIGH_FPS_PLAY_PRESENTATION && !defined(RC_PLATFORM_PSP)
         List("FE_FPS", EntryBinding_DisplayFrameRate, 1, 0, 3),
 #endif
-#if !defined(RC_PLATFORM_SWITCH)
+#if !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
         List("FE_MSA", EntryBinding_DisplayMsaa, 1, 0, 4),
 #endif
-#if MODERN_GRAPHICS && !defined(RC_PLATFORM_SWITCH)
+#if MODERN_GRAPHICS && !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
         List("FE_DSH", EntryBinding_DisplayShadowQuality, 1, 0, 4),
 #endif
         List("FE_LNG", EntryBinding_Language, 1, 0, (s32)NumLanguages - 1),
@@ -853,11 +933,15 @@ void feCustomMenuMgr::Init(CustomText* textSystem) {
     BuildPopups();
 #if !defined(RC_PLATFORM_PSP)
     LoadControllerOverlayTexture();
-    LoadMenuOrnamentTexture();
 #endif
+    // On PSP the ornament, dragon/take icons and slider coins come from tiny
+    // pre-sized .ptex files (see package_psp.sh): ~11 KiB resident in total.
+    // The controller overlay (32 KiB) is loaded only while its page is open.
+    LoadMenuOrnamentTexture();
     LoadSplashTextures();
-#if !defined(RC_PLATFORM_PSP)
     LoadSliderTextures();
+#if defined(RC_PLATFORM_PSP)
+    LoadTitleDebrisDotTexture();
 #endif
 
 #if !defined(NDEBUG)
@@ -886,6 +970,18 @@ void feCustomMenuMgr::Shutdown() {
         m_titleScreenLogoTexture->Release();
         m_titleScreenLogoTexture = nullptr;
     }
+#if defined(RC_PLATFORM_PSP)
+    if (m_titleScreenEditionTexture) {
+        m_titleScreenEditionTexture->Release();
+        m_titleScreenEditionTexture = nullptr;
+    }
+    if (m_titleDebrisDotTexture) {
+        m_titleDebrisDotTexture->Release();
+        m_titleDebrisDotTexture = nullptr;
+    }
+    m_titleJackieBounds = TitleLayerBounds();
+    m_titleLogoBounds = TitleLayerBounds();
+#endif
     if (m_gameOverTexture) {
         m_gameOverTexture->Release();
         m_gameOverTexture = nullptr;
@@ -1109,6 +1205,42 @@ void feCustomMenuMgr::UpdateTitleDebrisParticles(f32 dt, f32 emitX, f32 emitY, f
     }
 }
 
+#if defined(RC_PLATFORM_PSP)
+void feCustomMenuMgr::LoadTitleDebrisDotTexture() {
+    if (m_titleDebrisDotTexture) {
+        return;
+    }
+
+    // 16x16 white disc with a one-texel anti-aliased rim; the vertex colour
+    // supplies the spark tint/fade. Stored as 4444 (512 bytes resident).
+    constexpr s32 kDotSize = 16;
+    u32 rgba[kDotSize * kDotSize];
+    const f32 center = (f32)kDotSize * 0.5f;
+    for (s32 y = 0; y < kDotSize; y++) {
+        for (s32 x = 0; x < kDotSize; x++) {
+            const f32 dx = (f32)x + 0.5f - center;
+            const f32 dy = (f32)y + 0.5f - center;
+            const f32 coverage = std::min(1.0f, std::max(0.0f, center - std::sqrt(dx * dx + dy * dy)));
+            const u32 alpha = (u32)(coverage * 255.0f + 0.5f);
+            rgba[y * kDotSize + x] = 0x00FFFFFFu | (alpha << 24);
+        }
+    }
+
+    tTexture* texture = new tTexture();
+    // alphaDepth 4 keeps the generic 2D triangle path (8888 vertex colour),
+    // so the faint outer glow does not collapse to 4-bit sprite colours.
+    if (!texture->Create(kDotSize, kDotSize, 32, 4, rgba)) {
+        texture->Release();
+        LOG("[CustomMenu] Failed to create title debris dot texture");
+        return;
+    }
+    if (texture->GetTexture()) {
+        texture->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+    }
+    m_titleDebrisDotTexture = texture;
+}
+#endif
+
 void feCustomMenuMgr::DrawTitleDebrisParticles() const {
     for (s32 i = 0; i < kMaxTitleDebrisParticles; i++) {
         const TitleDebrisParticle& p = m_titleDebrisParticles[i];
@@ -1121,15 +1253,29 @@ void feCustomMenuMgr::DrawTitleDebrisParticles() const {
         const f32 dotSize = p.size * (0.5f + 0.5f * t01);
 
 #if defined(RC_PLATFORM_PSP)
-        // The GU cannot execute the desktop "dot" fragment shader. Its
-        // generic shader fallback draws the entire quad as a solid square.
-        // Use small native polygonal sparks with a faint outer edge instead.
+        // The GU cannot execute the desktop "dot" fragment shader. Draw each
+        // spark as a faint outer disc plus a bright core. With the tinted dot
+        // texture both layers are single quads that join the caller's
+        // ScreenDraw batch; the triangle-fan fallback only runs if the 1 KiB
+        // texture failed to allocate.
         const f32 radiusX = dotSize * (0.36f + 0.06f * std::sin(p.shapeSeed));
         const f32 radiusY = dotSize * (0.36f + 0.06f * std::cos(p.shapeSeed));
-        ScreenDraw::DrawFilledCircle(p.x, p.y, radiusX, radiusY,
-            0.0f, 0.0f, 1.0f, 1.0f, 8, p.r, p.g, p.b, a / 4);
-        ScreenDraw::DrawFilledCircle(p.x, p.y, radiusX * 0.72f, radiusY * 0.72f,
-            0.0f, 0.0f, 1.0f, 1.0f, 8, p.r, p.g, p.b, a);
+        if (m_titleDebrisDotTexture) {
+            const f32 coreX = radiusX * 0.72f;
+            const f32 coreY = radiusY * 0.72f;
+            ScreenDraw::DrawQuad(m_titleDebrisDotTexture,
+                p.x - radiusX, p.y - radiusY, radiusX * 2.0f, radiusY * 2.0f,
+                0.0f, 0.0f, 1.0f, 1.0f, p.r, p.g, p.b, a / 4);
+            ScreenDraw::DrawQuad(m_titleDebrisDotTexture,
+                p.x - coreX, p.y - coreY, coreX * 2.0f, coreY * 2.0f,
+                0.0f, 0.0f, 1.0f, 1.0f, p.r, p.g, p.b, a);
+        }
+        else {
+            ScreenDraw::DrawFilledCircle(p.x, p.y, radiusX, radiusY,
+                0.0f, 0.0f, 1.0f, 1.0f, 8, p.r, p.g, p.b, a / 4);
+            ScreenDraw::DrawFilledCircle(p.x, p.y, radiusX * 0.72f, radiusY * 0.72f,
+                0.0f, 0.0f, 1.0f, 1.0f, 8, p.r, p.g, p.b, a);
+        }
 #else
         if (m_titleDebrisDotShader) {
             m_titleDebrisDotShader->SetColour(0, pddiColour(p.r, p.g, p.b, a));
@@ -2231,6 +2377,17 @@ void feCustomMenuMgr::SetPage(MenuPage page) {
     m_scrollBarDragging = false;
     m_keyBindCaptureActive = false;
     m_keyBindCaptureBlockFrames = 0;
+
+#if defined(RC_PLATFORM_PSP)
+    // The controller overlay is the only large menu texture: hold it only
+    // while its page is visible and free it on any other page / menu close.
+    if (m_currPage == MenuPage_Controller) {
+        LoadControllerOverlayTexture();
+    }
+    else {
+        ReleaseControllerOverlayTexture();
+    }
+#endif
 
     if (m_currPage == MenuPage_Title) {
         if (SaveGameHasAutosave()) {
@@ -3638,20 +3795,45 @@ void feCustomMenuMgr::LoadControllerOverlayTexture() {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // Fixed PlayStation overlay packed at 128x128 (32 KiB); drawn ~145px tall.
+    const char* path = kPspControllerOverlayTexturePath;
+    m_controllerTexture = tTexture::LoadFromImagePath(path);
+    if (m_controllerTexture && m_controllerTexture->GetTexture()) {
+        m_controllerTexture->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+    }
+#else
     char path[128];
     ControllerPromptManager::BuildOverlayPath(path, (s32)sizeof(path));
     m_controllerTexture = tTexture::LoadFromImagePath(path);
+#endif
     if (!m_controllerTexture) {
         LOG("[CustomMenu] Failed to load %s", path);
     }
 }
+
+#if defined(RC_PLATFORM_PSP)
+void feCustomMenuMgr::ReleaseControllerOverlayTexture() {
+    if (m_controllerTexture) {
+        m_controllerTexture->Release();
+        m_controllerTexture = nullptr;
+    }
+}
+#endif
 
 void feCustomMenuMgr::ReloadControllerPromptTextures() {
     if (m_controllerTexture) {
         m_controllerTexture->Release();
         m_controllerTexture = nullptr;
     }
+#if defined(RC_PLATFORM_PSP)
+    // Keep the overlay resident only while the Controller page is shown.
+    if (m_currPage == MenuPage_Controller) {
+        LoadControllerOverlayTexture();
+    }
+#else
     LoadControllerOverlayTexture();
+#endif
     PromptIcons::ResetGamepadSheet();
 }
 
@@ -3677,6 +3859,16 @@ void feCustomMenuMgr::LoadMenuOrnamentTexture() {
     if (!m_takeTex) {
         LOG("[CustomMenu] Failed to load %s", kTakeTexturePath);
     }
+
+#if defined(RC_PLATFORM_PSP)
+    // 32x32 sources are drawn at 11-36px: filter them instead of point-sampling.
+    tTexture* const filtered[] = { m_menuOrnamentTexture, m_redDragonTex, m_goldDragonTex, m_greyDragonTex, m_takeTex };
+    for (tTexture* texture : filtered) {
+        if (texture && texture->GetTexture()) {
+            texture->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+        }
+    }
+#endif
 }
 
 void feCustomMenuMgr::LoadSplashTextures() {
@@ -3706,6 +3898,26 @@ void feCustomMenuMgr::LoadSplashTextures() {
         if (!m_titleScreenLogoTexture) {
             LOG("[CustomMenu] Failed to load title splash logo texture (%s)", kTitleScreenLogoTexturePath);
         }
+
+#if defined(RC_PLATFORM_PSP)
+        m_titleScreenEditionTexture = tTexture::LoadFromImagePath(kTitleScreenEditionTexturePath);
+        if (m_titleScreenEditionTexture && m_titleScreenEditionTexture->GetTexture()) {
+            m_titleScreenEditionTexture->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
+        }
+        if (!m_titleScreenEditionTexture) {
+            LOG("[CustomMenu] Failed to load PSP edition badge (%s)", kTitleScreenEditionTexturePath);
+        }
+
+        m_titleJackieBounds = ComputeOpaqueBounds(m_titleScreenJackieTexture);
+        m_titleLogoBounds = ComputeOpaqueBounds(m_titleScreenLogoTexture);
+#if !defined(NDEBUG)
+        LOG("[CustomMenu] title bounds jackie=%.3f,%.3f..%.3f,%.3f logo=%.3f,%.3f..%.3f,%.3f",
+            (double)m_titleJackieBounds.u0, (double)m_titleJackieBounds.v0,
+            (double)m_titleJackieBounds.u1, (double)m_titleJackieBounds.v1,
+            (double)m_titleLogoBounds.u0, (double)m_titleLogoBounds.v0,
+            (double)m_titleLogoBounds.u1, (double)m_titleLogoBounds.v1);
+#endif
+#endif
     }
 
     if (!m_gameOverTextureTried) {
@@ -3821,6 +4033,14 @@ bool feCustomMenuMgr::DrawTitleScreen() {
         return false;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // One overlay batch for the whole splash: the projection/Z/cull/blend
+    // setup runs once and consecutive quads sharing a texture (letterbox
+    // strips, the sparks) are submitted as a single GU draw instead of one
+    // full 2D state rebuild per quad.
+    ScreenDraw::Batch titleBatch;
+#endif
+
     // Drives the glow/ray motion below and the logo's idle bob; tracked
     // unconditionally so the logo still feels alive even if the off-screen
     // effects are unavailable (see EnsureTitleScreenEffects).
@@ -3870,12 +4090,33 @@ bool feCustomMenuMgr::DrawTitleScreen() {
     const f32 tiltRoll = std::sin(t * 2.5f + 1.1f) * 0.015f;
     const f32 tiltFocal = logoHalfH * 6.0f;
 
+#if defined(RC_PLATFORM_PSP)
+    // The opaque background covers the splash rect; only the letterbox
+    // strips around it (1px rows at 480x272) need the black fill. This
+    // avoids a redundant full-screen blended pass on the GE every frame.
+    if (drawY > 0.0f) {
+        ScreenDraw::DrawColoredRect(0.0f, 0.0f, SCREEN_WIDTH, drawY, 0, 0, 0, 255);
+        ScreenDraw::DrawColoredRect(0.0f, drawY + drawH, SCREEN_WIDTH,
+                                    SCREEN_HEIGHT - (drawY + drawH), 0, 0, 0, 255);
+    }
+    if (drawX > 0.0f) {
+        ScreenDraw::DrawColoredRect(0.0f, drawY, drawX, drawH, 0, 0, 0, 255);
+        ScreenDraw::DrawColoredRect(drawX + drawW, drawY,
+                                    SCREEN_WIDTH - (drawX + drawW), drawH, 0, 0, 0, 255);
+    }
+#else
     ScreenDraw::DrawColoredRect(0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 0, 255);
+#endif
     ScreenDraw::DrawQuad(m_titleScreenBackgroundTexture, drawX, drawY, drawW, drawH);
 
     if (IsActive() || m_titleContentHidden)
         return true;
 
+#if !defined(RC_PLATFORM_PSP)
+    // PSP: the GU backend has no render targets or fragment shaders
+    // (CreateRenderTarget returns null), so the glow/god-ray/tilt passes are
+    // compiled out instead of allocating five shader objects on the first
+    // title frame only to discard them.
     if (EnsureTitleScreenEffects(drawW, drawH)) {
         const bool firstRun = (m_titleEffectsLastUpdateSec < 0.0f);
         const bool refreshEffects = firstRun
@@ -3959,9 +4200,15 @@ bool feCustomMenuMgr::DrawTitleScreen() {
         ScreenDraw::DrawShaderQuad(m_titleScreenCompositeShader, drawX, drawY, drawW, drawH,
                                    0.0f, 1.0f, 1.0f, 0.0f, PDDI_BLEND_ADD);
     }
+#endif
 
+#if defined(RC_PLATFORM_PSP)
+    DrawBoundedQuad(m_titleScreenJackieTexture, m_titleJackieBounds,
+                    drawX, drawY, drawW, drawH, titleFadeAlpha);
+#else
     ScreenDraw::DrawQuad(m_titleScreenJackieTexture, drawX, drawY, drawW, drawH,
                          0.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, titleFadeAlpha);
+#endif
 
     if (m_titleScreenLogoTiltShader) {
         m_titleScreenLogoTiltShader->SetTexture(0, m_titleScreenLogoTexture->GetTexture());
@@ -3979,9 +4226,25 @@ bool feCustomMenuMgr::DrawTitleScreen() {
         const f32 logoH = logoHalfH * 2.0f;
         const f32 logoX = drawX - (logoW - drawW) * 0.5f;
         const f32 logoY = drawY + logoOffsetY - (logoH - drawH) * 0.5f;
+#if defined(RC_PLATFORM_PSP)
+        DrawBoundedQuad(m_titleScreenLogoTexture, m_titleLogoBounds,
+                        logoX, logoY, logoW, logoH, titleFadeAlpha);
+#else
         ScreenDraw::DrawQuad(m_titleScreenLogoTexture, logoX, logoY, logoW, logoH,
                              0.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, titleFadeAlpha);
+#endif
     }
+
+#if defined(RC_PLATFORM_PSP)
+    // "PSP EDITION 1.0.0" badge: small, bottom-left, inside the 8px safe area of the 480x272 screen.
+    if (m_titleScreenEditionTexture) {
+        const f32 editionW = 102.0f;
+        const f32 editionH = 13.0f;
+        ScreenDraw::DrawQuad(m_titleScreenEditionTexture, 8.0f,
+                             SCREEN_HEIGHT - editionH - 8.0f, editionW, editionH,
+                             0.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, titleFadeAlpha);
+    }
+#endif
 
     // Gold debris: small fading dots sprayed left/right out of the screen
     // center, with their own gravity/drag.
@@ -5645,6 +5908,25 @@ void feCustomMenuMgr::RenderCurrentPage() {
                 totalWidth += promptGap;
             }
         }
+
+#if defined(RC_PLATFORM_PSP)
+        // 480x272: three text prompts can be wider than the bottom bar.  Shrink
+        // the whole row to fit inside the window frame instead of overflowing.
+        const f32 maxHelpWidth = SCREEN_SCALE_X((f32)(panelW - DEF_BORDER_W * 2 - 8));
+        if (promptCount > 0 && maxHelpWidth > 0.0f && totalWidth > maxHelpWidth) {
+            const f32 fit = maxHelpWidth / totalWidth;
+            helpScale *= fit;
+            promptGap *= fit;
+            g_textManager->SetScale(SCREEN_SCALE_Y(helpScale), SCREEN_SCALE_Y(helpScale));
+            totalWidth = 0.0f;
+            for (s32 i = 0; i < promptCount; i++) {
+                totalWidth += g_textManager->MeasureString(prompts[i]).width;
+                if (i + 1 < promptCount) {
+                    totalWidth += promptGap;
+                }
+            }
+        }
+#endif
 
         f32 cursorX = centerScreenX - totalWidth * 0.5f;
         g_textManager->SetColor(DEF_HELP_TEXT_R, DEF_HELP_TEXT_G, DEF_HELP_TEXT_B);
