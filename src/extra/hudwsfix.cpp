@@ -433,7 +433,7 @@ void HUDWidescreenPatches::DrawSection(xcSection* section) const {
     const s32 scissorW = RoundToNearestS32(SCREEN_EFFECTIVE_WIDTH);
     const s32 scissorH = RoundToNearestS32(SCREEN_HEIGHT);
     p3d::context->SetScissor(scissorX, 0, scissorW, scissorH);
-#if defined(RC_PLATFORM_PSP)
+#if defined(RC_PLATFORM_PSP) && !defined(PSP_UNBATCHED_HUD)
     // Every section prim draws through ScreenDraw, which keeps their order
     // inside a batch (a Gouraud quad or a texture change flushes it). Outside
     // one, each glyph swapped the projection and 2D state twice and was a
