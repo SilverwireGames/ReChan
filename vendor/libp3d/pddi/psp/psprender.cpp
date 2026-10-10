@@ -2602,6 +2602,16 @@ u32 pspContext::AcquireClutCacheEntry() {
     return victim;
 }
 
+static u32 PageCacheHintIndex(u32 handle, u16 tpage, bool zeroKey) {
+    const u32 key = (static_cast<u32>(tpage) | (handle << 9)) ^ (zeroKey ? 0x5a5a5a5au : 0u);
+    return (key * 0x9E3779B1u) >> 27;  // 32 buckets
+}
+
+static u32 ClutCacheHintIndex(u16 cba, u32 depth, u8 flags) {
+    const u32 key = static_cast<u32>(cba) | (depth << 16) | (static_cast<u32>(flags) << 18);
+    return (key * 0x9E3779B1u) >> 26;  // 64 buckets
+}
+
 pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
     PspPerf::Mark(PspPerf::RuntimeStage::CacheBegin, tpage, handle);
 #if defined(PSP_GU_DIAGNOSTIC)
@@ -2623,8 +2633,19 @@ pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
 #endif
         return nullptr;
     }
+    const u32 hintIndex = PageCacheHintIndex(handle, tpage, zeroKey);
+    if (const u8 hinted = pageCacheHint[hintIndex]) {
+        PageCache& cache = pageCache[hinted - 1u];
+        if (cache.handle == handle && cache.tpage == tpage && cache.zeroKey == zeroKey) {
+            PspPerf::Mark(PspPerf::RuntimeStage::CacheHit, tpage, hinted - 1u);
+            cache.age = cacheAge++;
+            cache.inFlight = true;
+            return &cache;
+        }
+    }
     for (auto& cache : pageCache) {
         if (cache.handle == handle && cache.tpage == tpage && cache.zeroKey == zeroKey) {
+            pageCacheHint[hintIndex] = static_cast<u8>(&cache - pageCache.data() + 1);
 #if defined(PSP_GU_DIAGNOSTIC)
             if (probe) PSP_GU_DIAG("[PSP GU DIAG] page #%lu cache hit pixels=%p age=%lu",
                 static_cast<unsigned long>(pageId), static_cast<void*>(cache.pixels),
@@ -2775,6 +2796,7 @@ pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
     target->tpage = tpage;
     target->zeroKey = zeroKey;
     target->age = cacheAge++;
+    pageCacheHint[hintIndex] = static_cast<u8>(target - pageCache.data() + 1);
     target->inFlight = true;
     PspPerf::Mark(PspPerf::RuntimeStage::CacheReady, tpage);
 #if defined(PSP_GU_DIAGNOSTIC)
@@ -2890,7 +2912,18 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
                 && static_cast<u32>(image->height) == kVramRows;
 #endif
             u32 cachedIndex = kClutCacheNone;
+            const u32 clutHintIndex = ClutCacheHintIndex(cba, depth, clutFlags);
             if (clutCacheable) {
+                if (const u8 hinted = clutCacheHint[clutHintIndex]) {
+                    const ClutCacheEntry& entry = clutCache[hinted - 1u];
+                    if (entry.valid && entry.cba == cba && entry.depth == depth
+                        && entry.flags == clutFlags && entry.epoch == vramEpoch
+                        && entry.rowGeneration == vramRowGeneration[clutRow]) {
+                        cachedIndex = hinted - 1u;
+                    }
+                }
+            }
+            if (clutCacheable && cachedIndex == kClutCacheNone) {
                 for (u32 index = 0; index < kClutCacheEntries; ++index) {
                     ClutCacheEntry& entry = clutCache[index];
                     if (!entry.valid || entry.cba != cba || entry.depth != depth
@@ -2900,6 +2933,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
                     if (entry.epoch == vramEpoch
                         && entry.rowGeneration == vramRowGeneration[clutRow]) {
                         cachedIndex = index;
+                        clutCacheHint[clutHintIndex] = static_cast<u8>(index + 1u);
                         break;
                     }
                     // Stale. Free it unless the open list still reads it; a
@@ -2949,6 +2983,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
                         entry.depth = static_cast<u8>(depth);
                         entry.flags = clutFlags;
                         entry.valid = true;
+                        clutCacheHint[clutHintIndex] = static_cast<u8>(fillIndex + 1u);
                         palette = clutCachePalettes.data() + fillIndex * 256u;
                     }
                     else {

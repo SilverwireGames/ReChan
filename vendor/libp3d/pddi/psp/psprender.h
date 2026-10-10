@@ -538,6 +538,12 @@ private:
     // allocations; a larger cache starves streamed BLK geometry during load.
     static constexpr u32 kPageCacheCapacity = 16;
     std::array<PageCache, kPageCacheCapacity> pageCache{};
+    // Direct-mapped hints (slot + 1, 0 = none) into pageCache and clutCache:
+    // a bind usually finds its entry with one probe instead of scanning both
+    // arrays, which the frame's vertex traffic keeps evicting from the data
+    // cache. A hint is only a guess; the entry's own key decides.
+    std::array<u8, 32> pageCacheHint{};
+    std::array<u8, 64> clutCacheHint{};
 #if defined(PSP_OPAQUE_RENDER_QUEUE)
     static constexpr u32 kOpaqueQueueCapacity = 256;
     std::array<QueuedOpaqueDraw, kOpaqueQueueCapacity> opaqueQueue{};
