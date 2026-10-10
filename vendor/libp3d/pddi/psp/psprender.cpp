@@ -2198,14 +2198,19 @@ void pspContext::DrawQuad(pddiBaseShader* shader, float x, float y, float w, flo
     PspVertex* vertices = static_cast<PspVertex*>(AllocateListMemory(sizeof(PspVertex) * 6));
     if (!vertices) return;
     const u32 color = psp ? MakeColor(psp->GetDiffuse()) : 0xffffffffu;
-    vertices[0] = {u0, v1, color, x, y + h, 0.0f};
-    vertices[1] = {u1, v1, color, x + w, y + h, 0.0f};
-    vertices[2] = {u1, v0, color, x + w, y, 0.0f};
-    vertices[3] = vertices[0];
-    vertices[4] = vertices[2];
-    vertices[5] = {u0, v0, color, x, y, 0.0f};
     pddiTexture* texture = psp ? psp->GetTexture() : shaderTexture;
-    Convert2DUvToTexels(vertices, 6, texture);
+    // Built locally: list memory is uncached, and Convert2DUvToTexels would
+    // read the UVs back from it.
+    PspVertex quad[6] = {
+        {u0, v1, color, x, y + h, 0.0f},
+        {u1, v1, color, x + w, y + h, 0.0f},
+        {u1, v0, color, x + w, y, 0.0f},
+        {u0, v1, color, x, y + h, 0.0f},
+        {u1, v0, color, x + w, y, 0.0f},
+        {u0, v0, color, x, y, 0.0f},
+    };
+    Convert2DUvToTexels(quad, 6, texture);
+    std::copy(quad, quad + 6, vertices);
     Draw2D(vertices, 6, texture);
 }
 
@@ -2222,19 +2227,27 @@ void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
     EnsureListSpace((sizeof(PspVertex) + sizeof(PspSpriteVertex)) * vertCount + 64u);
     Setup2DState();
     SetBlend(blend);
-    PspVertex* vertices = static_cast<PspVertex*>(AllocateListMemory(sizeof(PspVertex) * vertCount));
-    if (!vertices) return;
-    for (s32 i = 0; i < vertCount; ++i) {
-        vertices[i] = { source[i].u, source[i].v,
-                        MakeColor(pddiColour(source[i].r, source[i].g, source[i].b, source[i].a)),
-                        source[i].x, source[i].y, 0.0f };
-    }
-    Convert2DUvToTexels(vertices, vertCount, tex);
+    // Each vertex is converted in registers and only written to list memory,
+    // which is uncached: building it there and reading it back for the UV
+    // conversion and the sprite corners cost a RAM access per field.
+    // Same values as Convert2DUvToTexels.
+    auto* nativeTexture = tex ? static_cast<pspTexture*>(tex) : nullptr;
+    const float texelWidth = nativeTexture ? static_cast<float>(nativeTexture->GetWidth()) : 1.0f;
+    const float texelHeight = nativeTexture ? static_cast<float>(nativeTexture->GetHeight()) : 1.0f;
+    const auto convert = [&](const pddiBatchVertex& in) {
+        PspVertex out = { in.u, in.v, MakeColor(pddiColour(in.r, in.g, in.b, in.a)),
+                          in.x, in.y, 0.0f };
+        if (nativeTexture) {
+            out.u *= texelWidth;
+            out.v *= texelHeight;
+        }
+        return out;
+    };
 #if !defined(NDEBUG)
     static unsigned int overlayBatchLogCount = 0;
     if (overlayBatchLogCount < 12) {
         ++overlayBatchLogCount;
-        auto* nativeTexture = tex ? static_cast<pspTexture*>(tex) : nullptr;
+        const PspVertex vertices[1] = {convert(source[0])};
         LOG("[PSP GU] 2D batch #%u verts=%ld tex=%p pixels=%p logical=%dx%d storage=%dx%d uv=%.2f,%.2f xy=%.2f,%.2f color=%08lX",
             overlayBatchLogCount,
             static_cast<long>(vertCount),
@@ -2270,15 +2283,14 @@ void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
     // is both more reliable for the alpha-only font atlas and cheaper than
     // expanding every glyph into two triangles; keep the generic triangle
     // path for all other overlays and for circles.
-    auto* nativeTexture = tex ? static_cast<pspTexture*>(tex) : nullptr;
     if (nativeTexture && nativeTexture->GetAlphaDepth() >= 8 && (vertCount % 6) == 0) {
         const s32 spriteVertexCount = vertCount / 3;
         PspSpriteVertex* sprites = static_cast<PspSpriteVertex*>(
             AllocateListMemory(sizeof(PspSpriteVertex) * spriteVertexCount));
         if (!sprites) return;
         for (s32 i = 0, out = 0; i < vertCount; i += 6, out += 2) {
-            const PspVertex& topLeft = vertices[i + 5];
-            const PspVertex& bottomRight = vertices[i + 1];
+            const PspVertex topLeft = convert(source[i + 5]);
+            const PspVertex bottomRight = convert(source[i + 1]);
             sprites[out] = {
                 ToSpriteTexel(topLeft.u), ToSpriteTexel(topLeft.v),
                 MakeColor4444(topLeft.color),
@@ -2317,6 +2329,11 @@ void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
         pageBindingValid = false;
         gu3DStateReady = false;
         return;
+    }
+    PspVertex* vertices = static_cast<PspVertex*>(AllocateListMemory(sizeof(PspVertex) * vertCount));
+    if (!vertices) return;
+    for (s32 i = 0; i < vertCount; ++i) {
+        vertices[i] = convert(source[i]);
     }
     Draw2D(vertices, vertCount, tex);
 }
