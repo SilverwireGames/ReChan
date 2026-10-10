@@ -224,6 +224,52 @@ static void WritebackDcacheRange(const void* address, std::size_t bytes) {
                                    static_cast<unsigned int>(end - begin));
 }
 
+// The command words sceGuDrawArray writes (PSPSDK sceGuDrawArray.c) for
+// 32-bit GE addresses: VTYPE, BASE+IADDR and BASE+VADDR when present, PRIM.
+u32 EncodeGuDrawArray(int prim, int vtype, int count, u32 indices, u32 vertices,
+                      u32 words[6]) {
+    u32 n = 0;
+    if (vtype) words[n++] = (0x12u << 24) | (static_cast<u32>(vtype) & 0xffffffu);
+    if (indices) {
+        words[n++] = (0x10u << 24) | ((indices >> 8) & 0xf0000u);
+        words[n++] = (0x02u << 24) | (indices & 0xffffffu);
+    }
+    if (vertices) {
+        words[n++] = (0x10u << 24) | ((vertices >> 8) & 0xf0000u);
+        words[n++] = (0x01u << 24) | (vertices & 0xffffffu);
+    }
+    words[n++] = (0x04u << 24)
+        | (((static_cast<u32>(prim) << 16) | static_cast<u32>(count)) & 0xffffffu);
+    return n;
+}
+
+// sceGuDrawArray moves the GE stall address after every draw, a syscall.
+// Publish draws in groups instead: the same words without the update, and a
+// real sceGuDrawArray every kDrawsPerStallUpdate draws. sceGuGetMemory also
+// updates the stall, and sceGuFinish publishes the rest before any sync.
+// Only 32-bit targets can encode their pointers as GE addresses.
+constexpr u32 kDrawsPerStallUpdate = 4;
+u32 g_drawsSinceStallUpdate = 0;
+
+static void GuDrawArray(int prim, int vtype, int count, const void* indices,
+                        const void* vertices) {
+    if constexpr (sizeof(void*) == sizeof(u32)) {
+        if (++g_drawsSinceStallUpdate < kDrawsPerStallUpdate) {
+            u32 words[6];
+            const u32 n = EncodeGuDrawArray(prim, vtype, count,
+                static_cast<u32>(reinterpret_cast<std::uintptr_t>(indices)),
+                static_cast<u32>(reinterpret_cast<std::uintptr_t>(vertices)), words);
+            for (u32 i = 0; i < n; ++i) {
+                sceGuSendCommandi(static_cast<int>(words[i] >> 24),
+                                  static_cast<int>(words[i] & 0xffffffu));
+            }
+            return;
+        }
+    }
+    g_drawsSinceStallUpdate = 0;
+    sceGuDrawArray(prim, vtype, count, indices, vertices);
+}
+
 // The PSP GU's native 2D sprite path is the most predictable path for
 // glyphs: it uses the exact packed vertex layout used by the PSPSDK samples
 // (16-bit texels and positions, 4444 vertex colour).  Keeping this separate
@@ -1805,11 +1851,15 @@ void pspContext::EnsureDrawSpace(u32 vertexCount, u32 indexCount) {
 }
 
 void* pspContext::AllocateListMemory(std::size_t bytes) {
+    // The memory is in the list's uncached alias (sceGuStart ORs 0x40000000
+    // into the list address): CPU writes there are in RAM by the time the GE
+    // reads them, so it needs no data-cache writeback (a syscall per draw).
     // Callers reserve their entire draw (including all allocations) first.
     // Never restart here: earlier allocations may not have been submitted.
     if (!listOpen || bytes + 32u + 64u + static_cast<std::size_t>(sceGuCheckList())
         > sizeof(g_displayListStorage.words)) return nullptr;
     const auto raw = reinterpret_cast<std::uintptr_t>(sceGuGetMemory(static_cast<int>(bytes + 15u)));
+    g_drawsSinceStallUpdate = 0;  // sceGuGetMemory published every draw before it
     return reinterpret_cast<void*>((raw + 15u) & ~std::uintptr_t(15u));
 }
 
@@ -1928,7 +1978,6 @@ void pspContext::DrawScreenCopy(u32 sourceFormat, const void* sourceTexture) {
         strips[strip * 2 + 1] = {static_cast<u16>(right), static_cast<u16>(kHeight),
                                  static_cast<s16>(right), static_cast<s16>(kHeight), 0};
     }
-    WritebackDcacheRange(strips, sizeof(CopyVertex) * kStrips * 2u);
     sceGuScissor(0, 0, kWidth, kHeight);
     GuDisable(GU_BLEND);
     GuDisable(GU_DITHER);
@@ -1942,7 +1991,7 @@ void pspContext::DrawScreenCopy(u32 sourceFormat, const void* sourceTexture) {
     // and drop any stale texture-cache lines.
     sceGuTexSync();
     sceGuTexFlush();
-    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
+    GuDrawArray(GU_SPRITES, GU_TEXTURE_16BIT | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
                    kStrips * 2, nullptr, strips);
     PspPerf::RecordDrawSubmission(static_cast<u32>(kStrips * 2));
     sceGuScissor(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3]);
@@ -2129,7 +2178,7 @@ void pspContext::DrawVRAMQuad(u32 handle, u16 tpage, u16 cba,
         vertices[4] = vertices[2];
         vertices[5] = {u0, v0, tint, x, y, 0};
         // TRANSFORM_2D consumes texel coordinates directly, without GUM.
-        sceGuDrawArray(GU_TRIANGLES,
+        GuDrawArray(GU_TRIANGLES,
             GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
             6, nullptr, vertices);
         PspPerf::RecordDrawSubmission(6);
@@ -2258,7 +2307,7 @@ void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
         // Use the direct GU submission used by the PSPSDK 2D sprite sample.
         // The GUM wrapper is for transformed geometry; this path already
         // contains final screen-space coordinates.
-        sceGuDrawArray(GU_SPRITES,
+        GuDrawArray(GU_SPRITES,
                        GU_TEXTURE_16BIT | GU_COLOR_4444 | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
                        spriteVertexCount, nullptr, sprites);
         PspPerf::RecordDrawSubmission(static_cast<u32>(spriteVertexCount));
@@ -2279,7 +2328,7 @@ void pspContext::Draw2D(const PspVertex* vertices, int count, pddiTexture* textu
     // 2D vertices already contain final screen-space coordinates.  Submit
     // them through the direct GU path used by the PSPSDK samples so no GUM
     // matrix state from the previous 3D pass can leak into the overlay.
-    sceGuDrawArray(GU_TRIANGLES,
+    GuDrawArray(GU_TRIANGLES,
                    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
                    count, nullptr, vertices);
     PspPerf::RecordDrawSubmission(static_cast<u32>(count));
@@ -3301,7 +3350,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runEnd - start);
         // The matrices were published once above DrawPrimBuffer(). The GUM
         // wrapper repeats its dirty-matrix check for every material run.
-        sceGuDrawArray(primitive,
+        GuDrawArray(primitive,
                        GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D,
                        static_cast<int>(chunkCount), nullptr, fallbackVertices);
         PspPerf::Mark(PspPerf::RuntimeStage::DrawDone, start, chunkCount);
@@ -3331,7 +3380,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
             if ((reinterpret_cast<std::uintptr_t>(indices + start) & 3u) == 0u) {
                 const u16* const guIndices = indices + start;
                 PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runCount);
-                sceGuDrawArray(primitive,
+                GuDrawArray(primitive,
                                nativeIndexedFormat,
                                static_cast<int>(runCount), guIndices, nativeVertices);
                 buffer->MarkDirectSubmission();
@@ -3358,12 +3407,14 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                 continue;
             }
             std::copy(indices + start, indices + runEnd, guIndices);
+#if !defined(PSP_INDEXED_LIST_MEMORY)
             WritebackDcacheRange(guIndices, sizeof(u16) * runCount);
+#endif
             PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes,
                 sizeof(u16) * runCount);
             PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies);
             PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runCount);
-            sceGuDrawArray(primitive,
+            GuDrawArray(primitive,
                            nativeIndexedFormat,
                            static_cast<int>(runCount), guIndices, nativeVertices);
             buffer->MarkDirectSubmission();
@@ -3399,7 +3450,6 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                         std::copy(vertices, vertices + vertexCount,
                                   static_cast<PspVertex*>(stagedWholeVertices));
                     }
-                    WritebackDcacheRange(stagedWholeVertices, wholeVertexBytes);
                     stagedWholeSerial = g_submissionSerial;
                     PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes,
                         static_cast<u32>(wholeVertexBytes));
@@ -3413,12 +3463,11 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                         AllocateListMemory(sizeof(u16) * runCount));
                     if (guIndices) {
                         std::copy(indices + start, indices + runEnd, guIndices);
-                        WritebackDcacheRange(guIndices, sizeof(u16) * runCount);
                         PspPerf::CountRenderer(PspPerf::RendererCounter::StagingBytes,
                             sizeof(u16) * runCount);
                         PspPerf::CountRenderer(PspPerf::RendererCounter::StagingCopies);
                         PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runCount);
-                        sceGuDrawArray(primitive,
+                        GuDrawArray(primitive,
                                        nativeIndexedFormat,
                                        static_cast<int>(runCount),
                                        guIndices, stagedWholeVertices);
@@ -3570,12 +3619,14 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu indexed copy done before dcache",
             static_cast<unsigned long>(primId));
 #endif
+#if !defined(PSP_INDEXED_LIST_MEMORY)
         WritebackDcacheRange(
             guVertices,
             vertexStride * localVertexCount);
         WritebackDcacheRange(
             guIndices,
             sizeof(u16) * runCount);
+#endif
 #if defined(PSP_NATIVE_INDEXED_FULL_DCACHE)
         // The SDK's indexed GU samples flush the complete data cache before
         // submitting RAM-backed vertex/index streams.  Keep this diagnostic
@@ -3616,7 +3667,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         // GUM publishes dirty matrices then delegates to GU; both streams
         // remain immutable until FinishList's sceGuSync completes.
         PspPerf::Mark(PspPerf::RuntimeStage::DrawBegin, start, runEnd - start);
-        sceGuDrawArray(primitive,
+        GuDrawArray(primitive,
                        nativeIndexedFormat,
                        static_cast<int>(runCount), guIndices, guVertices);
 #if defined(PSP_STAGE_DIAGNOSTIC)

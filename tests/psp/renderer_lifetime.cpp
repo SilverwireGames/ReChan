@@ -43,6 +43,20 @@ int main() {
             -std::numeric_limits<float>::infinity() }) {
         require(!PackIntegralTexCoord(value, &packedUv), "invalid UV accepted");
     }
+    {
+        // Same words as PSPSDK sceGuDrawArray (VTYPE, BASE/IADDR, BASE/VADDR,
+        // PRIM; 24-bit arguments), which grouped stall updates replay.
+        u32 words[6] = {};
+        require(EncodeGuDrawArray(GU_TRIANGLES, 0x1A3, 300, 0x48812344u, 0x09ABCDE0u, words) == 6
+            && words[0] == 0x120001A3u && words[1] == 0x10080000u && words[2] == 0x02812344u
+            && words[3] == 0x10090000u && words[4] == 0x01ABCDE0u && words[5] == 0x0403012Cu,
+            "indexed draw command words");
+        require(EncodeGuDrawArray(GU_SPRITES, 0x800102, 2, 0u, 0x4400FF10u, words) == 4
+            && words[0] == 0x12800102u && words[1] == 0x10040000u && words[2] == 0x0100FF10u
+            && words[3] == 0x04060002u, "non-indexed draw command words");
+        require(EncodeGuDrawArray(GU_TRIANGLES, 0, 3, 0u, 0u, words) == 1
+            && words[0] == 0x04030003u, "draw without vertex type or arrays");
+    }
     require(MakeColor4444(0xffffffffu) == 0xffffu, "sprite white lost opacity");
     require(MakeColor4444(0x12345678u) == 0x1357u, "sprite RGBA channels crossed");
     require(MakeColor4444(0x00ffffffu) == 0x0fffu, "transparent sprite gained opacity");

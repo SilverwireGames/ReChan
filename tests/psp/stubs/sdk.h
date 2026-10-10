@@ -142,6 +142,11 @@ inline void sceGuSync(int, int) {
     }
     FakeGe::reads.clear(); ++FakeGe::syncs;
 }
+// Raw command words carry 32-bit GE addresses; the renderer only writes them
+// on the PSP itself and calls sceGuDrawArray on a 64-bit host.
+inline void sceGuSendCommandi(int, int) {
+    FakeGe::require(false, "raw GE command words on a 64-bit host");
+}
 inline void sceGuSwapBuffers() {
     std::swap(FakeDisplay::sdkDraw, FakeDisplay::sdkDisplay);
     FakeDisplay::Queue(reinterpret_cast<uintptr_t>(FakeDisplay::sdkDisplay));
