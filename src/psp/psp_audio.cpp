@@ -366,6 +366,33 @@ static u32 CursorLerpFraction(u64 cursor) {
     return (static_cast<u32>(cursor) & kCursorFractionMask) >> (kCursorFractionBits - kLerpBits);
 }
 
+// `count` music frames inside one decoded pair at a steady gain, the cursor
+// split into the pair-local frame and its 30-bit fraction (the stream always
+// advances by half a source frame). Returns the last frame's mix values.
+template <bool Mono>
+static void MixMusicRun(s32* mix, u32 count, const MusicChunk& chunk, u32 framesPerPair,
+                        u32 localFrame, u32 fraction, s32 gain, s32& lastLeft, s32& lastRight) {
+    const s16* left = chunk.left.data();
+    const s16* right = chunk.right.data();
+    const u32 lastLocal = framesPerPair - 1;
+    s32 outLeft = 0;
+    s32 outRight = 0;
+    for (u32 frame = 0; frame < count; ++frame) {
+        const u32 nextFrame = std::min<u32>(localFrame + 1, lastLocal);
+        const u32 lerp = fraction >> (kCursorFractionBits - kLerpBits);
+        outLeft = ScaleToMix(LerpQ15(left[localFrame], left[nextFrame], lerp), gain);
+        outRight = ScaleToMix(LerpQ15(right[localFrame], right[nextFrame], lerp), gain);
+        if (Mono) outLeft = outRight = (outLeft + outRight) / 2;
+        mix[frame * 2] += outLeft;
+        mix[frame * 2 + 1] += outRight;
+        fraction += static_cast<u32>(kCursorOne / 2u);
+        localFrame += fraction >> kCursorFractionBits;
+        fraction &= kCursorFractionMask;
+    }
+    lastLeft = outLeft;
+    lastRight = outRight;
+}
+
 static void MixMusicStream(s32* mix, u32 requestedFrames) {
     g_musicMixers.fetch_add(1, std::memory_order_acquire);
     if (!g_musicStream.active.load(std::memory_order_acquire)
@@ -435,6 +462,29 @@ static void MixMusicStream(s32* mix, u32 requestedFrames) {
         }
         const MusicChunk& chunkData = g_musicStream.chunks[currentBuffer];
         const u32 localFrame = sourceFrame - knownFirst;
+        if (g_musicStream.fadeFrames == 0) {
+            // Steady gain: mix every frame left in this pair (and before the
+            // stream end) in one run; the checks above only change there.
+            const u64 pairEnd = static_cast<u64>(knownFirst + framesPerPair) * kCursorOne;
+            const u64 limit = std::min(pairEnd, streamEnd);
+            constexpr u64 kHalf = kCursorOne / 2u;
+            const u64 untilLimit = (limit - g_musicStream.cursor + kHalf - 1u) / kHalf;
+            const u32 count = static_cast<u32>(std::min<u64>(untilLimit, requestedFrames - frame));
+            const u32 fraction = static_cast<u32>(g_musicStream.cursor) & kCursorFractionMask;
+            if (g_mono) {
+                MixMusicRun<true>(mix + frame * 2, count, chunkData, framesPerPair, localFrame,
+                                  fraction, gain, holdLeft, holdRight);
+            }
+            else {
+                MixMusicRun<false>(mix + frame * 2, count, chunkData, framesPerPair, localFrame,
+                                   fraction, gain, holdLeft, holdRight);
+            }
+            held = true;
+            g_musicStream.cursor += kHalf * count;
+            mixedFrames += count;
+            frame += count - 1u;  // the loop's ++frame completes the run
+            continue;
+        }
         const u32 nextFrame = std::min<u32>(localFrame + 1, framesPerPair - 1);
         const u32 fraction = CursorLerpFraction(g_musicStream.cursor);
         const s32 left = LerpQ15(chunkData.left[localFrame], chunkData.left[nextFrame], fraction);
@@ -511,6 +561,96 @@ static void ResetMusicStream() {
     g_musicStream.holdRight = 0.0f;
 }
 
+// Q15 source value: mono as is, stereo as the exact average, wider layouts as
+// their mean (Channels 0: any count above two, read from `channels`).
+template <u32 Channels>
+static s32 ReadVoiceQ15(const s16* pcm, u32 channels, u32 source, u32 next, u32 fraction) {
+    if (Channels == 1) return LerpQ15(pcm[source], pcm[next], fraction);
+    if (Channels == 2) {
+        const s32 current = pcm[source * 2] + pcm[source * 2 + 1];
+        const s32 following = pcm[next * 2] + pcm[next * 2 + 1];
+        return current * (1 << (kLerpBits - 1))
+            + static_cast<s32>((static_cast<s64>(following - current) * fraction) >> 1);
+    }
+    if (channels == 1) return ReadVoiceQ15<1>(pcm, channels, source, next, fraction);
+    if (channels == 2) return ReadVoiceQ15<2>(pcm, channels, source, next, fraction);
+    s32 current = 0;
+    s32 following = 0;
+    for (u32 channel = 0; channel < channels; ++channel) {
+        current += pcm[source * channels + channel];
+        following += pcm[next * channels + channel];
+    }
+    const s64 value = static_cast<s64>(current) * (1 << kLerpBits)
+        + static_cast<s64>(following - current) * fraction;
+    return static_cast<s32>(value / static_cast<s32>(channels));
+}
+
+// A voice's cursor below its sample end, split into the source frame and the
+// 30-bit fraction: adding the split step with a carry is exactly the u64 add,
+// and "cursor >= end" is "frame >= frames", without 64-bit work per sample.
+struct VoiceRun {
+    const s16* pcm;
+    u32 channels;
+    u32 frames;
+    u32 lastFrame;
+    u32 stepFrame;
+    u32 stepFraction;
+    bool loop;
+    u32 frame;
+    u32 fraction;
+};
+
+// Advances one output frame: wraps or ends at the sample end first, like the
+// u64 loop. Returns false when a one-shot voice ended (nothing mixed).
+static bool BeginVoiceFrame(VoiceRun& run) {
+    if (run.frame >= run.frames) {
+        if (!run.loop) return false;
+        run.frame -= run.frames;
+    }
+    return true;
+}
+
+static void AdvanceVoiceFrame(VoiceRun& run) {
+    run.fraction += run.stepFraction;
+    run.frame += run.stepFrame + (run.fraction >> kCursorFractionBits);
+    run.fraction &= kCursorFractionMask;
+}
+
+// Constant gains over `count` frames. Returns the frames mixed (fewer when a
+// one-shot voice ended).
+template <u32 Channels>
+static u32 MixVoiceSteady(s32* mix, u32 count, VoiceRun& run, s32 leftGain, s32 rightGain) {
+    VoiceRun local = run;
+    u32 frame = 0;
+    for (; frame < count; ++frame) {
+        if (!BeginVoiceFrame(local)) break;
+        const u32 nextFrame = std::min<u32>(local.frame + 1, local.lastFrame);
+        const s32 value = ReadVoiceQ15<Channels>(local.pcm, local.channels, local.frame, nextFrame,
+            local.fraction >> (kCursorFractionBits - kLerpBits));
+        mix[frame * 2] += ScaleToMix(value, leftGain);
+        mix[frame * 2 + 1] += ScaleToMix(value, rightGain);
+        AdvanceVoiceFrame(local);
+    }
+    run = local;
+    return frame;
+}
+
+static u32 MixVoiceSteady(s32* mix, u32 count, VoiceRun& run, s32 leftGain, s32 rightGain) {
+    if (leftGain == 0 && rightGain == 0) {
+        // Silent (both gains round to zero): every product is zero, so only
+        // the cursor moves.
+        u32 frame = 0;
+        for (; frame < count; ++frame) {
+            if (!BeginVoiceFrame(run)) break;
+            AdvanceVoiceFrame(run);
+        }
+        return frame;
+    }
+    if (run.channels == 1) return MixVoiceSteady<1>(mix, count, run, leftGain, rightGain);
+    if (run.channels == 2) return MixVoiceSteady<2>(mix, count, run, leftGain, rightGain);
+    return MixVoiceSteady<0>(mix, count, run, leftGain, rightGain);  // rare: 3+ channels
+}
+
 static void MixVoices(s32* mix, u32 requestedFrames) {
     for (Voice& voice : g_voices) {
         if (!voice.active) continue;
@@ -537,6 +677,12 @@ static void MixVoices(s32* mix, u32 requestedFrames) {
             if (step >= sampleEnd) step %= sampleEnd;
             if (voice.cursor >= sampleEnd) voice.cursor %= sampleEnd;
         }
+        if (requestedFrames == 0) continue;
+        // A one-shot voice at or past its end stops before mixing anything.
+        if (voice.cursor >= sampleEnd) {
+            voice.active = false;
+            continue;
+        }
 
         // The per-frame fade v += (t - v) / remaining is a linear ramp, so its
         // increment is constant: compute it once per callback (re-derived each
@@ -545,55 +691,62 @@ static void MixVoices(s32* mix, u32 requestedFrames) {
             ? (voice.targetVolume - voice.volume) / static_cast<float>(voice.fadeFrames)
             : 0.0f;
 
-        const s16* pcm = sample->pcm.data();
-        const u32 channels = sample->channels;
-        const u32 lastFrame = sample->frames - 1;
-        // Q15 source value: mono as is, stereo as the exact average, wider
-        // layouts as their mean.
-        const auto readQ15 = [&](u32 source, u32 next, u32 fraction) -> s32 {
-            if (channels == 1) return LerpQ15(pcm[source], pcm[next], fraction);
-            if (channels == 2) {
-                const s32 current = pcm[source * 2] + pcm[source * 2 + 1];
-                const s32 following = pcm[next * 2] + pcm[next * 2 + 1];
-                return current * (1 << (kLerpBits - 1))
-                    + static_cast<s32>((static_cast<s64>(following - current) * fraction) >> 1);
-            }
-            s32 current = 0;
-            s32 following = 0;
-            for (u32 channel = 0; channel < channels; ++channel) {
-                current += pcm[source * channels + channel];
-                following += pcm[next * channels + channel];
-            }
-            const s64 value = static_cast<s64>(current) * (1 << kLerpBits)
-                + static_cast<s64>(following - current) * fraction;
-            return static_cast<s32>(value / static_cast<s32>(channels));
+        const auto fadeAfterFrame = [&]() {
+            --voice.fadeFrames;
+            voice.volume = voice.fadeFrames == 0 ? voice.targetVolume : voice.volume + fadeStep;
+            // Matches the previous mixer: fade updates use the panned
+            // (non-mono-averaged) gains.
+            leftGain = GainToFixed(voice.volume * leftScale);
+            rightGain = GainToFixed(voice.volume * rightScale);
         };
 
-        for (u32 frame = 0; frame < requestedFrames; ++frame) {
-            if (voice.cursor >= sampleEnd) {
-                if (voice.loop) voice.cursor -= sampleEnd;
-                else {
-                    voice.active = false;
-                    break;
-                }
-            }
-
-            const u32 sourceFrame = static_cast<u32>(voice.cursor >> kCursorFractionBits);
-            const u32 nextFrame = std::min<u32>(sourceFrame + 1, lastFrame);
-            const s32 value = readQ15(sourceFrame, nextFrame, CursorLerpFraction(voice.cursor));
-            const u32 outputIndex = frame * 2;
-            mix[outputIndex] += ScaleToMix(value, leftGain);
-            mix[outputIndex + 1] += ScaleToMix(value, rightGain);
+        const u32 cursorFrame = static_cast<u32>(voice.cursor >> kCursorFractionBits);
+        const u32 cursorFraction = static_cast<u32>(voice.cursor) & kCursorFractionMask;
+        if (step >= sampleEnd) {
+            // A one-shot stride of at least the whole clip (extreme pitch):
+            // it mixes its current frame and the next frame is past the end.
+            const s32 value = ReadVoiceQ15<0>(sample->pcm.data(), sample->channels, cursorFrame,
+                std::min<u32>(cursorFrame + 1, sample->frames - 1),
+                cursorFraction >> (kCursorFractionBits - kLerpBits));
+            mix[0] += ScaleToMix(value, leftGain);
+            mix[1] += ScaleToMix(value, rightGain);
             voice.cursor += step;
-            if (voice.fadeFrames > 0) {
-                --voice.fadeFrames;
-                voice.volume = voice.fadeFrames == 0 ? voice.targetVolume : voice.volume + fadeStep;
-                // Matches the previous mixer: fade updates use the panned
-                // (non-mono-averaged) gains.
-                leftGain = GainToFixed(voice.volume * leftScale);
-                rightGain = GainToFixed(voice.volume * rightScale);
-            }
+            if (voice.fadeFrames > 0) fadeAfterFrame();
+            if (requestedFrames > 1) voice.active = false;
+            continue;
         }
+
+        // cursor < end and step < end: the split frame stays below
+        // 2 * frames, which fits in 32 bits for any loadable clip.
+        VoiceRun run = {
+            sample->pcm.data(), sample->channels, sample->frames, sample->frames - 1,
+            static_cast<u32>(step >> kCursorFractionBits),
+            static_cast<u32>(step) & kCursorFractionMask, voice.loop,
+            cursorFrame, cursorFraction,
+        };
+        u32 frame = 0;
+        bool ended = false;
+        // Fade frames: the gains follow the volume after every frame.
+        while (frame < requestedFrames && voice.fadeFrames > 0) {
+            if (!BeginVoiceFrame(run)) {
+                ended = true;
+                break;
+            }
+            const u32 nextFrame = std::min<u32>(run.frame + 1, run.lastFrame);
+            const s32 value = ReadVoiceQ15<0>(run.pcm, run.channels, run.frame, nextFrame,
+                run.fraction >> (kCursorFractionBits - kLerpBits));
+            mix[frame * 2] += ScaleToMix(value, leftGain);
+            mix[frame * 2 + 1] += ScaleToMix(value, rightGain);
+            AdvanceVoiceFrame(run);
+            ++frame;
+            fadeAfterFrame();
+        }
+        if (!ended && frame < requestedFrames) {
+            const u32 count = requestedFrames - frame;
+            ended = MixVoiceSteady(mix + frame * 2, count, run, leftGain, rightGain) < count;
+        }
+        voice.cursor = (static_cast<u64>(run.frame) << kCursorFractionBits) | run.fraction;
+        if (ended) voice.active = false;
     }
 }
 

@@ -1,6 +1,7 @@
 // The real PSP callback, with only kernel/device/file I/O stubbed. Timing is
 // measured on Allegrex in PPSSPP, not inferred from this host test.
 #include "../../src/psp/psp_audio.cpp"
+#include "audio_mixer_reference.h"
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -27,6 +28,177 @@ static void reset() {
     g_musicStream.active.store(false);
     g_masterVolume = 1.0f;
     g_mono = false;
+}
+
+// --- Bit-exact equivalence with the per-frame mixer (audio_mixer_reference.h)
+struct MixerState {
+    std::array<Voice, kMaxVoices> voices;
+    u64 cursor;
+    float volume;
+    float targetVolume;
+    u32 fadeFrames;
+    u32 currentPair;
+    u32 currentBuffer;
+    u32 readyBuffer;
+    u32 readyPair;
+    u32 requestedPair;
+    bool active;
+    float holdLeft;
+    float holdRight;
+};
+
+static MixerState SaveMixer() {
+    return {g_voices, g_musicStream.cursor, g_musicStream.volume, g_musicStream.targetVolume,
+            g_musicStream.fadeFrames, g_musicStream.currentPair, g_musicStream.currentBuffer.load(),
+            g_musicStream.readyBuffer.load(), g_musicStream.readyPair.load(),
+            g_musicStream.requestedPair.load(), g_musicStream.active.load(),
+            g_musicStream.holdLeft, g_musicStream.holdRight};
+}
+
+static void RestoreMixer(const MixerState& state) {
+    g_voices = state.voices;
+    g_musicStream.cursor = state.cursor;
+    g_musicStream.volume = state.volume;
+    g_musicStream.targetVolume = state.targetVolume;
+    g_musicStream.fadeFrames = state.fadeFrames;
+    g_musicStream.currentPair = state.currentPair;
+    g_musicStream.currentBuffer.store(state.currentBuffer);
+    g_musicStream.readyBuffer.store(state.readyBuffer);
+    g_musicStream.readyPair.store(state.readyPair);
+    g_musicStream.requestedPair.store(state.requestedPair);
+    g_musicStream.active.store(state.active);
+    g_musicStream.holdLeft = state.holdLeft;
+    g_musicStream.holdRight = state.holdRight;
+}
+
+static bool SameBits(float a, float b) { return std::memcmp(&a, &b, sizeof(a)) == 0; }
+
+static bool SameMixer(const MixerState& a, const MixerState& b) {
+    for (u32 i = 0; i < kMaxVoices; ++i) {
+        const Voice& x = a.voices[i];
+        const Voice& y = b.voices[i];
+        if (x.cursor != y.cursor || !SameBits(x.volume, y.volume) || x.fadeFrames != y.fadeFrames
+            || x.active != y.active || x.step != y.step || x.stepRate != y.stepRate) {
+            std::fprintf(stderr, "voice %u: cursor %llu/%llu active %d/%d fade %u/%u\n", i,
+                static_cast<unsigned long long>(x.cursor), static_cast<unsigned long long>(y.cursor),
+                x.active, y.active, x.fadeFrames, y.fadeFrames);
+            return false;
+        }
+    }
+    return a.cursor == b.cursor && SameBits(a.volume, b.volume) && a.fadeFrames == b.fadeFrames
+        && a.currentPair == b.currentPair && a.currentBuffer == b.currentBuffer
+        && a.readyBuffer == b.readyBuffer && a.readyPair == b.readyPair
+        && a.requestedPair == b.requestedPair && a.active == b.active
+        && SameBits(a.holdLeft, b.holdLeft) && SameBits(a.holdRight, b.holdRight);
+}
+
+static u32 g_random = 0x12345678u;
+static u32 Random(u32 limit) {
+    g_random = g_random * 1664525u + 1013904223u;
+    return static_cast<u32>((static_cast<u64>(g_random >> 8) * limit) >> 24);
+}
+template <typename T, std::size_t N>
+static T Pick(const T (&values)[N]) { return values[Random(N)]; }
+
+static u32 CheckReferenceEquivalence() {
+    std::vector<s32> referenceMix(kOutputFrames * 2);
+    std::vector<s32> segmentedMix(kOutputFrames * 2);
+    for (MusicChunk& chunk : g_musicStream.chunks) {
+        for (s16& value : chunk.left) value = static_cast<s16>(Random(65536) - 32768);
+        for (s16& value : chunk.right) value = static_cast<s16>(Random(65536) - 32768);
+    }
+    const u32 frameCounts[] = {1u, 2u, 3u, 17u, 257u, 1000u, 5000u};
+    const u32 rates[] = {8000u, 11025u, 22050u, 44100u, 48000u, 96000u};
+    const float pitches[] = {0.05f, 0.5f, 1.0f, 1.37f, 3.0f, 12.0f, 1.0e6f, 1.0e9f};
+    const float volumes[] = {0.0f, 1.0e-6f, 0.3f, 1.0f, 2.5f};
+    const u32 callbackFrames[] = {1u, 2u, 37u, 512u, kOutputFrames, kOutputFrames};
+    u32 callbacks = 0;
+    for (u32 scenario = 0; scenario < 1500; ++scenario) {
+        reset();
+        g_mono = Random(4) == 0;
+        g_masterVolume = Random(3) == 0 ? 0.37f : 1.0f;
+        AudioSample samples[4] = {};
+        for (AudioSample& sample : samples) {
+            const u32 channels = 1u + Random(3);
+            const u32 frames = Pick(frameCounts);
+            std::vector<s16> pcm(frames * channels);
+            for (s16& value : pcm) {
+                value = Random(8) == 0 ? (Random(2) ? 32767 : -32768)
+                                       : static_cast<s16>(Random(65536) - 32768);
+            }
+            sample = AudioEngine::LoadSample(pcm.data(), frames, Pick(rates), channels);
+        }
+        const u32 voiceCount = 1u + Random(8);
+        for (u32 i = 0; i < voiceCount; ++i) {
+            const AudioSample sample = samples[Random(4)];
+            const AudioVoice voice = AudioEngine::PlaySample(sample, Pick(volumes),
+                (static_cast<float>(Random(201)) - 100.0f) / 100.0f, Random(2) == 0);
+            if (voice == AUDIO_VOICE_INVALID) continue;
+            AudioEngine::SetVoicePitch(voice, Random(10) == 0
+                ? std::numeric_limits<float>::infinity() : Pick(pitches));
+            Voice& state = g_voices[voice - 1];
+            const u64 end = static_cast<u64>(g_samples[sample - 1].frames) * kCursorOne;
+            const u32 cursorKind = Random(4);
+            if (cursorKind == 1) state.cursor = end - 1u - Random(1u << 20) % end;
+            if (cursorKind == 2) state.cursor = end + Random(1u << 30);
+            if (cursorKind == 3) state.cursor = (static_cast<u64>(Random(1u << 20)) << 20) % end;
+            if (Random(3) == 0) {
+                AudioEngine::FadeVoiceVolume(voice, Pick(volumes), Random(60));
+            }
+        }
+        if (Random(3) != 0) {
+            const u32 pairs = 1u + Random(3);
+            g_musicStream.pairCount = pairs;
+            g_musicStream.framesPerPair = kMusicChunkSamples;
+            g_musicStream.totalFrames = pairs * kMusicChunkSamples - Random(3) * Random(700);
+            g_musicStream.loop = Random(2) == 0;
+            const u32 pair = Random(pairs);
+            g_musicStream.currentPair = pair;
+            g_musicStream.currentBuffer.store(Random(2));
+            const u32 lastFrame = std::min(g_musicStream.totalFrames, (pair + 1u) * kMusicChunkSamples);
+            const u32 nearEnd = Random(1500);
+            const u32 first = lastFrame > nearEnd ? lastFrame - nearEnd : pair * kMusicChunkSamples;
+            g_musicStream.cursor = static_cast<u64>(std::max(first, pair * kMusicChunkSamples)) * kCursorOne
+                + (Random(2) ? kCursorOne / 2u : 0u);
+            if (Random(4) != 0) {
+                g_musicStream.readyPair.store(pair + 1u < pairs ? pair + 1u : 0u);
+                g_musicStream.readyBuffer.store(1u - g_musicStream.currentBuffer.load());
+            }
+            g_musicStream.volume = Pick(volumes);
+            g_musicStream.targetVolume = Pick(volumes);
+            g_musicStream.fadeFrames = Random(3) == 0 ? Random(3000) : 0u;
+            g_musicStream.holdLeft = 0.0f;
+            g_musicStream.holdRight = 0.0f;
+            g_musicStream.active.store(true);
+        }
+        for (u32 callback = 0; callback < 4; ++callback) {
+            const u32 frames = Pick(callbackFrames);
+            const MixerState before = SaveMixer();
+            std::fill(referenceMix.begin(), referenceMix.end(), 0);
+            ReferenceMixVoices(referenceMix.data(), frames);
+            ReferenceMixMusicStream(referenceMix.data(), frames);
+            const MixerState reference = SaveMixer();
+            RestoreMixer(before);
+            std::fill(segmentedMix.begin(), segmentedMix.end(), 0);
+            MixVoices(segmentedMix.data(), frames);
+            MixMusicStream(segmentedMix.data(), frames);
+            const MixerState segmented = SaveMixer();
+            if (referenceMix != segmentedMix) {
+                u32 first = 0;
+                while (referenceMix[first] == segmentedMix[first]) ++first;
+                std::fprintf(stderr, "scenario %u callback %u frames %u: mix[%u] %d != %d\n",
+                    scenario, callback, frames, first, referenceMix[first], segmentedMix[first]);
+                require(false, "segmented mixer output differs from the per-frame mixer");
+            }
+            if (!SameMixer(reference, segmented)) {
+                std::fprintf(stderr, "scenario %u callback %u frames %u\n", scenario, callback, frames);
+                require(false, "segmented mixer state differs from the per-frame mixer");
+            }
+            ++callbacks;
+        }
+    }
+    reset();
+    return callbacks;
 }
 
 int main() {
@@ -112,5 +284,8 @@ int main() {
     AudioCallback(output.data(), kOutputFrames, nullptr);
     require(output[0] == 4000 && output[4] == 8000 && output.back() == -8000, "stream pair boundary");
     g_musicStream.active.store(false);
-    std::printf("PASS: PSP mixer, reference PCM max error=%d, pitch/wrap/long-track/pair handoff\n", maximumError);
+    const u32 equivalenceCallbacks = CheckReferenceEquivalence();
+    std::printf("PASS: PSP mixer, reference PCM max error=%d, pitch/wrap/long-track/pair handoff, "
+                "%u callbacks bit-exact with the per-frame mixer\n",
+                maximumError, equivalenceCallbacks);
 }
