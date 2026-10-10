@@ -1,6 +1,9 @@
 #include "common.h"
 #include "gen/effects.h"
 #include "p3d/lvector.h"
+#if defined(RC_PLATFORM_PSP)
+#include "psp/psp_perf.h"
+#endif
 
 #include <vector>
 
@@ -225,6 +228,9 @@ s32 Effects_DrawEffects(s32 blockNum) {
 
     for (ccMinNode* node = g_effectsList.head; node; node = node->next) {
         Effects* effect = static_cast<Effects*>(static_cast<ccNode*>(node));
+#if defined(RC_PLATFORM_PSP)
+        if (blockNum == 4096) PspPerf::CountRenderer(PspPerf::RendererCounter::OverlayEffectWalk);
+#endif
         if (effect->debugDisabled) {
             continue;
         }
@@ -232,6 +238,9 @@ s32 Effects_DrawEffects(s32 blockNum) {
         if (IsDirectorOverlayRoute(effect)) {
             result = 4096;
             if (blockNum == 4096) {
+#if defined(RC_PLATFORM_PSP)
+                PspPerf::CountRenderer(PspPerf::RendererCounter::OverlayEffectDraws);
+#endif
                 effect->Display(blockNum);
             }
         }

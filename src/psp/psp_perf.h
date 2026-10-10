@@ -49,6 +49,9 @@ enum class RendererCounter : u32 {
     HudUs,
     // Inside SkeletonUs: the joints' pre/post callbacks (game code).
     SkelCallbackUs,
+    // Director overlay pass (DrawDirectorOverlays): its time, the effects it
+    // displayed and the effects list it walked to find them.
+    DirectorOverlayUs, OverlayEffectDraws, OverlayEffectWalk,
     Count
 };
 

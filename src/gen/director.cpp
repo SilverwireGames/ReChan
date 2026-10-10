@@ -3632,6 +3632,9 @@ void runDirector(Handler* h) {
 // HandleWideScreen no longer runs here - see the call site in Director::Process().
 void DrawDirectorOverlays(Handler* h) {
     MARKFUNCTION(0x8003BB34);
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer overlayTimer(PspPerf::RendererCounter::DirectorOverlayUs);
+#endif
     if (g_director) {
         // Overlay effects still sample PSX-style world VRAM pages. Ensure
         // overlay rendering starts from deterministic world texture state.
