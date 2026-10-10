@@ -1700,7 +1700,8 @@ void pspContext::BeginFrame() {
 // 0 clock read, 1 list allocation (sceGuGetMemory), 2 eight NOP command
 // words (uncached list writes), 3 an off-screen 2D triangle (sceGuDrawArray
 // with its stall update), 4 CLUT load + texture image, 5 a 64-byte data-cache
-// writeback, 6 a page/CLUT bind alternating between two cached CLUTs.
+// writeback, 6 a page/CLUT bind alternating between two cached CLUTs,
+// 7 a whole off-screen untextured DrawPrimBuffer.
 void pspContext::RunDrawMicrobench() {
     constexpr u32 kReps = 200;
     EnsureListSpace(kReps * 160u + 4096u);
@@ -1733,7 +1734,7 @@ void pspContext::RunDrawMicrobench() {
     }
     time(5, [&](u32 i) { WritebackDcacheRange(framePalettes.data() + (i & 7u) * 32u, 64u); });
     const u32 savedVramHandle = vramHandle;
-    if (pageBindingValid && clutBindingValid) {
+    if (lastBoundHandle != 0) {
         const u32 handle = lastBoundHandle;
         const u16 tpage = lastBoundTpage;
         const u16 cba = lastBoundCba;
@@ -1741,6 +1742,27 @@ void pspContext::RunDrawMicrobench() {
             vramHandle = handle;
             BindPage(tpage, (i & 1u) ? cba : static_cast<u16>(cba ^ 1u), false, true);
         });
+    }
+    // 7: a whole untextured DrawPrimBuffer of one off-screen triangle (3D
+    // state, matrices, staging, draw), hot: compare with the in-game cost.
+    {
+        static pspPrimBuffer* triangle = nullptr;
+        if (!triangle) {
+            triangle = new pspPrimBuffer({PDDI_PRIM_TRIANGLES, PDDI_V_POSITION | PDDI_V_COLOUR, 3, 3});
+            // Degenerate (zero area): the GE rasterizes nothing.
+            const float data[3 * 6] = {
+                0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f,
+                0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f,
+                0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f,
+            };
+            const u16 indices[3] = {0, 1, 2};
+            triangle->SetVertexData(data, 3);
+            triangle->SetIndices(indices, 3);
+        }
+        vramHandle = 0;
+        gu3DStateReady = false;
+        Setup3DState();
+        time(7, [&](u32) { DrawPrimBuffer(triangle, 0, 3); });
     }
     vramHandle = savedVramHandle;
     // The texture/CLUT registers changed outside the caches.
