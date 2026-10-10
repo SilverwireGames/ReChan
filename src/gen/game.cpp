@@ -2498,7 +2498,13 @@ bool Game::gsDetermineNextGameState(Game* game) {
 
     // PSX: decrement lives and branch to EndGame if depleted, else QueuePetalLoad.
     if (Player::s_player) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_BENCH_COMBAT)
+        // Unattended combat benchmark: every death respawns at the checkpoint
+        // instead of costing a life, so a run never stops on Game Over.
+        s32 lives = Player::s_player->GetLivesLeft() > 0 ? Player::s_player->GetLivesLeft() : 1;
+#else
         s32 lives = Player::s_player->GetLivesLeft() - 1;
+#endif
         Player::s_player->SetLivesLeft(lives);
 
         if (lives <= 0) {
