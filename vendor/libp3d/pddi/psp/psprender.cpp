@@ -1,6 +1,7 @@
 #include "pddi/psp/psprender.h"
 #include "pc/log.h"
 #include "psp/psp_perf.h"
+#include "p3d/fileio.h"
 #if defined(PSP_DRAW_MICROBENCH)
 #include "p3d/p3dmath.h"
 #endif
@@ -1648,27 +1649,26 @@ bool WritePspLastFrame(const char* path) {
 #endif
     const auto* pixels = reinterpret_cast<const u8*>(
         (reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr()) + offset) | 0x40000000u);
-    FILE* file = std::fopen(path, "wb");
-    if (!file) return false;
     constexpr u32 kRowBytes = kWidth * 3u;  // 1440: already a multiple of 4
     constexpr u32 kImageBytes = kRowBytes * kHeight;
-    u8 header[54] = {'B', 'M'};
+    std::vector<u8> bmp(54u + kImageBytes, 0u);
     const auto put32 = [&](u32 at, u32 value) {
-        for (u32 i = 0; i < 4u; ++i) header[at + i] = static_cast<u8>(value >> (8u * i));
+        for (u32 i = 0; i < 4u; ++i) bmp[at + i] = static_cast<u8>(value >> (8u * i));
     };
+    bmp[0] = 'B';
+    bmp[1] = 'M';
     put32(2, 54u + kImageBytes);
     put32(10, 54u);
     put32(14, 40u);
     put32(18, kWidth);
     put32(22, kHeight);
-    header[26] = 1;
-    header[28] = 24;
+    bmp[26] = 1;
+    bmp[28] = 24;
     put32(34, kImageBytes);
-    bool ok = std::fwrite(header, sizeof(header), 1, file) == 1;
-    static u8 row[kRowBytes];
-    for (int y = kHeight - 1; ok && y >= 0; --y) {
+    u8* out = bmp.data() + 54u;
+    for (int y = kHeight - 1; y >= 0; --y) {
         const u8* line = pixels + static_cast<std::size_t>(y) * kBufferWidth * kFramebufferPixelBytes;
-        for (int x = 0; x < kWidth; ++x) {
+        for (int x = 0; x < kWidth; ++x, out += 3) {
             u32 r, g, b;
             if (kFramebufferPixelBytes == 2u) {
                 const u32 c = line[x * 2] | (static_cast<u32>(line[x * 2 + 1]) << 8);
@@ -1679,13 +1679,13 @@ bool WritePspLastFrame(const char* path) {
             else {
                 r = line[x * 4]; g = line[x * 4 + 1]; b = line[x * 4 + 2];
             }
-            row[x * 3] = static_cast<u8>(b);
-            row[x * 3 + 1] = static_cast<u8>(g);
-            row[x * 3 + 2] = static_cast<u8>(r);
+            out[0] = static_cast<u8>(b);
+            out[1] = static_cast<u8>(g);
+            out[2] = static_cast<u8>(r);
         }
-        ok = std::fwrite(row, kRowBytes, 1, file) == 1;
     }
-    return std::fclose(file) == 0 && ok;
+    // Same location as the benchmark reports (p3d::io resolves the data dir).
+    return p3d::io::WriteFile(path, bmp.data(), bmp.size());
 }
 #endif
 
