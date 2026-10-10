@@ -531,6 +531,34 @@ private:
     static constexpr u32 kFramePaletteCapacity = 1024;
     alignas(16) std::array<u16, kFramePaletteCapacity * 256> framePalettes{};
     u32 framePaletteUsed = 0;
+    // Converted PSX VRAM palettes reused across binds and frames (BindPage).
+    // An entry is valid while the VRAM row it was read from keeps its write
+    // generation, and is only refilled when no draw of the open list uses it
+    // (lastUseSerial differs from the current submission serial).
+    struct ClutCacheEntry {
+        u32 rowGeneration = 0;
+        u32 epoch = 0;
+        u32 lastUseSerial = 0;
+        u32 lastUseTick = 0;
+        u16 cba = 0;
+        u8 depth = 0;
+        u8 flags = 0;
+        bool valid = false;
+    };
+    static constexpr u32 kClutCacheEntries = 64;
+    static constexpr u32 kClutCacheNone = 0xFFFFFFFFu;
+    static constexpr u32 kVramRows = 512;
+    std::array<ClutCacheEntry, kClutCacheEntries> clutCache{};
+    alignas(16) std::array<u16, kClutCacheEntries * 256> clutCachePalettes{};
+    // Write generation per row of the PSX VRAM image (handle 1); vramEpoch
+    // covers whole-image rewrites and frees.
+    std::array<u32, kVramRows> vramRowGeneration{};
+    u32 vramWriteCounter = 1;
+    u32 vramEpoch = 1;
+    u32 clutCacheClock = 0;
+    // Cache entry whose palette the GE CLUT currently holds (or none).
+    u32 geClutEntry = kClutCacheNone;
+    u32 AcquireClutCacheEntry();
     u32 cacheAge = 1;
     bool listOpen = false;
 

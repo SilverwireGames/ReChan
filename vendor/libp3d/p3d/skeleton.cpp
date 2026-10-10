@@ -125,18 +125,28 @@ const STreeJoint* STreeData::GetJoint(s32 index) const {
     return &joints[jointIndex];
 }
 
+// Mat4 storage without the identity constructor. The matrix stack and the
+// capture buffer are only read after being written (push before pop, capture
+// before a valid load), so initialising all 96 slots on every skeleton build
+// was pure overhead (~1.5k stores per call, several calls per character per
+// frame).
+union UninitMat4 {
+    Mat4 value;
+    UninitMat4() {}
+};
+
 static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices, bool invokeCallbacks) {
     if (!skeleton || !skeleton->joints || skeleton->numJoints == 0) {
         return;
     }
 
-    Mat4 matStack[32];
+    UninitMat4 matStack[32];
     s32 stackTop = 0;
     Mat4 current;
 
     // Capture/load buffer keys are the raw dword offsets loaded from the joint chunk.
     s32 captureKeys[64];
-    Mat4 captureValues[64];
+    UninitMat4 captureValues[64];
     bool captureValid[64];
     s32 captureCount = 0;
 
@@ -167,7 +177,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
         s16 savedRotationY = 0;
         s16 savedRotationZ = 0;
         bool savedUseOverrideMatrix = false;
-        Mat4 savedOverrideMatrix;
+        UninitMat4 savedOverrideMatrix;
         f32 savedRenderScale = 1.0f;
 
         if (preserveJointState) {
@@ -179,13 +189,13 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
             savedRotationY = j.rotationY;
             savedRotationZ = j.rotationZ;
             savedUseOverrideMatrix = j.useOverrideMatrix;
-            savedOverrideMatrix = j.overrideMatrix;
+            savedOverrideMatrix.value = j.overrideMatrix;
             savedRenderScale = j.renderScale;
         }
 
         if (j.flags & STF_PUSH_MATRIX) {
             if (stackTop < 32) {
-                matStack[stackTop++] = current;
+                matStack[stackTop++].value = current;
             }
         }
 
@@ -216,7 +226,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
             if (j.captureBufferIdx >= 0) {
                 s32 slot = findCaptureSlot(j.captureBufferIdx);
                 if (slot >= 0) {
-                    captureValues[slot] = current;
+                    captureValues[slot].value = current;
                     captureValid[slot] = true;
                 }
             }
@@ -226,7 +236,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
             if (j.captureBufferIdx >= 0) {
                 s32 slot = findCaptureSlot(j.captureBufferIdx);
                 if (slot >= 0 && captureValid[slot]) {
-                    current = captureValues[slot];
+                    current = captureValues[slot].value;
                 }
             }
         }
@@ -235,7 +245,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
 
         if (j.flags & STF_POP_MATRIX) {
             if (stackTop > 0) {
-                current = matStack[--stackTop];
+                current = matStack[--stackTop].value;
             }
         }
 
@@ -249,7 +259,7 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
             j.rotationY = savedRotationY;
             j.rotationZ = savedRotationZ;
             j.useOverrideMatrix = savedUseOverrideMatrix;
-            j.overrideMatrix = savedOverrideMatrix;
+            j.overrideMatrix = savedOverrideMatrix.value;
             j.renderScale = savedRenderScale;
         }
     }

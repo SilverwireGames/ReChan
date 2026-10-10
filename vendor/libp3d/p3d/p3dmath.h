@@ -162,11 +162,8 @@ inline void p3dBuildRotMatrixXYZ(s16 ax, s16 ay, s16 az, Mat4& m) {
 // PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
 // PSX computes: R = Rx(ax) * Rz(az) * Ry(ay)
 // Verified against PSX decompile scratchpad implementation
-inline void p3dBuildRotMatrixYZX(f32 ax, f32 ay, f32 az, Mat4& m) {
-    f32 cx = std::cos(ax), sx = std::sin(ax);
-    f32 cy = std::cos(ay), sy = std::sin(ay);
-    f32 cz = std::cos(az), sz = std::sin(az);
-
+inline void p3dBuildRotMatrixYZXFromSinCos(f32 cx, f32 sx, f32 cy, f32 sy, f32 cz, f32 sz,
+                                           Mat4& m) {
     m = Mat4();
     m.m[0]  = cz * cy;
     m.m[1]  = cx * sz * cy + sx * sy;
@@ -181,13 +178,52 @@ inline void p3dBuildRotMatrixYZX(f32 ax, f32 ay, f32 az, Mat4& m) {
     m.m[10] = sx * sz * sy + cx * cy;
 }
 
+inline void p3dBuildRotMatrixYZX(f32 ax, f32 ay, f32 az, Mat4& m) {
+    p3dBuildRotMatrixYZXFromSinCos(std::cos(ax), std::sin(ax), std::cos(ay), std::sin(ay),
+                                   std::cos(az), std::sin(az), m);
+}
+
+#if defined(RC_PLATFORM_PSP)
+// Exact sinf/cosf of a PSX angle, memoized. Skeletons rebuild every joint's
+// rotation several times per frame (logic tick, attack capture, render pose)
+// from a small set of 16-bit angles; on the Allegrex each libm sinf/cosf costs
+// hundreds of cycles. A hit returns the very values the libm call produced.
+struct P3dSinCosEntry {
+    u32 key;  // angle + 1, so the zeroed table starts empty
+    f32 s;
+    f32 c;
+};
+inline P3dSinCosEntry g_p3dSinCosCache[1024];
+
+inline void p3dSinCosPsxAngle(s32 angle, f32& s, f32& c) {
+    const u32 a = static_cast<u32>(angle) & 0xFFFFu;
+    P3dSinCosEntry& entry = g_p3dSinCosCache[(a ^ (a >> 10)) & 1023u];
+    if (entry.key != a + 1u) {
+        const f32 radians = ANGLE2RAD(a);
+        entry.s = std::sin(radians);
+        entry.c = std::cos(radians);
+        entry.key = a + 1u;
+    }
+    s = entry.s;
+    c = entry.c;
+}
+#endif
+
 // Overload taking PSX angle units (s32) - converts internally
 inline void p3dBuildRotMatrixYZX(s32 ax, s32 ay, s32 az, Mat4& m) {
+#if defined(RC_PLATFORM_PSP)
+    f32 sx, cx, sy, cy, sz, cz;
+    p3dSinCosPsxAngle(ax, sx, cx);
+    p3dSinCosPsxAngle(ay, sy, cy);
+    p3dSinCosPsxAngle(az, sz, cz);
+    p3dBuildRotMatrixYZXFromSinCos(cx, sx, cy, sy, cz, sz, m);
+#else
     p3dBuildRotMatrixYZX(
         ANGLE2RAD(ax & 0xFFFF),
         ANGLE2RAD(ay & 0xFFFF),
         ANGLE2RAD(az & 0xFFFF),
         m);
+#endif
 }
 
 inline void p3dBuildRotMatrixYZX(u16 ax, u16 ay, u16 az, Mat4& m) {

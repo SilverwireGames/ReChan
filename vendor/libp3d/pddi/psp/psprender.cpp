@@ -1389,6 +1389,7 @@ void pspContext::BeginFrame() {
     ResetDisplayListGuard();
     PspPerf::BeginFrame();
     ResetGuStateCache();
+    geClutEntry = kClutCacheNone;
     gu3DStateReady = false;
     gu2DStateReady = false;
     // A pause backdrop lives only while consecutive frames draw it. If the
@@ -1414,9 +1415,9 @@ void pspContext::BeginFrame() {
         g_staticVram.allocatedBytes,
         kEdramBytes > g_staticVram.allocatedBytes ? kEdramBytes - g_staticVram.allocatedBytes : 0u);
 #endif
-    sceGuStart(GU_DIRECT, g_displayListStorage.words);
     // First GE command of the frame: the draw target must be off screen.
     WaitForSwapVblank();
+    sceGuStart(GU_DIRECT, g_displayListStorage.words);
     listOpen = true;
     Setup3DState();
     if (pendingDepthClear) ClearDepthNow();
@@ -2212,6 +2213,8 @@ void pspContext::InvalidatePages(u32 handle) {
     if (clutBindingValid && lastClutHandle == handle) {
         clutBindingValid = false;
     }
+    // Create/update/destroy of the PSX VRAM image: no cached palette survives.
+    if (handle == 1u) ++vramEpoch;
     for (auto& cache : pageCache) {
         if (cache.handle == handle) cache.handle = 0;
     }
@@ -2254,6 +2257,10 @@ void pspContext::UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
         u16* const destination = image->pixels + row * image->width + minX;
         const u16* const source = data + row * textureW + minX;
         std::memcpy(destination, source, rowBytes);
+        // Any palette read from this row must be converted again.
+        if (handle == 1u && static_cast<u32>(row) < kVramRows) {
+            vramRowGeneration[static_cast<u32>(row)] = ++vramWriteCounter;
+        }
     }
 
     const auto overlaps = [](int aMin, int aMax, int bMin, int bMax) {
@@ -2278,6 +2285,26 @@ void pspContext::UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
         // Indexed texels do not depend on the CLUT. BindPage snapshots the
         // current palette, so palette-only updates must not evict T4/T8 pages.
     }
+}
+
+// A free or least-recently-used palette slot that no draw of the open list
+// references (the GE may still read those until the next fence).
+u32 pspContext::AcquireClutCacheEntry() {
+    u32 victim = kClutCacheNone;
+    u32 victimTick = 0;
+    for (u32 index = 0; index < kClutCacheEntries; ++index) {
+        const ClutCacheEntry& entry = clutCache[index];
+        if (!entry.valid) {
+            if (entry.lastUseSerial != g_submissionSerial) return index;
+            continue;
+        }
+        if (entry.lastUseSerial == g_submissionSerial) continue;
+        if (victim == kClutCacheNone || entry.lastUseTick < victimTick) {
+            victim = index;
+            victimTick = entry.lastUseTick;
+        }
+    }
+    return victim;
 }
 
 pspContext::PageCache* pspContext::GetDecodedPage(u32 handle, u16 tpage) {
@@ -2554,46 +2581,107 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
             && lastClutWordZeroKey == wordZeroKey
             && lastClutBlend == blendUsesZeroKey;
         if (!reuseClut) {
-            const u16* paletteSource = image->pixels
-                + (clutY % static_cast<u32>(image->height)) * image->width;
-            // Gather the raw row once. Unlike the CBA key above, its contents
-            // decide whether the GE already holds the same converted palette.
-            // Keep row wrapping for nonstandard widths and right-edge CLUTs.
-            u32 sourceX = clutX % static_cast<u32>(image->width);
-            for (u32 i = 0; i < paletteSize; ++i) {
-                g_clutRawScratch[i] = paletteSource[sourceX];
-                if (++sourceX == static_cast<u32>(image->width)) sourceX = 0;
-            }
-            const bool sameGeContent = g_clutGeContentValid
-                && g_clutGeDepth == depth
-                && g_clutGeWordZeroKey == wordZeroKey
-                && g_clutGeBlend == blendUsesZeroKey
-                && std::memcmp(g_clutRawScratch, g_clutGeRaw,
-                               static_cast<std::size_t>(paletteSize) * sizeof(u16)) == 0;
-            if (!sameGeContent) {
-                u16* const palette = framePalettes.data() + framePaletteUsed++ * 256u;
-                PspPerf::CountRenderer(PspPerf::RendererCounter::PaletteEntries, paletteSize);
-                for (u32 i = 0; i < paletteSize; ++i) {
+            const u32 clutRow = clutY % static_cast<u32>(image->height);
+            const u16* paletteSource = image->pixels + clutRow * image->width;
+            const u8 clutFlags = static_cast<u8>((wordZeroKey ? 1u : 0u)
+                | (blendUsesZeroKey ? 2u : 0u));
 #if defined(PSP_PALETTE_REFERENCE)
-                    // Reference A/B: convert straight from the row, one divide per colour.
-                    const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
+            constexpr bool clutCacheable = false;
 #else
-                    const u16 word = g_clutRawScratch[i];
+            // Palettes of the PSX VRAM image are reused while their row's
+            // write generation holds (no gather, compare or conversion).
+            const bool clutCacheable = vramHandle == 1u
+                && static_cast<u32>(image->height) == kVramRows;
 #endif
-                    palette[i] = ConvertPsxTexelToGu5551(word,
-                        wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+            u32 cachedIndex = kClutCacheNone;
+            if (clutCacheable) {
+                for (u32 index = 0; index < kClutCacheEntries; ++index) {
+                    ClutCacheEntry& entry = clutCache[index];
+                    if (!entry.valid || entry.cba != cba || entry.depth != depth
+                        || entry.flags != clutFlags) {
+                        continue;
+                    }
+                    if (entry.epoch == vramEpoch
+                        && entry.rowGeneration == vramRowGeneration[clutRow]) {
+                        cachedIndex = index;
+                        break;
+                    }
+                    // Stale. Free it unless the open list still reads it; a
+                    // fresh duplicate refilled after a mid-list write may follow.
+                    if (entry.lastUseSerial != g_submissionSerial) entry.valid = false;
                 }
-                WritebackDcacheRange(palette,
-                    static_cast<std::size_t>(paletteSize) * sizeof(u16));
-                GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
-                sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
-                PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
-                std::memcpy(g_clutGeRaw, g_clutRawScratch,
-                            static_cast<std::size_t>(paletteSize) * sizeof(u16));
-                g_clutGeDepth = static_cast<u8>(depth);
-                g_clutGeWordZeroKey = wordZeroKey;
-                g_clutGeBlend = blendUsesZeroKey;
-                g_clutGeContentValid = true;
+            }
+            if (cachedIndex != kClutCacheNone) {
+                ClutCacheEntry& entry = clutCache[cachedIndex];
+                entry.lastUseSerial = g_submissionSerial;
+                entry.lastUseTick = ++clutCacheClock;
+                if (geClutEntry != cachedIndex) {
+                    GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
+                    sceGuClutLoad(depth == 0 ? 1 : 16,
+                        clutCachePalettes.data() + cachedIndex * 256u);
+                    PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+                    geClutEntry = cachedIndex;
+                    // The raw-row tracker below no longer describes the GE.
+                    g_clutGeContentValid = false;
+                }
+            }
+            else {
+                // Gather the raw row once. Unlike the CBA key above, its contents
+                // decide whether the GE already holds the same converted palette.
+                // Keep row wrapping for nonstandard widths and right-edge CLUTs.
+                u32 sourceX = clutX % static_cast<u32>(image->width);
+                for (u32 i = 0; i < paletteSize; ++i) {
+                    g_clutRawScratch[i] = paletteSource[sourceX];
+                    if (++sourceX == static_cast<u32>(image->width)) sourceX = 0;
+                }
+                const bool sameGeContent = g_clutGeContentValid
+                    && g_clutGeDepth == depth
+                    && g_clutGeWordZeroKey == wordZeroKey
+                    && g_clutGeBlend == blendUsesZeroKey
+                    && std::memcmp(g_clutRawScratch, g_clutGeRaw,
+                                   static_cast<std::size_t>(paletteSize) * sizeof(u16)) == 0;
+                if (!sameGeContent) {
+                    const u32 fillIndex = clutCacheable ? AcquireClutCacheEntry() : kClutCacheNone;
+                    u16* palette = nullptr;
+                    if (fillIndex != kClutCacheNone) {
+                        ClutCacheEntry& entry = clutCache[fillIndex];
+                        entry.rowGeneration = vramRowGeneration[clutRow];
+                        entry.epoch = vramEpoch;
+                        entry.lastUseSerial = g_submissionSerial;
+                        entry.lastUseTick = ++clutCacheClock;
+                        entry.cba = cba;
+                        entry.depth = static_cast<u8>(depth);
+                        entry.flags = clutFlags;
+                        entry.valid = true;
+                        palette = clutCachePalettes.data() + fillIndex * 256u;
+                    }
+                    else {
+                        palette = framePalettes.data() + framePaletteUsed++ * 256u;
+                    }
+                    PspPerf::CountRenderer(PspPerf::RendererCounter::PaletteEntries, paletteSize);
+                    for (u32 i = 0; i < paletteSize; ++i) {
+#if defined(PSP_PALETTE_REFERENCE)
+                        // Reference A/B: convert straight from the row, one divide per colour.
+                        const u16 word = paletteSource[(clutX + i) % static_cast<u32>(image->width)];
+#else
+                        const u16 word = g_clutRawScratch[i];
+#endif
+                        palette[i] = ConvertPsxTexelToGu5551(word,
+                            wordZeroKey ? word == 0 : (blendUsesZeroKey ? i == 0 : (word & 0x7fffu) == 0x7c1fu));
+                    }
+                    WritebackDcacheRange(palette,
+                        static_cast<std::size_t>(paletteSize) * sizeof(u16));
+                    GuClutMode(GU_PSM_5551, 0, depth == 0 ? 0x0fu : 0xffu, 0);
+                    sceGuClutLoad(depth == 0 ? 1 : 16, palette); // 32-byte blocks, 16-bit entries
+                    PspPerf::CountRenderer(PspPerf::RendererCounter::ClutLoads);
+                    std::memcpy(g_clutGeRaw, g_clutRawScratch,
+                                static_cast<std::size_t>(paletteSize) * sizeof(u16));
+                    g_clutGeDepth = static_cast<u8>(depth);
+                    g_clutGeWordZeroKey = wordZeroKey;
+                    g_clutGeBlend = blendUsesZeroKey;
+                    g_clutGeContentValid = true;
+                    geClutEntry = fillIndex;
+                }
             }
             clutBindingValid = true;
             lastClutHandle = vramHandle;

@@ -126,10 +126,10 @@ int main() {
     image[0] = 0x1234; image[1] = 0x7c1f; image[2] = 0x0000; image[3] = 0x8000;
     ctx.UpdateVRAMTexture(handle, 1024, 512, image.data());
     ctx.SetBlendMode(PDDI_BLEND_NONE); ctx.BindPage(2, 0);
-    auto* palette = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+    auto* palette = static_cast<const u16*>(FakeGe::lastClut);
     require((palette[0] & 0x8000) && !(palette[1] & 0x8000) && (palette[2] & 0x8000), "opaque CLUT key");
     ctx.SetBlendMode(PDDI_BLEND_ALPHA); ctx.BindPage(2, 0);
-    palette = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+    palette = static_cast<const u16*>(FakeGe::lastClut);
     require(!(palette[0] & 0x8000) && (palette[1] & 0x8000) && (palette[2] & 0x8000), "blended CLUT key");
     auto* direct = ctx.GetDecodedPage(handle, 0x100);
     require((direct->pixels[2] & 0x8000) == 0 && (direct->pixels[3] & 0x8000), "direct zero word key");
@@ -148,7 +148,7 @@ int main() {
         for (unsigned int y = 0; y < 256; ++y) {
             const unsigned int cba = (y << 6) | 63;
             ctx.BindPage(0x82, static_cast<float>(cba), mode == 2);
-            const auto* actual = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+            const auto* actual = static_cast<const u16*>(FakeGe::lastClut);
             for (unsigned int i = 0; i < 256; ++i) {
                 const u16 word = image[y * 1024 + ((1008 + i) % 1024)];
                 const bool keyed = mode == 2 ? word == 0
@@ -161,6 +161,38 @@ int main() {
     ctx.FinishList();
     image = savedImage;
     ctx.UpdateVRAMTexture(handle, 1024, 512, image.data());
+    {
+        // Converted-palette cache: an animated CLUT row reaches the GE inside
+        // the same list (its old entry is still referenced) and in later
+        // frames (BeginFrame fences the list and resets GE state tracking), and
+        // an unchanged row is reloaded from the cache.
+        const unsigned int cbaAnimated = (300u << 6) | 2u;  // row 300, x = 32
+        const auto loaded = [] { return static_cast<const u16*>(FakeGe::lastClut); };
+        const auto setEntry = [&](u16 word) {
+            image[300 * 1024 + 33] = word;
+            ctx.UpdateVRAMTextureRegion(handle, 1024, 512, image.data(), 32, 300, 16, 1);
+        };
+        setEntry(0x03e0);
+        ctx.BeginFrame();
+        ctx.BindPage(2, static_cast<float>(cbaAnimated));
+        require(loaded()[1] == ConvertPsxTexelToGu5551(0x03e0, false), "cached palette first load");
+        setEntry(0x7c00);
+        // Another material in between (consecutive identical binds are a
+        // no-op by design; animated palettes change between frames).
+        ctx.BindPage(2, static_cast<float>((301u << 6) | 2u));
+        ctx.BindPage(2, static_cast<float>(cbaAnimated));
+        require(loaded()[1] == ConvertPsxTexelToGu5551(0x7c00, false), "palette update inside a list");
+        ctx.BeginFrame();
+        ctx.BindPage(2, static_cast<float>(cbaAnimated));
+        require(loaded()[1] == ConvertPsxTexelToGu5551(0x7c00, false), "palette lost after a frame");
+        ctx.BeginFrame();
+        setEntry(0x0001);
+        ctx.BindPage(2, static_cast<float>(cbaAnimated));
+        require(loaded()[1] == ConvertPsxTexelToGu5551(0x0001, false), "palette update across frames");
+        ctx.FinishList();
+        image = savedImage;
+        ctx.UpdateVRAMTexture(handle, 1024, 512, image.data());
+    }
     // Two heavy frames reproduce the old fallback list overflow. Native
     // remapping must advance by 3 local vertices, not 20000 source vertices.
     pspPrimBuffer buffer({PDDI_PRIM_TRIANGLES, PDDI_V_POSITION, 20000, 3});
@@ -265,7 +297,7 @@ int main() {
             pddiColour(255, 255, 255, 255));
         require(FakeGe::lastDrawTextured, "background lost its texture under pressure");
     }
-    palette = ctx.framePalettes.data() + (ctx.framePaletteUsed - 1) * 256;
+    palette = static_cast<const u16*>(FakeGe::lastClut);
     require((palette[0] & 0x8000) && (palette[1] & 0x8000)
         && !(palette[2] & 0x8000) && (palette[3] & 0x8000), "background zero-word key");
     const auto* background = static_cast<const PspVertex*>(FakeGe::lastVertices);

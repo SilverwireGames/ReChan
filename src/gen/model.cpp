@@ -1225,6 +1225,14 @@ static bool BuildLitGeoVerts(OriginalGeo* geo, std::vector<GeoRenderVertex>& out
 }
 
 #if defined(RC_PLATFORM_PSP)
+// A lit PSX channel (0..255, 128 = 1.0) as the GU vertex byte, exactly what
+// MakePspGeometryColour(value / 128.0f) produces: value / 128 * 255 is exact
+// in single precision for these integers, so its clamp-and-truncate equals
+// floor(value * 255 / 128), saturating from 128 up.
+static u32 PsxLitChannelToGuByte(u32 value) {
+    return value >= 128u ? 255u : (value * 255u) >> 7;
+}
+
 // Same lighting as BuildLitGeoVerts, emitted directly as GU vertex colours so
 // the renderer can patch only the colour lane of the shared prop buffer.
 static bool BuildLitGeoColours(OriginalGeo* geo, std::vector<u32>& outColours) {
@@ -1233,14 +1241,46 @@ static bool BuildLitGeoColours(OriginalGeo* geo, std::vector<u32>& outColours) {
     }
 
     const u8* sourceVerts = geo->primGeom->GetVertexList();
+    const u32 sourceCount = geo->primGeom->numVerts;
     ResizeRetainedScratch(outColours, geo->dynamicVertCount);
     const Mat4 lightingWorld = GetGeoLightingWorld();
+    // The lit intensity depends only on the normal index while the lights and
+    // this matrix stay fixed, so each of the <= 256 normals is lit once per
+    // call instead of once per vertex (LightGeoVertexColour's per-vertex work).
+    u8 litByNormal[256];
+    u32 litKnown[8] = {};
     for (u32 i = 0; i < geo->dynamicVertCount; i++) {
-        f32 r = geo->dynamicVerts[i].r;
-        f32 g = geo->dynamicVerts[i].g;
-        f32 b = geo->dynamicVerts[i].b;
-        LightGeoVertexColour(geo, sourceVerts, lightingWorld, i, &r, &g, &b);
-        outColours[i] = MakePspGeometryColour(r, g, b);
+        const auto& vertex = geo->dynamicVerts[i];
+        const u32 sourceIndex = static_cast<u32>(geo->dynamicVertSourceIndex[i]);
+        if (sourceIndex >= sourceCount) {
+            outColours[i] = MakePspGeometryColour(vertex.r, vertex.g, vertex.b);
+            continue;
+        }
+
+        const u8* sourceVertex = sourceVerts + sourceIndex * 8u;
+        const u8 normalIndex = static_cast<u8>((p3dReadU32LE(sourceVertex + 4u) >> 16) & 0xFFu);
+        const u32 knownBit = 1u << (normalIndex & 31u);
+        if ((litKnown[normalIndex >> 5] & knownBit) == 0u) {
+            u8 litR = 0;
+            u8 litG = 0;
+            u8 litB = 0;
+            ComputePsxLitColourFromNormalIndex(normalIndex, &lightingWorld, &litR, &litG, &litB);
+            litByNormal[normalIndex] = static_cast<u8>((static_cast<u32>(litR)
+                + static_cast<u32>(litG)
+                + static_cast<u32>(litB)
+                + 1u) / 3u);
+            litKnown[normalIndex >> 5] |= knownBit;
+        }
+        const u8 litI = litByNormal[normalIndex];
+        const auto litChannel = [litI](f32 channel) {
+            u32 base = static_cast<u32>(channel * 128.0f + 0.5f);
+            if (base > 255u) base = 255u;
+            return PsxLitChannelToGuByte(ModulatePsxColourChannel(static_cast<u8>(base), litI));
+        };
+        outColours[i] = litChannel(vertex.r)
+            | (litChannel(vertex.g) << 8)
+            | (litChannel(vertex.b) << 16)
+            | 0xFF000000u;
     }
 
     return true;
@@ -1717,7 +1757,11 @@ void DrawableSTree::Display(u32 /*flags*/) {
                 STreeJoint clampedJoint = *joint;
                 clampedJoint.primGeomStartIdx = static_cast<u16>(startIndex);
                 clampedJoint.primGeomCount = static_cast<u16>(clampedEnd - startIndex);
+#if defined(RC_PLATFORM_PSP)
+                Mat4 lightingMatrix = lightingWorld * jointData[jointIndex];
+#else
                 Mat4 lightingMatrix = lightingWorld * jointMatrices[jointIndex];
+#endif
                 renderSource->xformVertsCallback(renderSource->primGeom,
                                                  &clampedJoint,
                                                  reinterpret_cast<u32*>(&lightingMatrix),
@@ -1757,11 +1801,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
                     if (litG < scratchMinG) scratchMinG = litG;
                     if (litB < scratchMinB) scratchMinB = litB;
                     if (litR > scratchMaxR) scratchMaxR = litR;
-#if defined(RC_PLATFORM_PSP)
-                Mat4 lightingMatrix = lightingWorld * jointData[jointIndex];
-#else
                     if (litG > scratchMaxG) scratchMaxG = litG;
-#endif
                     if (litB > scratchMaxB) scratchMaxB = litB;
                 }
             }

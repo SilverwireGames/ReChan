@@ -35,6 +35,8 @@ inline unsigned char* list = nullptr;
 inline size_t used = 0, peak = 0;
 inline bool open = false, textureEnabled = false, alphaEnabled = false;
 inline int syncs = 0, swaps = 0, clears = 0, draws = 0, cluts = 0, copies = 0;
+// Palette memory of the most recent sceGuClutLoad (what the GE CLUT holds).
+inline const void* lastClut = nullptr;
 inline uint64_t primitives = 0;
 inline int textureFormat = GU_PSM_5551, matrixMode = 0;
 inline int textureFunction = GU_TFX_REPLACE;
@@ -136,6 +138,7 @@ inline void sceGuClutLoad(int blocks, const void* ptr) {
     FakeGe::require(blocks == 1 || blocks == 16, "wrong 5551 CLUT byte count");
     FakeGe::require((reinterpret_cast<uintptr_t>(ptr) & 15) == 0, "unaligned CLUT");
     FakeGe::emit(12); FakeGe::read(ptr, blocks * 32); ++FakeGe::cluts;
+    FakeGe::lastClut = ptr;
 }
 inline void sceGuCopyImage(int format, int, int, int width, int height, int srcw,
                            void* src, int, int, int destw, void* dest) {
@@ -216,8 +219,8 @@ GE_COMMAND(sceGuTexFlush)
 #undef GE_COMMAND
 #define SDK_NOOP(name) template<class... T> inline int name(T...) { return 0; }
 SDK_NOOP(guSwapBuffersBehaviour) SDK_NOOP(sceGuDisplay) SDK_NOOP(sceDisplayWaitVblankStart)
+SDK_NOOP(sceDisplayGetVcount)
 SDK_NOOP(sceCtrlSetSamplingCycle) SDK_NOOP(sceCtrlSetSamplingMode)
 SDK_NOOP(sceGumLoadIdentity) SDK_NOOP(sceGumOrtho)
 SDK_NOOP(sceKernelDcacheWritebackAll) SDK_NOOP(sceKernelDcacheWritebackRange)
-SDK_NOOP(sceDisplayGetVcount)
 #undef SDK_NOOP

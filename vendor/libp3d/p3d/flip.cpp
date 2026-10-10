@@ -477,17 +477,28 @@ s32 TransformFlip::FindBracket(const u8* rawBase, u32 keyTimesOff, s32 numKeys, 
         return numKeys - 1;
     }
 
-    // Linear search for bracket (numKeys is typically small).
-    // Match PSX edge handling: exact key boundary advances to next key.
+    // Linear search for bracket. Match PSX edge handling: exact key boundary
+    // advances to next key. The unwrapped key times are produced in the same
+    // pass (same wrap rule as GetUnwrappedTime) instead of rescanning the
+    // list from key 0 for every candidate, which made this O(numKeys^2) per
+    // channel and showed up as ~8% of a PSP frame.
+    s32 wrap = 0;
+    s32 prevRaw = times[0];
+    s32 t0Real = firstTimeReal;
     for (s32 i = 0; i < numKeys - 1; i++) {
-        s32 t0Real = GetUnwrappedTime(times, i) << 16;
-        s32 t1Real = GetUnwrappedTime(times, i + 1) << 16;
+        const s32 currRaw = times[i + 1];
+        if (currRaw < prevRaw) {
+            wrap += 256;
+        }
+        prevRaw = currRaw;
+        const s32 t1Real = (currRaw + wrap) << 16;
         if (frameReal >= t0Real && frameReal < t1Real) {
             return i;
         }
         if (frameReal == t1Real) {
             return i + 1;
         }
+        t0Real = t1Real;
     }
 
     return numKeys - 1;
