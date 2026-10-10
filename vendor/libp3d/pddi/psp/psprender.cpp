@@ -519,7 +519,10 @@ static void SetBlend(pddiBlendMode mode) {
             GuBlendFunc(GU_REVERSE_SUBTRACT, GU_SRC_ALPHA, GU_FIX, 0, 0x00FFFFFF);
             break;
         case PDDI_BLEND_PSX_QUARTER:
-            GuBlendFunc(GU_ADD, GU_FIX, GU_FIX, 0x40404040, 0x40404040);
+            // PSX semi-transparency mode 3: B + F/4 (as the GL renderer's
+            // constant 0.25 source, one destination). A quarter destination
+            // darkened everything behind trails and mode-3 effects.
+            GuBlendFunc(GU_ADD, GU_FIX, GU_FIX, 0x00404040, 0x00FFFFFF);
             break;
         case PDDI_BLEND_ALPHA:
         default:

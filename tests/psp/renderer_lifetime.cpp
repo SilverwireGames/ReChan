@@ -102,6 +102,13 @@ int main() {
     require(FakeGe::depthMask == GU_TRUE, "blended shadow must not occlude later geometry");
     ctx.SetBlendMode(PDDI_BLEND_NONE);
     require(FakeGe::depthMask == GU_FALSE, "opaque geometry must restore depth writes");
+    // PSX semi-transparency mode 3 is B + F/4: the destination is kept whole.
+    ctx.SetBlendMode(PDDI_BLEND_PSX_QUARTER);
+    require(FakeGe::blendEquation == GU_ADD && FakeGe::blendSource == GU_FIX
+        && FakeGe::blendDestination == GU_FIX && (FakeGe::blendSourceFix & 0xFFFFFFu) == 0x404040u
+        && (FakeGe::blendDestinationFix & 0xFFFFFFu) == 0xFFFFFFu,
+        "quarter blend must add a quarter of the source to the whole destination");
+    ctx.SetBlendMode(PDDI_BLEND_NONE);
     // Native T4/T8/5551 copies have exactly the packed byte extent. Blend bits
     // cannot create duplicate indexed cache entries.
     auto* t4 = ctx.GetDecodedPage(handle, 0x42);

@@ -195,8 +195,15 @@ inline void sceGuDepthRange(int nearValue, int farValue) {
 inline void sceGuDepthMask(int mask) { FakeGe::emit(); FakeGe::depthMask = mask; }
 inline void sceGuTexMode(int format, int, int, int) { FakeGe::emit(8); FakeGe::textureFormat = format; }
 inline void sceGuTexFunc(int function, int) { FakeGe::emit(16); FakeGe::textureFunction = function; }
-inline void sceGuBlendFunc(int equation, int, int, unsigned int, unsigned int) {
+namespace FakeGe {
+inline int blendSource = 0, blendDestination = 0;
+inline unsigned int blendSourceFix = 0, blendDestinationFix = 0;
+}
+inline void sceGuBlendFunc(int equation, int source, int destination, unsigned int sourceFix,
+                           unsigned int destinationFix) {
     FakeGe::emit(16); FakeGe::blendEquation = equation;
+    FakeGe::blendSource = source; FakeGe::blendDestination = destination;
+    FakeGe::blendSourceFix = sourceFix; FakeGe::blendDestinationFix = destinationFix;
 }
 inline void sceGuTexImage(int, int width, int height, int stride, const void* ptr) {
     FakeGe::require((reinterpret_cast<uintptr_t>(ptr) & 15) == 0, "unaligned texture");
