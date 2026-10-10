@@ -897,6 +897,19 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
         + (hasColour ? 3u : 0u)
         + (hasUv ? 2u : 0u)
         + (hasTexInfo ? 2u : 0u);
+    // Per-frame effect geometry re-sends whole arrays: once the compact
+    // stream has its storage, build it in this pass (exactly what
+    // RebuildPackedVertices derives from the float vertices) instead of
+    // re-reading the floats to validate and then to copy them.
+    const bool packInline = count > 0 && hasUv && hasTexInfo
+        && packedVertices.capacity() >= count;
+    bool packedOk = packInline;
+    if (packInline) {
+        packedVerticesValid = false;
+        baseColoursValid = false;
+        colourPatchActive = false;
+        packedVertices.resize(count);
+    }
     const float* source = static_cast<const float*>(data);
     for (u32 i = 0; i < count; ++i) {
         const float* input = source + static_cast<std::size_t>(i) * stride;
@@ -915,7 +928,17 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
         if (hasTexInfo) {
             tpage = input[0]; cba = input[1];
         }
-        vertices[i] = {u, v, MakeGeometryColor(r, g, b), x, y, z};
+        const u32 color = MakeGeometryColor(r, g, b);
+        vertices[i] = {u, v, color, x, y, z};
+        if (packedOk) {
+            s16 packedU = 0, packedV = 0;
+            if (PackIntegralTexCoord(u, &packedU) && PackIntegralTexCoord(v, &packedV)) {
+                packedVertices[i] = {packedU, packedV, color, x, y, z};
+            }
+            else {
+                packedOk = false;
+            }
+        }
         const bool materialIsValid = hasTexInfo
             && std::isfinite(tpage) && tpage >= 0.0f && tpage <= 65535.0f
             && std::isfinite(cba) && cba >= 0.0f && cba <= 65535.0f;
@@ -926,7 +949,18 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
             : 0u;
     }
     WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
-    RebuildPackedVertices();
+    if (packedOk) {
+        const std::size_t allocatedBytes = packedVertices.capacity() * sizeof(PspPackedVertex);
+        if (allocatedBytes > packedVerticesAllocatedBytes) {
+            PspPerf::AddRendererMemory(static_cast<s32>(allocatedBytes - packedVerticesAllocatedBytes));
+        }
+        packedVerticesAllocatedBytes = allocatedBytes;
+        WritebackDcacheRange(packedVertices.data(), packedVertices.size() * sizeof(PspPackedVertex));
+        packedVerticesValid = true;
+    }
+    else if (!packInline) {
+        RebuildPackedVertices();
+    }
 #if !defined(NDEBUG)
     if (probe < 12u) LOG("[PSP Prim] vertex done #%lu", static_cast<unsigned long>(probe));
 #endif

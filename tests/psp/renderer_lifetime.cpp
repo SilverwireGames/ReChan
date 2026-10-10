@@ -616,6 +616,56 @@ int main() {
     }
 
     {
+        // A re-sent SetVertexData builds the compact stream in its own pass
+        // once the storage exists; a fresh buffer (first upload) derives it
+        // with RebuildPackedVertices. Both must hold the same streams, keys and
+        // flags, including uploads whose UVs stop or start being integral.
+        std::mt19937 rng(97531u);
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        for (int round = 0; round < 80; ++round) {
+            const u32 vertexCount = 1u + rng() % 70u;
+            pspPrimBuffer resent({PDDI_PRIM_TRIANGLES, kFormat, vertexCount, 3u});
+            std::vector<float> data(vertexCount * 10u);
+            const auto fill = [&]() {
+                const bool fractional = rng() % 4u == 0u;
+                for (u32 v = 0; v < vertexCount; ++v) {
+                    float* lane = &data[v * 10u];
+                    for (int c = 0; c < 3; ++c) {
+                        lane[c] = static_cast<float>(static_cast<int>(rng() % 20001u) - 10000) / 7.0f;
+                    }
+                    for (int c = 3; c < 6; ++c) lane[c] = static_cast<float>(rng() % 300u) / 128.0f;
+                    lane[6] = static_cast<float>(rng() % 256u) + (fractional && v == vertexCount / 2u ? 0.5f : 0.0f);
+                    lane[7] = rng() % 9u == 0u ? -0.0f : static_cast<float>(rng() % 256u);
+                    const u32 kind = rng() % 5u;
+                    lane[8] = kind == 0u ? -1.0f : static_cast<float>(rng() % 4u);
+                    lane[9] = kind == 1u ? 70000.0f : static_cast<float>(rng() % 3u);
+                }
+            };
+            const u16 tri[3] = {0, 0, 0};
+            for (int frame = 0; frame < 5; ++frame) {
+                fill();
+                resent.SetVertexData(data.data(), vertexCount);
+                pspPrimBuffer fresh({PDDI_PRIM_TRIANGLES, kFormat, vertexCount, 3u});
+                fresh.SetVertexData(data.data(), vertexCount);
+                resent.SetIndices(tri, 3u);
+                fresh.SetIndices(tri, 3u);
+                require(resent.packedVerticesValid == fresh.packedVerticesValid
+                        && (!fresh.packedVerticesValid
+                            || std::memcmp(resent.packedVertices.data(), fresh.packedVertices.data(),
+                                   sizeof(PspPackedVertex) * vertexCount) == 0)
+                        && std::memcmp(resent.vertices.data(), fresh.vertices.data(),
+                               sizeof(PspVertex) * vertexCount) == 0
+                        && resent.materialKeys == fresh.materialKeys
+                        && resent.materialValid == fresh.materialValid
+                        && resent.floatStale == fresh.floatStale
+                        && resent.baseColoursValid == fresh.baseColoursValid
+                        && resent.colourPatchActive == fresh.colourPatchActive,
+                    "re-sent SetVertexData differs from a first upload");
+            }
+        }
+    }
+
+    {
         // Fused packed upload (Begin/EndPackedUpload) must leave a buffer in
         // exactly the state SetDynamicVertexData(..., uvIsIntegral = true)
         // does: compact stream bytes, material keys/validity, runs and flags,
