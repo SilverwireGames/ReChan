@@ -40,6 +40,7 @@ SOURCES += $(ROOT)/src/psp/psp_audio.cpp \
 	$(ROOT)/src/psp/psp_crashreporter.cpp \
 	$(ROOT)/src/psp/psp_debugui.cpp \
 	$(ROOT)/src/psp/psp_fileio.cpp \
+	$(ROOT)/src/psp/psp_funcprof.cpp \
 	$(ROOT)/src/psp/psp_log.cpp \
 	$(ROOT)/src/psp/psp_perf.cpp \
 	$(ROOT)/src/psp/psp_psxdiscextractor.cpp \
@@ -144,6 +145,29 @@ ifeq ($(PSP_LTO),1)
 PSP_LTO_OPT := $(filter -O%,$(CXXFLAGS))
 CXXFLAGS += -flto=auto
 LDFLAGS += -flto=auto $(PSP_LTO_OPT)
+endif
+
+# Optional function profile on real hardware (off by default), for the
+# automatic benchmark (PSP_AUTO_START_PHASE1 + PSP_PERF_TELEMETRY): each
+# scenario's measurement window writes PROF_Sxx.TXT next to its PSP_PERF
+# report (src/psp/psp_funcprof.cpp). Only the sources below are
+# instrumented, and functions defined in headers (".h": inline helpers, STL)
+# are left to their callers, so the PRX stays small enough for PSPLink's
+# user partition (inline sites would otherwise each get enter/exit calls).
+PSP_FUNC_PROFILE ?= 0
+ifeq ($(PSP_FUNC_PROFILE),1)
+CXXFLAGS += -DPSP_FUNC_PROFILE
+# Character/animation/world/renderer path: ~150 KB of extra code. Instrumenting
+# whole directories (+390 KB) leaves the PSPLink PRX heap short at the peak.
+PSP_PROFILE_SOURCES ?= src/ai/humanoid.cpp src/ai/behaviour.cpp src/ai/player.cpp \
+	src/ai/thing.cpp src/gen/model.cpp src/gen/world.cpp src/gen/geometry.cpp \
+	src/gen/animmat.cpp src/gen/animmgr.cpp src/gen/lights.cpp src/gen/charmgr.cpp \
+	src/gen/shadows.cpp src/gen/game.cpp src/gen/ai.cpp \
+	$(patsubst $(ROOT)/%,%,$(wildcard $(ROOT)/vendor/libp3d/p3d/*.cpp)) \
+	vendor/libp3d/pddi/psp/psprender.cpp
+PSP_PROFILE_OBJS = $(addprefix $(ROOT)/,$(PSP_PROFILE_SOURCES:.cpp=.o))
+$(PSP_PROFILE_OBJS): CXXFLAGS += -finstrument-functions \
+	-finstrument-functions-exclude-file-list=.h,/usr/local/pspdev,psp_funcprof
 endif
 
 # build.mak supplies the user-mode PSP runtime and core exports. Keep only

@@ -117,6 +117,30 @@ constexpr u32 k2DDisabledCapabilities = (1u << GU_DEPTH_TEST) | (1u << GU_CULL_F
 // sceGuSwapBuffers alternates the draw target between the two colour
 // buffers; the pause backdrop needs the one currently being rendered.
 bool g_drawingSecondBuffer = false;
+// Display vcount at the last swap, while a VBlank is still owed before the GE
+// may draw into the buffer that swap released (see WaitForSwapVblank).
+u32 g_swapVcount = 0;
+bool g_swapVblankPending = false;
+
+// A swap queued with PSP_DISPLAY_SETBUF_NEXTVSYNC keeps scanning out the
+// released buffer until the next VBlank. One VBlank after the swap is all the
+// draw target needs, so a frame whose logic outlasted it starts at once
+// instead of waiting for a further VBlank (a 35 ms frame presents at 35 ms
+// rather than being rounded up to 50 ms). The vcount is read after the swap,
+// so a VBlank racing the swap only costs one extra wait, never a tear.
+static void WaitForSwapVblank() {
+    if (!g_swapVblankPending) return;
+    g_swapVblankPending = false;
+    if (static_cast<u32>(sceDisplayGetVcount()) != g_swapVcount) return;
+#if defined(PSP_PERF_TELEMETRY)
+    const u32 vblankStart = sceKernelGetSystemTimeLow();
+#endif
+    sceDisplayWaitVblankStart();
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::CountRenderer(PspPerf::RendererCounter::VblankUs,
+        sceKernelGetSystemTimeLow() - vblankStart);
+#endif
+}
 
 // Only the list-memory native path submits PspPackedVertex. Elsewhere the
 // float stream is the one the GE (or the CPU staging copy) consumes.
@@ -1173,6 +1197,7 @@ void pspDisplay::SwapBuffers() {
     g_activeContext->FinishList();
     sceGuSwapBuffers();
     g_drawingSecondBuffer = !g_drawingSecondBuffer;
+#if defined(PSP_IMMEDIATE_VBLANK_WAIT)
 #if defined(PSP_PERF_TELEMETRY)
     const u32 vblankStart = sceKernelGetSystemTimeLow();
 #endif
@@ -1180,6 +1205,14 @@ void pspDisplay::SwapBuffers() {
 #if defined(PSP_PERF_TELEMETRY)
     PspPerf::CountRenderer(PspPerf::RendererCounter::VblankUs,
         sceKernelGetSystemTimeLow() - vblankStart);
+#endif
+#else
+    // Deferred VBlank: the buffer just released for drawing stays on screen
+    // until the next VBlank, but only GE writes can tear it. The CPU goes on
+    // with the next frame's logic now; WaitForSwapVblank() blocks right
+    // before that frame's first GE command if no VBlank has happened yet.
+    g_swapVcount = sceDisplayGetVcount();
+    g_swapVblankPending = true;
 #endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
     Log::Get().LogMessage("[PSP Frame] after swap");
@@ -1382,6 +1415,8 @@ void pspContext::BeginFrame() {
         kEdramBytes > g_staticVram.allocatedBytes ? kEdramBytes - g_staticVram.allocatedBytes : 0u);
 #endif
     sceGuStart(GU_DIRECT, g_displayListStorage.words);
+    // First GE command of the frame: the draw target must be off screen.
+    WaitForSwapVblank();
     listOpen = true;
     Setup3DState();
     if (pendingDepthClear) ClearDepthNow();

@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "psp/psp_funcprof.h"
+
 namespace {
 
 constexpr u32 kWarmupFrames = 180;
@@ -169,6 +171,8 @@ void UpdateBenchmarkCamera(Camera* camera) {
 
     if (!s_measurementStarted && s_routeFrame == kWarmupFrames) {
         PspPerf::BeginMeasurementWindow();
+        // Profile exactly the measured frames (no-op unless PSP_FUNC_PROFILE).
+        PspFuncProfile::Start();
         s_measurementStarted = true;
         s_measurementFrames = 0;
     }
@@ -210,6 +214,14 @@ void OnBenchmarkFrameRecorded() {
         std::snprintf(path, sizeof(path), "PSP_PERF_S%02lu_L%02ld.TXT",
             static_cast<unsigned long>(s_scenarioIndex + 1u),
             static_cast<long>(kScenarios[s_scenarioIndex].levelId));
+#endif
+#if defined(PSP_FUNC_PROFILE)
+        {
+            char profilePath[24] = {};
+            std::snprintf(profilePath, sizeof(profilePath), "PROF_S%02lu.TXT",
+                static_cast<unsigned long>(s_scenarioIndex + 1u));
+            PspFuncProfile::StopAndWrite(profilePath);
+        }
 #endif
         PspPerf::WriteReportTo(path, s_scenarioIndex + 1u, s_activeLevelId);
         LOG("[PSP Bench] scenario %lu complete: levelId=%ld frames=%lu report=%s",

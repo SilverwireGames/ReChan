@@ -1,4 +1,5 @@
 #include "p3d/fileio.h"
+#include "psp/psp_perf.h"
 
 #include <pspiofilemgr.h>
 
@@ -52,12 +53,18 @@ void InvalidateResolveCache(const std::string&) {}
 
 bool FileExists(const std::string& path) {
     SceIoStat stat{};
-    return sceIoGetstat(ToPspPath(path).c_str(), &stat) >= 0 && !IsDirectory(stat);
+    const u32 ioStart = PspPerf::IoClock();
+    const bool found = sceIoGetstat(ToPspPath(path).c_str(), &stat) >= 0;
+    PspPerf::RecordIo(ioStart, 0, path.c_str());
+    return found && !IsDirectory(stat);
 }
 
 bool DirExists(const std::string& path) {
     SceIoStat stat{};
-    return sceIoGetstat(ToPspPath(path).c_str(), &stat) >= 0 && IsDirectory(stat);
+    const u32 ioStart = PspPerf::IoClock();
+    const bool found = sceIoGetstat(ToPspPath(path).c_str(), &stat) >= 0;
+    PspPerf::RecordIo(ioStart, 0, path.c_str());
+    return found && IsDirectory(stat);
 }
 
 bool CreateDirectories(const std::string& path) {
@@ -157,14 +164,19 @@ bool FileHandle::Open(const std::string& path, Mode mode, bool) {
     int flags = PSP_O_RDONLY;
     if (mode == Mode::Write) flags = PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC;
     if (mode == Mode::Append) flags = PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND;
+    const u32 ioStart = PspPerf::IoClock();
     const SceUID handle = sceIoOpen(ToPspPath(path).c_str(), flags, 0777);
-    if (handle < 0) return false;
+    if (handle < 0) {
+        PspPerf::RecordIo(ioStart, 0, path.c_str());
+        return false;
+    }
     m_file = reinterpret_cast<void*>(static_cast<intptr_t>(handle));
     if (mode == Mode::Read) {
         m_size = sceIoLseek(handle, 0, PSP_SEEK_END);
         sceIoLseek(handle, 0, PSP_SEEK_SET);
     }
     else m_size = 0;
+    PspPerf::RecordIo(ioStart, 0, path.c_str());
     return true;
 }
 
@@ -186,12 +198,17 @@ bool FileHandle::Seek(int64_t offset, int whence) {
     int origin = PSP_SEEK_SET;
     if (whence == SEEK_CUR) origin = PSP_SEEK_CUR;
     else if (whence == SEEK_END) origin = PSP_SEEK_END;
-    return sceIoLseek(static_cast<SceUID>(reinterpret_cast<intptr_t>(m_file)), offset, origin) >= 0;
+    const u32 ioStart = PspPerf::IoClock();
+    const bool ok = sceIoLseek(static_cast<SceUID>(reinterpret_cast<intptr_t>(m_file)), offset, origin) >= 0;
+    PspPerf::RecordIo(ioStart, 0);
+    return ok;
 }
 
 size_t FileHandle::Read(void* dst, size_t bytes) {
     if (!m_file) return 0;
+    const u32 ioStart = PspPerf::IoClock();
     const int result = sceIoRead(static_cast<SceUID>(reinterpret_cast<intptr_t>(m_file)), dst, bytes);
+    PspPerf::RecordIo(ioStart, result > 0 ? static_cast<u32>(result) : 0u);
     return result > 0 ? static_cast<size_t>(result) : 0;
 }
 

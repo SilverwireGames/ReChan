@@ -74,7 +74,8 @@
 
 #include "extra/shadowcsm.h"
 
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP)
+// Timers/counters compile to no-ops unless PSP_PERF_TELEMETRY is defined.
 #include "psp/psp_perf.h"
 #endif
 
@@ -345,7 +346,7 @@ static void ProcessHandlerList(ccMinList& list, const char* pspProbeLabel = null
                 reinterpret_cast<void*>(h->funcPtr));
         }
 #endif
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP) && defined(PSP_TRACE_TELEMETRY)
         if (handlerIndex < 16) {
             char trace[48];
             std::snprintf(trace, sizeof(trace), "render: handler %lu begin",
@@ -354,7 +355,15 @@ static void ProcessHandlerList(ccMinList& list, const char* pspProbeLabel = null
         }
 #endif
         if (h->funcPtr) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+            // Copy the callback first: a handler may unlink/free itself.
+            const Handler::HandlerFunc callback = h->funcPtr;
+            const u32 handlerStart = PspPerf::HandlerClock();
+            callback(h);
+            PspPerf::RecordHandler(reinterpret_cast<const void*>(callback), handlerStart);
+#else
             h->funcPtr(h);
+#endif
         }
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
         if (probePspHandlers) {
@@ -364,7 +373,7 @@ static void ProcessHandlerList(ccMinList& list, const char* pspProbeLabel = null
                 static_cast<void*>(h));
         }
 #endif
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP) && defined(PSP_TRACE_TELEMETRY)
         if (handlerIndex < 16) {
             char trace[48];
             std::snprintf(trace, sizeof(trace), "render: handler %lu done",
@@ -490,6 +499,9 @@ static void SyncPausedAnimationTicks() {
 // Updates camera anim, animates active AI model lists, and advances effects.
 static void animLoopDSTACK() {
     MARKFUNCTION(0x8002B368);
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer animTimer(PspPerf::RendererCounter::AnimTickUs);
+#endif
 
     if (g_display && g_display->GetCamera()) {
         g_display->GetCamera()->UpdateAnim();
@@ -508,6 +520,9 @@ static void animLoopDSTACK() {
 #endif
     }
 
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer effectsTimer(PspPerf::RendererCounter::EffectsUs);
+#endif
     Effects_UpdateAll();
 }
 
@@ -1814,7 +1829,15 @@ bool Game::gsPlayState(Game* game) {
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
         if (probePspPlayState) LOG("[PSP Play] before logic handlers");
 #endif
+#if defined(RC_PLATFORM_PSP)
+        PspPerf::CountRenderer(PspPerf::RendererCounter::PlayLogicTicks);
+        {
+            PspPerf::ScopeTimer handlersTimer(PspPerf::RendererCounter::LogicHandlersUs);
+            ProcessHandlerList(game->handlerSet1.handlerList);
+        }
+#else
         ProcessHandlerList(game->handlerSet1.handlerList);
+#endif
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
         if (probePspPlayState) LOG("[PSP Play] after logic handlers");
 #endif
@@ -1842,6 +1865,9 @@ bool Game::gsPlayState(Game* game) {
     }
 
     if (g_display && g_display->GetCamera()) {
+#if defined(RC_PLATFORM_PSP)
+        PspPerf::ScopeTimer cameraTimer(PspPerf::RendererCounter::CameraUs);
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
         DebugUI::UpdateBenchmarkCamera(g_display->GetCamera());
 #endif
@@ -1852,6 +1878,9 @@ bool Game::gsPlayState(Game* game) {
     if (probePspPlayState) LOG("[PSP Play] after camera");
 #endif
 
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer audioTimer(PspPerf::RendererCounter::PlayAudioUs);
+#endif
     UpdateSpatialAudioListener();
 
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
@@ -1860,6 +1889,9 @@ bool Game::gsPlayState(Game* game) {
 
     // PSX: CInteractiveMusicController::Think (MSCCTRLR.CPP:56) - per-frame FAG song switching.
     InteractiveMusicControllerThink();
+#if defined(RC_PLATFORM_PSP)
+    audioTimer.Stop();
+#endif
 
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
     if (probePspPlayState) LOG("[PSP Play] after music");

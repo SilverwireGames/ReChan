@@ -23,6 +23,7 @@ void Mark(RuntimeStage stage, u32 value, u32 detail) {
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -123,6 +124,103 @@ struct MemoryMetrics {
 
 MemoryMetrics g_memory;
 
+struct HandlerMetric {
+    const void* callback = nullptr;
+    u64 totalUs = 0;
+    u32 calls = 0;
+};
+constexpr u32 kMaxHandlerMetrics = 24;
+std::array<HandlerMetric, kMaxHandlerMetrics> g_handlers{};
+u32 g_handlerCount = 0;
+
+void ResetHandlerMetrics() {
+    g_handlers.fill({});
+    g_handlerCount = 0;
+}
+
+int g_mainThreadId = -1;  // SceUID of the thread that called Reset()
+
+// The slowest frames since the measurement started, with what they spent the
+// time on, plus slowdown counts over the whole session (not just the window).
+constexpr u32 kIoPathChars = 40;
+struct WorstFrame {
+    u32 frameUs = 0;
+    u32 logicUs = 0;
+    u32 drawUs = 0;
+    u32 vblankUs = 0;
+    u32 ioUs = 0;
+    u32 ioOps = 0;
+    u32 ioBytes = 0;
+    u32 entitiesUs = 0;
+    u32 ticks = 0;
+    u32 frameIndex = 0;
+    u32 slowIoUs = 0;
+    char slowIoPath[kIoPathChars] = {};
+};
+
+// Session totals per file (main thread), to name what stalls the frame.
+struct IoFileMetric {
+    char path[kIoPathChars] = {};
+    u64 totalUs = 0;
+    u32 ops = 0;
+    u32 maxUs = 0;
+};
+constexpr u32 kIoFiles = 16;
+std::array<IoFileMetric, kIoFiles> g_ioFiles{};
+char g_lastIoPath[kIoPathChars] = {};
+u32 g_frameSlowIoUs = 0;
+char g_frameSlowIoPath[kIoPathChars] = {};
+
+// Keep the tail of a path (the file name matters most).
+void CopyIoPath(char* out, const char* path) {
+    const std::size_t length = std::strlen(path);
+    const char* tail = length >= kIoPathChars ? path + (length - (kIoPathChars - 1)) : path;
+    std::strncpy(out, tail, kIoPathChars - 1);
+    out[kIoPathChars - 1] = '\0';
+}
+
+void ChargeIoFile(const char* path, u32 elapsed) {
+    IoFileMetric* slot = nullptr;
+    for (IoFileMetric& file : g_ioFiles) {
+        if (file.path[0] && std::strncmp(file.path, path, kIoPathChars) == 0) {
+            slot = &file;
+            break;
+        }
+    }
+    if (!slot) {
+        // A free slot, else replace the cheapest entry if this op costs more.
+        IoFileMetric* cheapest = &g_ioFiles[0];
+        for (IoFileMetric& file : g_ioFiles) {
+            if (!file.path[0]) { cheapest = &file; break; }
+            if (file.totalUs < cheapest->totalUs) cheapest = &file;
+        }
+        if (cheapest->path[0] && cheapest->totalUs >= elapsed) return;
+        *cheapest = {};
+        std::strncpy(cheapest->path, path, kIoPathChars - 1);
+        slot = cheapest;
+    }
+    slot->totalUs += elapsed;
+    ++slot->ops;
+    if (elapsed > slot->maxUs) slot->maxUs = elapsed;
+}
+constexpr u32 kWorstFrames = 8;
+std::array<WorstFrame, kWorstFrames> g_worstFrames{};
+u32 g_sessionFrames = 0;
+u32 g_framesOver33Ms = 0;
+u32 g_framesOver50Ms = 0;
+u64 g_sessionIoUs = 0;
+
+void ResetSessionMetrics() {
+    g_worstFrames.fill({});
+    g_ioFiles.fill({});
+    g_frameSlowIoUs = 0;
+    g_frameSlowIoPath[0] = '\0';
+    g_sessionFrames = 0;
+    g_framesOver33Ms = 0;
+    g_framesOver50Ms = 0;
+    g_sessionIoUs = 0;
+}
+
 #if defined(PSP_TRACE_TELEMETRY)
 static bool IsTraceInteresting(const char* message) {
     return std::strstr(message, "play step:") != nullptr
@@ -188,8 +286,47 @@ void ScopeTimer::Stop() {
     active = false;
 }
 
+u32 HandlerClock() {
+    return sceKernelGetSystemTimeLow();
+}
+
+u32 IoClock() {
+    return sceKernelGetSystemTimeLow();
+}
+
+void RecordIo(u32 startClock, u32 bytes, const char* path) {
+    const u32 elapsed = sceKernelGetSystemTimeLow() - startClock;
+    if (sceKernelGetThreadId() != g_mainThreadId) return;
+    CountRenderer(RendererCounter::IoUs, elapsed);
+    CountRenderer(RendererCounter::IoOps);
+    CountRenderer(RendererCounter::IoBytes, bytes);
+    if (path && path[0]) CopyIoPath(g_lastIoPath, path);
+    ChargeIoFile(g_lastIoPath, elapsed);
+    if (elapsed > g_frameSlowIoUs) {
+        g_frameSlowIoUs = elapsed;
+        std::memcpy(g_frameSlowIoPath, g_lastIoPath, kIoPathChars);
+    }
+}
+
+void RecordHandler(const void* callback, u32 startClock) {
+    const u32 elapsed = sceKernelGetSystemTimeLow() - startClock;
+    for (u32 i = 0; i < g_handlerCount; ++i) {
+        if (g_handlers[i].callback == callback) {
+            g_handlers[i].totalUs += elapsed;
+            ++g_handlers[i].calls;
+            return;
+        }
+    }
+    if (g_handlerCount < kMaxHandlerMetrics) {
+        g_handlers[g_handlerCount++] = { callback, elapsed, 1u };
+    }
+}
+
 void Reset() {
     g_runStartUs = sceKernelGetSystemTimeWide();
+    g_mainThreadId = sceKernelGetThreadId();
+    ResetHandlerMetrics();
+    ResetSessionMetrics();
     g_rendererTotals.fill(0);
     std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
     g_frame.Reset();
@@ -224,6 +361,8 @@ void Reset() {
 }
 
 void BeginMeasurementWindow() {
+    ResetHandlerMetrics();
+    ResetSessionMetrics();
     g_rendererTotals.fill(0);
     std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
     g_frame.Reset();
@@ -240,7 +379,10 @@ void BeginMeasurementWindow() {
 }
 
 void BeginFrame() {
-    std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::Count), 0u);
+    // Renderer counters only: the play-logic breakdown (PlayLogicTicks and
+    // after) is accumulated by gsPlayState before the frame's render begins,
+    // so it is cleared by RecordFrame instead.
+    std::fill_n(g_rendererCounters, static_cast<u32>(RendererCounter::PlayLogicTicks), 0u);
     g_currentDrawCalls = 0;
     g_currentSubmittedVertices = 0;
     g_currentPageCacheMisses = 0;
@@ -336,6 +478,37 @@ void RecordFrame(u32 frameUs, f32 logicMs, f32 drawMs, f32 swapMs) {
     for (u32 i = 0; i < static_cast<u32>(RendererCounter::Count); ++i) {
         g_rendererTotals[i] += g_rendererCounters[i];
     }
+    {
+        ++g_sessionFrames;
+        if (frameUs > 33400u) ++g_framesOver33Ms;
+        if (frameUs > 50000u) ++g_framesOver50Ms;
+        const auto counter = [](RendererCounter c) {
+            return g_rendererCounters[static_cast<u32>(c)];
+        };
+        g_sessionIoUs += counter(RendererCounter::IoUs);
+        WorstFrame* slot = &g_worstFrames[0];
+        for (WorstFrame& candidate : g_worstFrames) {
+            if (candidate.frameUs < slot->frameUs) slot = &candidate;
+        }
+        if (frameUs > slot->frameUs) {
+            slot->frameUs = frameUs;
+            slot->logicUs = MillisecondsToMicroseconds(logicMs);
+            slot->drawUs = MillisecondsToMicroseconds(drawMs);
+            slot->vblankUs = counter(RendererCounter::VblankUs);
+            slot->ioUs = counter(RendererCounter::IoUs);
+            slot->ioOps = counter(RendererCounter::IoOps);
+            slot->ioBytes = counter(RendererCounter::IoBytes);
+            slot->entitiesUs = counter(RendererCounter::EntitiesUs);
+            slot->ticks = counter(RendererCounter::PlayLogicTicks);
+            slot->frameIndex = g_sessionFrames;
+            slot->slowIoUs = g_frameSlowIoUs;
+            std::memcpy(slot->slowIoPath, g_frameSlowIoPath, kIoPathChars);
+        }
+        g_frameSlowIoUs = 0;
+        g_frameSlowIoPath[0] = '\0';
+    }
+    std::fill(g_rendererCounters + static_cast<u32>(RendererCounter::PlayLogicTicks),
+        g_rendererCounters + static_cast<u32>(RendererCounter::Count), 0u);
     g_frame.Push(frameUs);
     g_logic.Push(MillisecondsToMicroseconds(logicMs));
     g_draw.Push(MillisecondsToMicroseconds(drawMs));
@@ -367,7 +540,7 @@ void WriteReport() {
 void WriteReportTo(const char* path, u32 scenario, s32 level) {
     // Keep enough room for the complete profile, including every renderer
     // counter. Formatting happens only after the measurement window.
-    char report[4096] = {};
+    char report[10240] = {};
     const u32 averageFrameUs = g_frame.Average();
     const u32 p50FrameUs = Percentile(g_frame, 50);
     const u32 p95FrameUs = Percentile(g_frame, 95);
@@ -499,7 +672,13 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         "ge_sync_avg_us", "vblank_avg_us", "palette_entries_avg",
         "entities_avg_us", "blocks_avg_us", "submit_avg_us", "skin_prepare_avg_us",
         "skin_light_avg_us", "vertex_pack_avg_us", "light_evaluations_avg", "light_cache_hits_avg",
-        "skinned_vertices_avg", "skin_view_culls_avg"
+        "skinned_vertices_avg", "skin_view_culls_avg",
+        "ent_humanoid_avg_us", "ent_inactive_pickup_avg_us", "ent_pickup_avg_us", "ent_move_avg_us",
+        "ent_humanoid_draws_avg", "ent_inactive_pickup_draws_avg", "ent_pickup_draws_avg",
+        "ent_move_draws_avg",
+        "play_logic_ticks_avg", "logic_handlers_avg_us", "anim_tick_avg_us",
+        "effects_avg_us", "camera_avg_us", "play_audio_avg_us",
+        "io_avg_us", "io_ops_avg", "io_bytes_avg"
     };
     static_assert(sizeof(rendererNames) / sizeof(rendererNames[0])
         == static_cast<u32>(RendererCounter::Count), "renderer schema mismatch");
@@ -510,6 +689,73 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         std::snprintf(report + length, sizeof(report) - length, "%s=%.3f\n",
             rendererNames[i], g_totalFrames
                 ? static_cast<double>(g_rendererTotals[i]) / g_totalFrames : 0.0);
+    }
+    {
+        const std::size_t length = std::strlen(report);
+        std::snprintf(report + length, sizeof(report) - length,
+            "session_frames=%lu\nframes_over_33ms=%lu\nframes_over_50ms=%lu\n"
+            "session_io_ms=%lu\n",
+            static_cast<unsigned long>(g_sessionFrames),
+            static_cast<unsigned long>(g_framesOver33Ms),
+            static_cast<unsigned long>(g_framesOver50Ms),
+            static_cast<unsigned long>(g_sessionIoUs / 1000u));
+    }
+    {
+        std::array<WorstFrame, kWorstFrames> sorted = g_worstFrames;
+        std::sort(sorted.begin(), sorted.end(), [](const WorstFrame& a, const WorstFrame& b) {
+            return a.frameUs > b.frameUs;
+        });
+        for (u32 i = 0; i < kWorstFrames; ++i) {
+            const WorstFrame& frame = sorted[i];
+            if (frame.frameUs == 0) break;
+            const std::size_t length = std::strlen(report);
+            std::snprintf(report + length, sizeof(report) - length,
+                "worst_%lu=frame_us:%lu logic_us:%lu draw_us:%lu vblank_us:%lu io_us:%lu "
+                "io_ops:%lu io_bytes:%lu entities_us:%lu ticks:%lu at_frame:%lu "
+                "slow_io_us:%lu slow_io:%s\n",
+                static_cast<unsigned long>(i), static_cast<unsigned long>(frame.frameUs),
+                static_cast<unsigned long>(frame.logicUs), static_cast<unsigned long>(frame.drawUs),
+                static_cast<unsigned long>(frame.vblankUs), static_cast<unsigned long>(frame.ioUs),
+                static_cast<unsigned long>(frame.ioOps), static_cast<unsigned long>(frame.ioBytes),
+                static_cast<unsigned long>(frame.entitiesUs), static_cast<unsigned long>(frame.ticks),
+                static_cast<unsigned long>(frame.frameIndex),
+                static_cast<unsigned long>(frame.slowIoUs),
+                frame.slowIoPath[0] ? frame.slowIoPath : "-");
+        }
+        std::array<IoFileMetric, kIoFiles> files = g_ioFiles;
+        std::sort(files.begin(), files.end(), [](const IoFileMetric& a, const IoFileMetric& b) {
+            return a.totalUs > b.totalUs;
+        });
+        for (u32 i = 0; i < kIoFiles; ++i) {
+            if (!files[i].path[0]) break;
+            const std::size_t length = std::strlen(report);
+            std::snprintf(report + length, sizeof(report) - length,
+                "io_file_%02lu=total_ms:%lu ops:%lu max_us:%lu path:%s\n",
+                static_cast<unsigned long>(i),
+                static_cast<unsigned long>(files[i].totalUs / 1000u),
+                static_cast<unsigned long>(files[i].ops),
+                static_cast<unsigned long>(files[i].maxUs), files[i].path);
+        }
+    }
+    // Handler callbacks as offsets from PspPerf::Reset (module-relative, so
+    // the same table resolves against the PRX or the static ELF symbols).
+    {
+        const std::size_t length = std::strlen(report);
+        std::snprintf(report + length, sizeof(report) - length,
+            "handler_ref=0x%08lx\nhandler_count=%lu\n",
+            static_cast<unsigned long>(reinterpret_cast<uintptr_t>(&Reset)),
+            static_cast<unsigned long>(g_handlerCount));
+    }
+    for (u32 i = 0; i < g_handlerCount; ++i) {
+        const HandlerMetric& metric = g_handlers[i];
+        const long offset = static_cast<long>(reinterpret_cast<uintptr_t>(metric.callback))
+            - static_cast<long>(reinterpret_cast<uintptr_t>(&Reset));
+        const std::size_t length = std::strlen(report);
+        std::snprintf(report + length, sizeof(report) - length,
+            "handler_%02lu=fn_minus_ref:%ld avg_us:%.1f calls_per_frame:%.2f\n",
+            static_cast<unsigned long>(i), offset,
+            g_totalFrames ? static_cast<double>(metric.totalUs) / g_totalFrames : 0.0,
+            g_totalFrames ? static_cast<double>(metric.calls) / g_totalFrames : 0.0);
     }
     p3d::io::WriteTextFile(
         path && path[0] ? path : "PSP_PERF.TXT", std::string(report));

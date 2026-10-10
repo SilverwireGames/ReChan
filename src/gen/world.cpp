@@ -5154,12 +5154,16 @@ static void DrawEntityListForBlock(u32 listIndex, ccList& list, u16 blockNum, u3
     }
 
     PspPerf::ScopeTimer entityTimer(PspPerf::RendererCounter::EntitiesUs);
+    PspPerf::ScopeTimer listTimer(static_cast<PspPerf::RendererCounter>(
+        static_cast<u32>(PspPerf::RendererCounter::EntHumanoidUs) + (listIndex & 3u)));
     MARKFUNCTION(0x8002B224);
     const std::vector<Thing*>& things = buckets.things[listIndex];
     const u32 end = buckets.start[listIndex][slot + 1u];
     for (u32 index = buckets.start[listIndex][slot]; index < end; ++index) {
         Thing* thing = things[index];
         if (thing->blockNum != blockNum) continue;
+        PspPerf::CountRenderer(static_cast<PspPerf::RendererCounter>(
+            static_cast<u32>(PspPerf::RendererCounter::EntHumanoidDraws) + (listIndex & 3u)));
 #if !defined(NDEBUG)
         if (s_pspWorldRenderProbe) {
             LOG("[PSP World] entity begin block=%u thing=%p type=%u model=%p",

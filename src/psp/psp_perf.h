@@ -13,6 +13,16 @@ enum class RendererCounter : u32 {
     OpaqueQueueFlushes, GeSyncUs, VblankUs, PaletteEntries,
     EntitiesUs, BlocksUs, SubmitUs, SkinPrepareUs, SkinLightUs, VertexPackUs,
     LightEvaluations, LightCacheHits, SkinnedVertices, SkinViewCulls,
+    // EntitiesUs split by AI list (humanoid, inactive pickup, pickup, move),
+    // with the number of Thing::Draw calls per list.
+    EntHumanoidUs, EntInactivePickupUs, EntPickupUs, EntMoveUs,
+    EntHumanoidDraws, EntInactivePickupDraws, EntPickupDraws, EntMoveDraws,
+    // Play-state breakdown of the "logic" share (everything in Game::Step
+    // outside World::Render and SwapBuffers). AnimTickUs includes EffectsUs.
+    PlayLogicTicks, LogicHandlersUs, AnimTickUs, EffectsUs, CameraUs, PlayAudioUs,
+    // Main-thread file access (Memory Stick open/read/seek/stat): it blocks
+    // the frame, unlike the music worker's streaming reads.
+    IoUs, IoOps, IoBytes,
     Count
 };
 
@@ -44,6 +54,29 @@ inline void CountRenderer(RendererCounter counter, u32 amount = 1) {
 }
 #else
 inline void CountRenderer(RendererCounter, u32 = 1) {}
+#endif
+
+// Main-thread file I/O timing (see RendererCounter::IoUs). Reads issued by
+// other threads (music streaming) are ignored.
+// path names the file for open/stat; reads and seeks pass nullptr and are
+// charged to the file opened last on the main thread.
+#if defined(PSP_PERF_TELEMETRY)
+u32 IoClock();
+void RecordIo(u32 startClock, u32 bytes, const char* path = nullptr);
+#else
+inline u32 IoClock() { return 0; }
+inline void RecordIo(u32, u32, const char* = nullptr) {}
+#endif
+
+// Per-handler time for Game's handler lists, keyed by callback address. The
+// report prints each callback's offset from PspPerf::Reset so a PRX address
+// can be matched against the ELF symbol table (psp-addr2line / nm).
+#if defined(PSP_PERF_TELEMETRY)
+u32 HandlerClock();
+void RecordHandler(const void* callback, u32 startClock);
+#else
+inline u32 HandlerClock() { return 0; }
+inline void RecordHandler(const void*, u32) {}
 #endif
 
 // Inclusive main-thread scopes; nested categories must not be summed.

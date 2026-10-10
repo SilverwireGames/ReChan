@@ -12,6 +12,7 @@ inline uint64_t sceKernelGetSystemTimeWide() {
     static uint64_t timeUs = 1000000;
     return ++timeUs;
 }
+inline int sceKernelGetThreadId() { return 1; }
 inline unsigned int sceKernelGetSystemTimeLow() {
     return static_cast<unsigned int>(sceKernelGetSystemTimeWide());
 }
@@ -218,4 +219,5 @@ SDK_NOOP(guSwapBuffersBehaviour) SDK_NOOP(sceGuDisplay) SDK_NOOP(sceDisplayWaitV
 SDK_NOOP(sceCtrlSetSamplingCycle) SDK_NOOP(sceCtrlSetSamplingMode)
 SDK_NOOP(sceGumLoadIdentity) SDK_NOOP(sceGumOrtho)
 SDK_NOOP(sceKernelDcacheWritebackAll) SDK_NOOP(sceKernelDcacheWritebackRange)
+SDK_NOOP(sceDisplayGetVcount)
 #undef SDK_NOOP
