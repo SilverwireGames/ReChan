@@ -38,6 +38,12 @@ public:
     // animation data before it reads past the permanent buffer.
     u32 frameStreamSize = 0;
     u32 paletteLutCount = 0;
+#if defined(RC_PLATFORM_PSP)
+    // PSP frees the per-level perm scratch after loading, so each entry keeps
+    // its own copy of the frame stream + LUT instead of pointing into it.
+    u8* ownedStream = nullptr;
+    u32 ownedStreamSize = 0;
+#endif
 };
 
 // PSX: Load__11PaletteDataR10tReadChunkPPv (PALDATA.CPP:117, 0x8009CEA4)

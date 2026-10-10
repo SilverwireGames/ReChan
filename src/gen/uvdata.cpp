@@ -10,20 +10,74 @@ u32 g_UVPrimDataCount = 0;
 CBVPrimData g_CBVPrimDataArray[CBV_PRIM_MAX];
 u32 g_CBVPrimDataCount = 0;
 
+// PSP loads each RCI/PCI perm payload into World::pspPermScratch, which is
+// overwritten by the next pair and released once the level/petal is loaded.
+// entryRaw must therefore point at memory owned by this module; otherwise
+// UpdateUVPrimData/UpdateCBVPrimData and CBVPrimData::Init read freed heap.
+// Desktop keeps the original pointer into the resident stream data, so these
+// slots stay null there.
+static u8* s_uvOwnedEntries[UV_PRIM_MAX] = {};
+static u8* s_cbvOwnedEntries[CBV_PRIM_MAX] = {};
+
+static void FreeOwnedEntries(u8*& owned) {
+    delete[] owned;
+    owned = nullptr;
+}
+
+// Overflow-safe "count * stride bytes starting at cursor fit in size" check.
+static bool PermSpanFits(u32 cursor, u32 count, u32 stride, u32 size) {
+    if (cursor > size) {
+        return false;
+    }
+    const u64 bytes = static_cast<u64>(count) * static_cast<u64>(stride);
+    return bytes <= static_cast<u64>(size - cursor);
+}
+
+static const u8* RetainPermEntries(const u8* source, u32 bytes, u8*& owned) {
+    FreeOwnedEntries(owned);
+#if defined(RC_PLATFORM_PSP)
+    if (bytes != 0) {
+        owned = new u8[bytes];
+        std::memcpy(owned, source, bytes);
+        return owned;
+    }
+#else
+    (void)bytes;
+#endif
+    return source;
+}
+
+static bool IsPspUserPointer(const void* pointer) {
+    if (!pointer) {
+        return false;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    return address >= 0x08000000u && address < 0x0C000000u;
+#else
+    return true;
+#endif
+}
+
 static void LogInvalidPrimWindow(const char* tag, int blockNum, const tPrimGeom* geom, u32 primListBaseOff) {
+    // A stale geometry pointer can reach this diagnostic while a phase is
+    // being torn down.  Do not dereference it merely to print the error.
+    const tPrimGeom* safeGeom = IsPspUserPointer(geom) ? geom : nullptr;
     LOG("[%s] Invalid primList window: block=%d primListBaseOff=%u ownedRawSize=%u geoType=%u numLoops=%u primList=%p raw=%p",
         tag,
         blockNum,
         primListBaseOff,
-        geom ? geom->ownedRawSize : 0,
-        geom ? geom->geoType : 0,
-        geom ? geom->numLoops : 0,
-        geom ? geom->primList : nullptr,
-        geom ? geom->ownedRawData : nullptr);
+        safeGeom ? safeGeom->ownedRawSize : 0,
+        safeGeom ? safeGeom->geoType : 0,
+        safeGeom ? safeGeom->numLoops : 0,
+        safeGeom ? safeGeom->primList : nullptr,
+        safeGeom ? safeGeom->ownedRawData : nullptr);
 }
 
 static void LogInvalidPrimOffset(const char* tag, int blockNum, u32 hash, u32 entryIdx, u32 wordIdx,
                                  u32 primOffset, u32 primListBytes, const tPrimGeom* geom) {
+    const tPrimGeom* safeGeom = IsPspUserPointer(geom) ? geom : nullptr;
     LOG("[%s] Invalid prim offset: block=%d hash=0x%08X entry=%u word=%u primOffset=%u primListBytes=%u ownedRawSize=%u geoType=%u numLoops=%u primList=%p raw=%p",
         tag,
         blockNum,
@@ -32,11 +86,48 @@ static void LogInvalidPrimOffset(const char* tag, int blockNum, u32 hash, u32 en
         wordIdx,
         primOffset,
         primListBytes,
-        geom ? geom->ownedRawSize : 0,
-        geom ? geom->geoType : 0,
-        geom ? geom->numLoops : 0,
-        geom ? geom->primList : nullptr,
-        geom ? geom->ownedRawData : nullptr);
+        safeGeom ? safeGeom->ownedRawSize : 0,
+        safeGeom ? safeGeom->geoType : 0,
+        safeGeom ? safeGeom->numLoops : 0,
+        safeGeom ? safeGeom->primList : nullptr,
+        safeGeom ? safeGeom->ownedRawData : nullptr);
+}
+
+static bool ResolvePrimListWindow(const tPrimGeom* geom, u32* outBaseOffset) {
+    if (outBaseOffset) {
+        *outBaseOffset = 0;
+    }
+    if (!IsPspUserPointer(geom)
+        || !geom->ownedRawData || !geom->primList || geom->ownedRawSize == 0) {
+        return false;
+    }
+
+    const uintptr_t rawAddress = reinterpret_cast<uintptr_t>(geom->ownedRawData);
+    const uintptr_t primListAddress = reinterpret_cast<uintptr_t>(geom->primList);
+
+#if defined(RC_PLATFORM_PSP)
+    // Do not use pointer subtraction here: stale geometry can contain two
+    // unrelated PSP addresses and C++ pointer subtraction is undefined in
+    // that case.  The PSP path must reject the window before touching it.
+    if (!IsPspUserPointer(geom->ownedRawData) || !IsPspUserPointer(geom->primList)) {
+        return false;
+    }
+#endif
+
+    if (primListAddress < rawAddress) {
+        return false;
+    }
+
+    const uintptr_t baseOffset = primListAddress - rawAddress;
+    if (baseOffset >= static_cast<uintptr_t>(geom->ownedRawSize)
+        || baseOffset > 0xFFFFFFFFu) {
+        return false;
+    }
+
+    if (outBaseOffset) {
+        *outBaseOffset = static_cast<u32>(baseOffset);
+    }
+    return true;
 }
 
 static void LogUVPrimEntrySample(const UVPrimData& data, u32 permOffset) {
@@ -90,14 +181,18 @@ void UVPrimData::Init(s32 newUMask, s32 newVMask, s32 newUStep, s32 newVStep) {
 bool UpdateUVPrimData(int blockNum, tPrimGeom* geom) {
     MARKFUNCTION(0x800984E4);
 
-    if (!geom || !geom->ownedRawData || !geom->primList) {
+    if (!geom) {
         return false;
     }
 
-    const u32 primListBaseOff = static_cast<u32>(geom->primList - geom->ownedRawData);
-    if (primListBaseOff >= geom->ownedRawSize) {
+    u32 primListBaseOff = 0;
+    if (!ResolvePrimListWindow(geom, &primListBaseOff)) {
         LogInvalidPrimWindow("UVPrimData", blockNum, geom, primListBaseOff);
-        ASSERT(false);
+#if !defined(RC_PLATFORM_PSP)
+        if (geom->ownedRawData && geom->primList) {
+            ASSERT(false);
+        }
+#endif
         return false;
     }
 
@@ -115,7 +210,7 @@ bool UpdateUVPrimData(int blockNum, tPrimGeom* geom) {
             const u8* entry = uvData.entryRaw + entryIdx * 32;
             for (u32 wordIdx = 0; wordIdx < 4; wordIdx++) {
                 const u32 primOffset = p3dReadU32LE(entry + wordIdx * 4);
-                if (primOffset + 2 > primListBytes) {
+                if (primOffset > primListBytes || 2u > primListBytes - primOffset) {
                     LogInvalidPrimOffset("UVPrimData", blockNum, uvData.hash, entryIdx, wordIdx, primOffset, primListBytes, geom);
                     ASSERT(false);
                     continue;
@@ -415,14 +510,18 @@ CBVPrimData* FindCBVPrimInfo(u32 hash) {
 bool UpdateCBVPrimData(int blockNum, tPrimGeom* geom) {
     MARKFUNCTION(0x800987FC);
 
-    if (!geom || !geom->ownedRawData || !geom->primList) {
+    if (!geom) {
         return false;
     }
 
-    const u32 primListBaseOff = static_cast<u32>(geom->primList - geom->ownedRawData);
-    if (primListBaseOff >= geom->ownedRawSize) {
+    u32 primListBaseOff = 0;
+    if (!ResolvePrimListWindow(geom, &primListBaseOff)) {
         LogInvalidPrimWindow("CBVPrimData", blockNum, geom, primListBaseOff);
-        ASSERT(false);
+#if !defined(RC_PLATFORM_PSP)
+        if (geom->ownedRawData && geom->primList) {
+            ASSERT(false);
+        }
+#endif
         return false;
     }
 
@@ -438,11 +537,23 @@ bool UpdateCBVPrimData(int blockNum, tPrimGeom* geom) {
 
         for (u32 entryIdx = 0; entryIdx < cbvData.numEntries; entryIdx++) {
             const u32 primOffset = p3dReadU32LE(cbvData.entryRaw + entryIdx * 8);
-            if (primOffset + 4 > primListBytes) {
+            if (primOffset > primListBytes || 4u > primListBytes - primOffset) {
                 LogInvalidPrimOffset("CBVPrimData", blockNum, cbvData.hash, entryIdx, 0, primOffset, primListBytes, geom);
                 ASSERT(false);
                 continue;
             }
+
+#if defined(RC_PLATFORM_PSP)
+            // PSP: a misaligned u32 store raises an address error exception
+            // in user mode, so skip the word instead of writing it.
+            const uintptr_t primWordAddress = reinterpret_cast<uintptr_t>(primList) + primOffset;
+            if ((primWordAddress & 3u) != 0u) {
+                LogInvalidPrimOffset("CBVPrimData unaligned", blockNum, cbvData.hash,
+                                     entryIdx, 0, primOffset, primListBytes, geom);
+                continue;
+            }
+#endif
+
             u32* primWord = reinterpret_cast<u32*>(primList + primOffset);
             const u32 nextWord = (*primWord & 0xFF000000u)
                 | cbvData.colourInfo[entryIdx]->GetColour();
@@ -468,6 +579,7 @@ void LoadUVPrimData(u16 chunkId, const u8* body, u32 bodySize,
 
         UVPrimData& d = g_UVPrimDataArray[g_UVPrimDataCount];
         memset(&d, 0, sizeof(d));
+        FreeOwnedEntries(s_uvOwnedEntries[g_UVPrimDataCount]);
         d.hash = p3dReadU32LE(body + 0);
         d.blockNum = p3dReadU32LE(body + 4);
         d.numEntries = p3dReadU32LE(body + 8);
@@ -490,17 +602,20 @@ void LoadUVPrimData(u16 chunkId, const u8* body, u32 bodySize,
     }
     else if (chunkId == 0x8C21) {
         if (g_UVPrimDataCount == 0) return;
-        UVPrimData& d = g_UVPrimDataArray[g_UVPrimDataCount - 1];
+        const u32 slot = g_UVPrimDataCount - 1;
+        UVPrimData& d = g_UVPrimDataArray[slot];
         const u32 entryPermOffset = permCursor;
 
-        if (permCursor + d.numEntries * 32 > permSize) {
-            LOG("[UVPrimData] 0x8C21 perm overflow: need %u, have %u",
-                permCursor + d.numEntries * 32, permSize);
+        // numEntries comes from the chunk; numEntries * 32 must not wrap.
+        if (!permBase || !PermSpanFits(permCursor, d.numEntries, 32u, permSize)) {
+            LOG("[UVPrimData] 0x8C21 perm overflow: cursor=%u entries=%u have %u",
+                permCursor, d.numEntries, permSize);
             return;
         }
 
-        d.entryRaw = permBase + permCursor;
-        permCursor += d.numEntries * 32;
+        const u32 entryBytes = d.numEntries * 32u;
+        d.entryRaw = RetainPermEntries(permBase + permCursor, entryBytes, s_uvOwnedEntries[slot]);
+        permCursor += entryBytes;
         d.valid = 1;
 
         // PSX: UVPrimData::FindUVPrimInfo(hash) + Init(...) supply masks/steps when
@@ -530,6 +645,7 @@ void LoadCBVPrimData(u16 chunkId, const u8* body, u32 bodySize,
         CBVPrimData& d = g_CBVPrimDataArray[g_CBVPrimDataCount];
         d.Release();
         d = CBVPrimData();
+        FreeOwnedEntries(s_cbvOwnedEntries[g_CBVPrimDataCount]);
         d.hash = p3dReadU32LE(body + 0);
         d.blockNum = p3dReadU32LE(body + 4);
         d.numEntries = p3dReadU32LE(body + 8);
@@ -540,15 +656,18 @@ void LoadCBVPrimData(u16 chunkId, const u8* body, u32 bodySize,
     }
     else if (chunkId == 0x8C31) {
         if (g_CBVPrimDataCount == 0) return;
-        CBVPrimData& d = g_CBVPrimDataArray[g_CBVPrimDataCount - 1];
+        const u32 slot = g_CBVPrimDataCount - 1;
+        CBVPrimData& d = g_CBVPrimDataArray[slot];
 
-        if (permCursor + d.numEntries * 8 > permSize) {
+        // numEntries comes from the chunk; numEntries * 8 must not wrap.
+        if (!permBase || !PermSpanFits(permCursor, d.numEntries, 8u, permSize)) {
             LOG("[CBVPrimData] 0x8C31 perm overflow");
             return;
         }
 
-        d.entryRaw = permBase + permCursor;
-        permCursor += d.numEntries * 8;
+        const u32 entryBytes = d.numEntries * 8u;
+        d.entryRaw = RetainPermEntries(permBase + permCursor, entryBytes, s_cbvOwnedEntries[slot]);
+        permCursor += entryBytes;
         d.valid = 1;
 
         LOG("[CBVPrimData] Load 0x8C31: entries=%u valid=1", d.numEntries);
@@ -560,6 +679,7 @@ void UnloadUVPrimData() {
     MARKFUNCTION(0x80098478);
     for (u32 i = 0; i < g_UVPrimDataCount; i++) {
         memset(&g_UVPrimDataArray[i], 0, sizeof(UVPrimData));
+        FreeOwnedEntries(s_uvOwnedEntries[i]);
     }
     g_UVPrimDataCount = 0;
 }
@@ -570,6 +690,7 @@ void UnloadCBVPrimData() {
     for (u32 i = 0; i < g_CBVPrimDataCount; i++) {
         g_CBVPrimDataArray[i].Release();
         g_CBVPrimDataArray[i] = CBVPrimData();
+        FreeOwnedEntries(s_cbvOwnedEntries[i]);
     }
     g_CBVPrimDataCount = 0;
 }

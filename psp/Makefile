@@ -3,6 +3,10 @@ BUILD_MODE ?= release
 
 PSP_EBOOT_TITLE = Re:Chain
 EXTRA_TARGETS = EBOOT.PBP
+# MEMSIZE=1 in PARAM.SFO: PSP-2000/3000/Go (and PPSSPP) give the game the
+# extended user partition (~52 MB instead of ~24 MB); PSP-1000 keeps the small
+# one. The SDK default (MEMSIZE=2) left the heap at ~17.9 MB on a PSP-3000.
+PSP_LARGE_MEMORY = 1
 
 ROOT = ..
 SRC_DIRS = \
@@ -39,6 +43,7 @@ SOURCES += $(ROOT)/src/psp/psp_audio.cpp \
 	$(ROOT)/src/psp/psp_log.cpp \
 	$(ROOT)/src/psp/psp_perf.cpp \
 	$(ROOT)/src/psp/psp_psxdiscextractor.cpp \
+	$(ROOT)/src/psp/psp_qa.cpp \
 	$(ROOT)/src/psp/psp_settings.cpp \
 	$(ROOT)/vendor/libp3d/pddi/psp/psprender.cpp \
 	$(ROOT)/psp/psp_module.cpp
@@ -66,7 +71,11 @@ OBJS = $(SOURCES:.cpp=.o)
 
 # build.mak prefixes every entry in INCDIR with -I.
 INCDIR = $(ROOT)/src $(ROOT)/vendor/libp3d $(ROOT)/vendor/cgltf $(ROOT)/vendor/stb
-DEFINES = -DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_SORT_OPAQUE_MATERIALS
+# Same submission path as the measured benchmark/telemetry builds
+# (scripts/build_psp_usb.sh): native indexed draws with list memory and
+# persistent indices. All three are covered by scripts/test_psp_renderer.sh.
+DEFINES = -DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_SORT_OPAQUE_MATERIALS \
+	-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES
 
 COMMON_FLAGS = $(DEFINES) -std=gnu++17 -G0 -ffunction-sections -fdata-sections \
 	-fno-strict-aliasing -mno-check-zero-division -Wall -Wextra

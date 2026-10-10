@@ -120,6 +120,21 @@ private:
 
     // +164: lastAddedBlockNum (set when a block is added to loaded list)
     u32 lastAddedBlockNum;
+
+    // PC/PSP cost cache: Block* parallel to alreadyLoadedList (same order,
+    // first block whose blockNum matches, as GetBlockByNumber returns), filled
+    // by UpdateAlreadyLoadedList. Readers only trust it while the list, its
+    // count and the block storage still match the snapshot; otherwise they
+    // fall back to the linear lookup.
+    const Block* alreadyLoadedBlocks[kBlockManagerListCapacity] = {};
+    u16 alreadyLoadedBlocksKey[kBlockManagerListCapacity] = {};
+    u32 alreadyLoadedBlocksCount = 0;
+    const Block* alreadyLoadedBlocksData = nullptr;
+    size_t alreadyLoadedBlocksSize = 0;
+    bool alreadyLoadedBlocksValid = false;
+
+    void RebuildAlreadyLoadedBlocks();
+    bool AlreadyLoadedBlocksCurrent() const;
 };
 
 // PSX: gp scope, defined in world.cpp

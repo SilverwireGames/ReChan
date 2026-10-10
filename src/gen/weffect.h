@@ -98,6 +98,7 @@ private:
     void ApplyUVListAnimFrame(const UVListAnim* uvAnim, s32 frame);
     bool ApplyMiscAnimFrame(MiscAnimNode* node, s32 frame, bool updateJoints);
     bool IsFastDrawGeoCurrent() const;
+    bool IsUVGeoCacheLive() const;
     void FastZSortDisplayGCT3(u32 primCount);
     void FastZSortDisplayGCT4(u32 primCount);
 
@@ -128,6 +129,11 @@ private:
     u32 uvPrimCount = 0;
     u16** uvGeoBaseWords = nullptr;
     OriginalGeo** uvGeoList = nullptr;
+    // Identity of each cached geo at capture time: owning ETree part slot
+    // (0xFFFF for a plain Geo drawable) and the dynamicPrimCount used to size
+    // uvGeoBaseWords. AddUV revalidates both before writing.
+    u16* uvGeoPartIndices = nullptr;
+    u32* uvGeoPrimCounts = nullptr;
     u16 uvGeoCount = 0;
 
     VertexAnimInfo* vertexAnimInfos = nullptr;

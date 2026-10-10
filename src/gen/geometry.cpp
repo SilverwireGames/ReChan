@@ -735,6 +735,20 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
 #endif
     vertBuf.clear();
     idxBuf.clear();
+#if defined(RC_PLATFORM_PSP)
+    // Size the build buffers once (at most 4 vertices / 6 indices per primitive).
+    // Growing them with push_back doubles repeatedly and needs the old and new
+    // block at the same time; on a nearly full heap that 1.5x peak is what made
+    // `new` fail when walking into a new block (phase 2 crash, CRASH.TXT).
+    vertBuf.reserve(static_cast<size_t>(expectedPolyCount) * 4u);
+    idxBuf.reserve(static_cast<size_t>(expectedPolyCount) * 6u);
+    if (outUvOffsets) {
+        outUvOffsets->reserve(outUvOffsets->size() + static_cast<size_t>(expectedPolyCount) * 4u);
+    }
+    if (outColourOffsets) {
+        outColourOffsets->reserve(outColourOffsets->size() + static_cast<size_t>(expectedPolyCount) * 4u);
+    }
+#endif
     u32 culledBackfaceCount = 0;
     u32 culledClipCount = 0;
     bool usesSemiTrans = false;

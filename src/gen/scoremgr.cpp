@@ -380,7 +380,13 @@ s32 ScoreManager::RegisterCollectible(const Collectible* collectible, s32 type) 
     const s32 collectibleAddr = static_cast<s32>(reinterpret_cast<uintptr_t>(collectible));
 
     if (type == 1) {
-        collectibleRegistry[collectibleCount++] = collectibleAddr;
+        // The registry holds 10 entries; without this guard an 11th registration
+        // (e.g. collectibles re-registered after a checkpoint respawn) writes past
+        // the array into the fields that follow it, including collectibleCount.
+        const s32 capacity = static_cast<s32>(sizeof(collectibleRegistry) / sizeof(collectibleRegistry[0]));
+        if (collectibleCount >= 0 && collectibleCount < capacity) {
+            collectibleRegistry[collectibleCount++] = collectibleAddr;
+        }
         return 0;
     }
 

@@ -1,3 +1,4 @@
+#include <cstring>
 #include "common.h"
 
 #include "gen/paldata.h"
@@ -47,6 +48,11 @@ PaletteData::~PaletteData() {
         u16* base = writeCursorEnd - 256;
         delete[] base;
     }
+#if defined(RC_PLATFORM_PSP)
+    delete[] ownedStream;
+    ownedStream = nullptr;
+    ownedStreamSize = 0;
+#endif
 
     writeCursor = nullptr;
     writeCursorEnd = nullptr;
@@ -124,6 +130,20 @@ bool LoadPaletteData(u16 chunkId, const u8* body, u32 bodySize,
 
         entry->paletteLut = reinterpret_cast<const u16*>(permBase + lutCursor);
         entry->paletteLutCount = lutCount;
+#if defined(RC_PLATFORM_PSP)
+        {
+            // Own the frame stream + LUT: World::pspPermScratch is freed after the
+            // level loads, and Update() would otherwise read recycled heap memory.
+            const u32 ownedSize = entry->permOffset + 2u + lutBytes;
+            u8* owned = new u8[ownedSize];
+            std::memcpy(owned, permBase + permCursor, ownedSize);
+            delete[] entry->ownedStream;
+            entry->ownedStream = owned;
+            entry->ownedStreamSize = ownedSize;
+            entry->frameStream = owned;
+            entry->paletteLut = reinterpret_cast<const u16*>(owned + entry->permOffset + 2u);
+        }
+#endif
         lutCursor += lutBytes;
 
         const u8 lowPermOffset = static_cast<u8>(entry->permOffset);
@@ -188,6 +208,16 @@ PaletteData* PaletteData::Clone() const {
     clone->clut = 0x4000;
     clone->setupFlags = 0;
     clone->paletteLut = paletteLut;
+#if defined(RC_PLATFORM_PSP)
+    if (ownedStream && ownedStreamSize > 0) {
+        u8* owned = new u8[ownedStreamSize];
+        std::memcpy(owned, ownedStream, ownedStreamSize);
+        clone->ownedStream = owned;
+        clone->ownedStreamSize = ownedStreamSize;
+        clone->frameStream = owned;
+        clone->paletteLut = reinterpret_cast<const u16*>(owned + (reinterpret_cast<const u8*>(paletteLut) - ownedStream));
+    }
+#endif
 
     return clone;
 }
@@ -301,6 +331,15 @@ s32 PaletteData::Update() {
         if (static_cast<u32>(skip) > 256u
             || static_cast<u32>(skip) + (spanByte ? static_cast<u32>(spanByte) : 256u) > 256u
             || runOffset + (spanByte ? static_cast<u32>(spanByte) : 256u) > framePayloadSize) {
+            writeCursor = nullptr;
+            return 0;
+        }
+
+        // The check above bounds one run; also bound the running total so a
+        // sequence of runs cannot advance writeCursor past its 256-entry buffer.
+        const u32 runSpan = spanByte ? static_cast<u32>(spanByte) : 256u;
+        if (writeCursor > writeCursorEnd
+            || static_cast<u32>(writeCursorEnd - writeCursor) < static_cast<u32>(skip) + runSpan) {
             writeCursor = nullptr;
             return 0;
         }

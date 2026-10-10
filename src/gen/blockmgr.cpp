@@ -8,6 +8,8 @@
 #include "gen/world.h"
 #include "gen/weffect.h"
 
+#include <algorithm>
+
 static u32 GetBaseLoadedBlockCount() {
     return (g_game && g_game->GetWorld() && g_game->GetWorld()->GetCurLevelID() == 7) ? 7u : 6u;
 }
@@ -212,6 +214,7 @@ void BlockManager::LoadBlocksFunc(const std::vector<DBVolume*>& volumes) {
     MARKFUNCTION(0x8005010C);
 
     totalBlocks = static_cast<u32>(volumes.size());
+    alreadyLoadedBlocksValid = false;
     blocks.resize(totalBlocks);
 
     for (u32 i = 0; i < totalBlocks; i++) {
@@ -234,6 +237,7 @@ void BlockManager::InternalOpen() {
     memset(toBeLoadedList, 0, sizeof(toBeLoadedList));
     loadingState = 0;
     lastAddedBlockNum = 0x1000;
+    alreadyLoadedBlocksValid = false;
 }
 
 // InternalClose__12BlockManager (BLKMGR.CPP:280)
@@ -241,6 +245,7 @@ void BlockManager::InternalClose() {
     MARKFUNCTION(0x80050384);
     for (auto& b : blocks) b.Destroy();
     blocks.clear();
+    alreadyLoadedBlocksValid = false;
     totalBlocks = 0;
     drawListCount = 0;
     alreadyLoadedCount = 0;
@@ -292,6 +297,7 @@ void BlockManager::UpdateAlreadyLoadedList() {
     for (u32 index = 0; index < kBlockManagerListCapacity; index++) {
         alreadyLoadedList[index] = (index < alreadyLoadedCount) ? toBeLoadedList[index] : 6969;
     }
+    RebuildAlreadyLoadedBlocks();
 
     flag2 = 1;
 
@@ -330,11 +336,48 @@ Block* BlockManager::GetBlockByBlockNumber(u32 blockNum) {
     return GetBlockByNumber(blocks, blockNum);
 }
 
+void BlockManager::RebuildAlreadyLoadedBlocks() {
+    const u32 count = std::min<u32>(alreadyLoadedCount, kBlockManagerListCapacity);
+    for (u32 index = 0; index < kBlockManagerListCapacity; index++) {
+        const bool used = index < count;
+        alreadyLoadedBlocksKey[index] = used ? alreadyLoadedList[index] : 0;
+        alreadyLoadedBlocks[index] = used ? GetBlockByNumber(blocks, alreadyLoadedList[index]) : nullptr;
+    }
+    alreadyLoadedBlocksCount = count;
+    alreadyLoadedBlocksData = blocks.data();
+    alreadyLoadedBlocksSize = blocks.size();
+    alreadyLoadedBlocksValid = true;
+}
+
+// The snapshot is only used while it still describes exactly the current
+// list and block storage, so every other writer of alreadyLoadedList keeps
+// the original linear behaviour without having to know about the cache.
+bool BlockManager::AlreadyLoadedBlocksCurrent() const {
+    if (!alreadyLoadedBlocksValid || alreadyLoadedBlocksCount != alreadyLoadedCount
+        || alreadyLoadedBlocksData != blocks.data() || alreadyLoadedBlocksSize != blocks.size()) {
+        return false;
+    }
+    for (u32 index = 0; index < alreadyLoadedCount; index++) {
+        if (alreadyLoadedBlocksKey[index] != alreadyLoadedList[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // IsValidBlockNumber__12BlockManagerUl (BLKMGR.CPP:769)
 // PSX: iterates loaded block linked list, returns true if any block has that blockNum.
 // PC: all blocks are loaded, iterate all blocks.
 bool BlockManager::IsValidBlockNumber(u32 blockNum) const {
     MARKFUNCTION(0x80050C70);
+    if (AlreadyLoadedBlocksCurrent()) {
+        for (u32 index = 0; index < alreadyLoadedCount; index++) {
+            if (alreadyLoadedList[index] == (u16)blockNum && alreadyLoadedBlocks[index]) {
+                return true;
+            }
+        }
+        return false;
+    }
     for (u32 index = 0; index < alreadyLoadedCount; index++) {
         if (alreadyLoadedList[index] == (u16)blockNum && GetBlockByNumber(blocks, blockNum)) {
             return true;
@@ -349,6 +392,15 @@ bool BlockManager::IsValidBlockNumber(u32 blockNum) const {
 // PC: all blocks are loaded, iterate all blocks.
 u16 BlockManager::GetBlockNumber(const LVector& pos) const {
     MARKFUNCTION(0x80050C04);
+    if (AlreadyLoadedBlocksCurrent()) {
+        for (u32 index = 0; index < alreadyLoadedCount; index++) {
+            const Block* block = alreadyLoadedBlocks[index];
+            if (block && block->PointInBlock(&pos)) {
+                return block->blockNum;
+            }
+        }
+        return 0x1000;
+    }
     for (u32 index = 0; index < alreadyLoadedCount; index++) {
         const Block* block = GetBlockByNumber(blocks, alreadyLoadedList[index]);
         if (block && block->PointInBlock(&pos)) {
@@ -493,6 +545,13 @@ s32 BlockManager::DemandLoading() {
     return 0;
 }
 
+// Cycle clipping only changes the PSP traversal; desktop keeps the original walk.
+#if defined(RC_PLATFORM_PSP)
+static constexpr bool kBlockCycleGuard = true;
+#else
+static constexpr bool kBlockCycleGuard = false;
+#endif
+
 bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
     MARKFUNCTION(0x80050D94);
 
@@ -520,6 +579,7 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
     const Block* previousFrontier[2] = { currentBlock, nullptr };
     u32 previousFrontierIndex = 0;
     u32 previousCount = 0;
+    bool previousSeed = true;
     while (previousCount < kBlockManagerListCapacity - 1) {
         const u32 otherIndex = (previousFrontierIndex + 1) & 1u;
         const Block* block = previousFrontier[previousFrontierIndex];
@@ -530,6 +590,23 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
             previousFrontierIndex = otherIndex;
             continue;
         }
+
+        // A malformed/cyclic WDB graph can point back to the current block
+        // or to a block already walked by this frontier.  The old traversal
+        // only bounded the number of unique blocks, so a duplicate-only
+        // cycle could spin forever during the phase transition while the
+        // loading framebuffer remained on screen.
+        if (kBlockCycleGuard && !previousSeed && (block == currentBlock ||
+                              ContainsBlockNumber(previousBlocks, previousCount, block->blockNum))) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+            LOG("[PSP Block] cyclic previous walk clipped current=%u prev=%u",
+                static_cast<unsigned>(blockNum), static_cast<unsigned>(previousCount));
+#endif
+            previousFrontier[previousFrontierIndex] = nullptr;
+            previousFrontierIndex = otherIndex;
+            continue;
+        }
+        previousSeed = false;
 
         if (block != currentBlock && !ContainsBlockNumber(previousBlocks, previousCount, block->blockNum)) {
             previousBlocks[previousCount++] = block->blockNum;
@@ -576,6 +653,7 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
     const Block* nextFrontier[2] = { currentBlock, nullptr };
     u32 nextFrontierIndex = 0;
     u32 nextCount = 0;
+    bool nextSeed = true;
     while (nextCount < kBlockManagerListCapacity - 1) {
         const u32 otherIndex = (nextFrontierIndex + 1) & 1u;
         const Block* block = nextFrontier[nextFrontierIndex];
@@ -586,6 +664,21 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
             nextFrontierIndex = otherIndex;
             continue;
         }
+
+        // Keep the forward walk finite for the same reason as the previous
+        // walk above.  Normal linear/branched block chains never enter this
+        // path; it only cuts a repeated node out of a cyclic graph.
+        if (kBlockCycleGuard && !nextSeed && (block == currentBlock ||
+                          ContainsBlockNumber(nextBlocks, nextCount, block->blockNum))) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+            LOG("[PSP Block] cyclic next walk clipped current=%u next=%u",
+                static_cast<unsigned>(blockNum), static_cast<unsigned>(nextCount));
+#endif
+            nextFrontier[nextFrontierIndex] = nullptr;
+            nextFrontierIndex = otherIndex;
+            continue;
+        }
+        nextSeed = false;
 
         if (block != currentBlock && !ContainsBlockNumber(nextBlocks, nextCount, block->blockNum)) {
             nextBlocks[nextCount++] = block->blockNum;

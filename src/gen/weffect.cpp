@@ -137,6 +137,54 @@ static bool IsUsableFastGeo(const OriginalGeo* geo) {
     return true;
 }
 
+static bool IsUsableDynamicUVGeo(const OriginalGeo* geo) {
+#if !defined(RC_PLATFORM_PSP)
+    // Desktop keeps the exact original GeoSupportsDynamicUV predicate.
+    return geo
+        && geo->meshBuffer
+        && geo->dynamicVerts
+        && geo->dynamicVertCount > 0
+        && geo->dynamicPrimStart
+        && geo->dynamicPrimVertCount
+        && geo->dynamicPrimCount > 0;
+#else
+    if (!IsUsableFastGeo(geo)) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
+        static u32 invalidGeoLogCount = 0;
+        if (invalidGeoLogCount < 8u && IsValidFastDrawPointer(geo)) {
+            LOG("[WEffect] skip invalid dynamic UV geo=%p mesh=%p verts=%p primStart=%p primCount=%u vertCount=%u",
+                static_cast<const void*>(geo), static_cast<void*>(geo->meshBuffer),
+                static_cast<void*>(geo->dynamicVerts), static_cast<void*>(geo->dynamicPrimStart),
+                static_cast<unsigned>(geo->dynamicPrimCount),
+                static_cast<unsigned>(geo->dynamicVertCount));
+            invalidGeoLogCount++;
+        }
+#endif
+        return false;
+    }
+
+#if defined(RC_PLATFORM_PSP)
+    // UV capture also dereferences this optional packed cache when present.
+    // A stale cache pointer must be rejected just like the required dynamic
+    // geometry arrays above.
+    if (geo->dynamicPrimUVWords
+        && !IsValidFastDrawPointer(geo->dynamicPrimUVWords)) {
+#if defined(PSP_STAGE_DIAGNOSTIC)
+        static u32 invalidUVCacheLogCount = 0;
+        if (invalidUVCacheLogCount < 8u) {
+            LOG("[WEffect] skip invalid dynamic UV cache geo=%p uvWords=%p",
+                static_cast<const void*>(geo), static_cast<void*>(geo->dynamicPrimUVWords));
+            invalidUVCacheLogCount++;
+        }
+#endif
+        return false;
+    }
+
+    return true;
+#endif
+#endif
+}
+
 // Seam offset applied during block draw phase so direct-position effects
 // (WEffect, SpotLight, FWEffect, GEffect, LensFlare) depth-align with
 // block geometry that has already been shifted by OffsetToPreventSeams.
@@ -1735,14 +1783,7 @@ static void WEffectPoolRemove(Effects* effect) {
         return nullptr;                                                                             \
     }((skeletonPtr), (jointMatricesPtr), (jointHashValue)))
 
-#define GeoSupportsDynamicUV(geoPtr)                                                                \
-    ((geoPtr)                                                                                        \
-     && (geoPtr)->meshBuffer                                                                        \
-     && (geoPtr)->dynamicVerts                                                                      \
-     && (geoPtr)->dynamicVertCount > 0                                                              \
-     && (geoPtr)->dynamicPrimStart                                                                  \
-     && (geoPtr)->dynamicPrimVertCount                                                              \
-     && (geoPtr)->dynamicPrimCount > 0)
+#define GeoSupportsDynamicUV(geoPtr) IsUsableDynamicUVGeo((geoPtr))
 
 #define CaptureGeoBaseUVWords(geoPtr, outBaseWordsPtr)                                              \
     ([&](const OriginalGeo* __geo, u16* __outBaseWords) {                                           \
@@ -2448,6 +2489,10 @@ PaletteData* WEffect::SetupPaletteData(u32 paletteHash, u32 clutMode, u32 flags)
                                                                                                      \
         delete[] __ceSelf->uvGeoList;                                                                \
         __ceSelf->uvGeoList = nullptr;                                                               \
+        delete[] __ceSelf->uvGeoPartIndices;                                                         \
+        __ceSelf->uvGeoPartIndices = nullptr;                                                        \
+        delete[] __ceSelf->uvGeoPrimCounts;                                                          \
+        __ceSelf->uvGeoPrimCounts = nullptr;                                                         \
         __ceSelf->uvGeoCount = 0;                                                                    \
     }((selfPtr)))
 
@@ -5154,14 +5199,17 @@ void ComEffect::SetUpUVlists() {
             if (dynamicGeoCount > 0) {
                 uvGeoBaseWords = new u16*[dynamicGeoCount]();
                 uvGeoList = new OriginalGeo*[dynamicGeoCount]();
-                if (!uvGeoBaseWords || !uvGeoList) {
+                uvGeoPartIndices = new u16[dynamicGeoCount]();
+                uvGeoPrimCounts = new u32[dynamicGeoCount]();
+                if (!uvGeoBaseWords || !uvGeoList || !uvGeoPartIndices || !uvGeoPrimCounts) {
                     ComEffect_ClearUVCache(this);
                     return;
                 }
 
                 u16 cacheIndex = 0;
-                for (u32 geoIndex = 0; geoIndex < renderableCount; geoIndex++) {
-                    OriginalGeo* geo = GetRenderableETreeGeoByIndex(original, geoIndex, nullptr);
+                for (u32 geoIndex = 0; geoIndex < renderableCount && cacheIndex < dynamicGeoCount; geoIndex++) {
+                    u16 partIndex = 0xFFFFu;
+                    OriginalGeo* geo = GetRenderableETreeGeoByIndex(original, geoIndex, &partIndex);
                     if (!GeoSupportsDynamicUV(geo)) {
                         continue;
                     }
@@ -5174,6 +5222,8 @@ void ComEffect::SetUpUVlists() {
                     CaptureGeoBaseUVWords(geo, baseWords);
                     uvGeoBaseWords[cacheIndex] = baseWords;
                     uvGeoList[cacheIndex] = geo;
+                    uvGeoPartIndices[cacheIndex] = partIndex;
+                    uvGeoPrimCounts[cacheIndex] = geo->dynamicPrimCount;
                     cacheIndex++;
                 }
 
@@ -5192,7 +5242,9 @@ void ComEffect::SetUpUVlists() {
         if (GeoSupportsDynamicUV(geo)) {
             uvGeoBaseWords = new u16*[1]();
             uvGeoList = new OriginalGeo*[1]();
-            if (!uvGeoBaseWords || !uvGeoList) {
+            uvGeoPartIndices = new u16[1]();
+            uvGeoPrimCounts = new u32[1]();
+            if (!uvGeoBaseWords || !uvGeoList || !uvGeoPartIndices || !uvGeoPrimCounts) {
                 ComEffect_ClearUVCache(this);
                 return;
             }
@@ -5205,6 +5257,8 @@ void ComEffect::SetUpUVlists() {
 
             CaptureGeoBaseUVWords(geo, uvGeoBaseWords[0]);
             uvGeoList[0] = geo;
+            uvGeoPartIndices[0] = 0xFFFFu;
+            uvGeoPrimCounts[0] = geo->dynamicPrimCount;
             uvGeoCount = 1;
             return;
         }
@@ -5267,6 +5321,20 @@ void ComEffect::AddUV(const WEffectUVData* uvData, u16 uOffset, u16 vOffset) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // The cache holds raw OriginalGeo pointers captured by SetUpUVlists.  An
+    // address-range check cannot tell a live geo from a freed one whose block
+    // was reused by another allocation, and baseWords was sized from the
+    // dynamicPrimCount seen at capture time.  Before any write, prove that
+    // every cached geo is still the one owned by this effect's live drawable
+    // and that its prim count still matches the captured buffer; otherwise
+    // drop the cache instead of writing through a stale pointer.
+    if (!IsUVGeoCacheLive()) {
+        ComEffect_ClearUVCache(this);
+        return;
+    }
+#endif
+
     for (u16 geoIndex = 0; geoIndex < uvGeoCount; geoIndex++) {
         OriginalGeo* geo = uvGeoList[geoIndex];
         u16* baseWords = uvGeoBaseWords[geoIndex];
@@ -5276,6 +5344,56 @@ void ComEffect::AddUV(const WEffectUVData* uvData, u16 uOffset, u16 vOffset) {
 
         ApplyGeoUVWords(geo, baseWords, addWords);
     }
+}
+
+bool ComEffect::IsUVGeoCacheLive() const {
+    if (!uvGeoList || !uvGeoBaseWords || !uvGeoPartIndices || !uvGeoPrimCounts
+        || !IsValidFastDrawPointer(model) || !IsValidFastDrawPointer(model->drawable)) {
+        return false;
+    }
+
+    const OriginalETree* etree = nullptr;
+    const OriginalGeo* plainGeo = nullptr;
+    if (model->drawableType == 3) {
+        const DrawableETree* drawable = static_cast<const DrawableETree*>(model->drawable);
+        etree = drawable->original;
+        if (!IsValidFastDrawPointer(etree) || !IsValidFastDrawPointer(etree->geoParts)) {
+            return false;
+        }
+    }
+    else if (model->drawableType == 1) {
+        const DrawableGeo* drawable = static_cast<const DrawableGeo*>(model->drawable);
+        plainGeo = drawable->original;
+    }
+    else {
+        return false;
+    }
+
+    for (u16 geoIndex = 0; geoIndex < uvGeoCount; geoIndex++) {
+        const OriginalGeo* cached = uvGeoList[geoIndex];
+        const u16 partIndex = uvGeoPartIndices[geoIndex];
+        const OriginalGeo* owned = nullptr;
+        if (etree) {
+            if (partIndex >= etree->geoPartCount) {
+                return false;
+            }
+            owned = etree->geoParts[partIndex];
+        }
+        else {
+            owned = (partIndex == 0xFFFFu) ? plainGeo : nullptr;
+        }
+
+        if (!cached || cached != owned || cached->dynamicPrimCount != uvGeoPrimCounts[geoIndex]) {
+#if defined(PSP_STAGE_DIAGNOSTIC)
+            LOG("[WEffect] drop stale UV cache effect=0x%08X slot=%u part=%u cached=%p owned=%p",
+                resourceHash, static_cast<unsigned>(geoIndex), static_cast<unsigned>(partIndex),
+                static_cast<const void*>(cached), static_cast<const void*>(owned));
+#endif
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void ComEffect::SetUpVertexlists() {
