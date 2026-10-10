@@ -9,6 +9,7 @@
 #include "xclib/xclib.h"
 #include "p3d/context.h"
 #include "pddi/pddidev.h"
+#include "pc/tim.h"
 
 s32 HUDWidescreenPatches::RoundToNearestS32(f32 value) {
     return (value >= 0.0f) ? static_cast<s32>(value + 0.5f) : static_cast<s32>(value - 0.5f);
@@ -432,7 +433,18 @@ void HUDWidescreenPatches::DrawSection(xcSection* section) const {
     const s32 scissorW = RoundToNearestS32(SCREEN_EFFECTIVE_WIDTH);
     const s32 scissorH = RoundToNearestS32(SCREEN_HEIGHT);
     p3d::context->SetScissor(scissorX, 0, scissorW, scissorH);
+#if defined(RC_PLATFORM_PSP)
+    // Every section prim draws through ScreenDraw, which keeps their order
+    // inside a batch (a Gouraud quad or a texture change flushes it). Outside
+    // one, each glyph swapped the projection and 2D state twice and was a
+    // draw of its own; consecutive glyphs of a font page are now one draw.
+    // The batch ends before the scissor is restored.
+    ScreenDraw::BeginBatch();
     section->Draw();
+    ScreenDraw::EndBatch();
+#else
+    section->Draw();
+#endif
     p3d::context->SetScissor(0, 0, RoundToNearestS32(SCREEN_WIDTH), scissorH);
 }
 
