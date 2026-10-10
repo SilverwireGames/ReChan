@@ -167,8 +167,13 @@ PSP_PROFILE_SOURCES ?= src/ai/humanoid.cpp src/ai/behaviour.cpp src/ai/player.cp
 	$(patsubst $(ROOT)/%,%,$(wildcard $(ROOT)/vendor/libp3d/p3d/*.cpp)) \
 	vendor/libp3d/pddi/psp/psprender.cpp
 PSP_PROFILE_OBJS = $(addprefix $(ROOT)/,$(PSP_PROFILE_SOURCES:.cpp=.o))
+# Tiny per-vertex/per-entry helpers are left to their callers: entry/exit
+# hooks on every call would dominate (and distort) their measured cost.
+# (One line: a backslash continuation would insert spaces into the list.)
+PSP_PROFILE_EXCLUDED_FUNCTIONS = ToPspVertexByte,MakeGeometryColor,PackIntegralTexCoord,ConvertPsxTexelToGu5551,GetUnwrappedTime,GuCapability,LoadGumMatrix,PsxLitChannelToGuByte,ModulatePsxColourChannel,ClampLitChannelToByte,ComputeLightIntensity12,WritebackDcacheRange
 $(PSP_PROFILE_OBJS): CXXFLAGS += -finstrument-functions \
-	-finstrument-functions-exclude-file-list=.h,/usr/local/pspdev,psp_funcprof
+	-finstrument-functions-exclude-file-list=.h,/usr/local/pspdev,psp_funcprof \
+	-finstrument-functions-exclude-function-list=$(PSP_PROFILE_EXCLUDED_FUNCTIONS)
 endif
 
 # build.mak supplies the user-mode PSP runtime and core exports. Keep only
