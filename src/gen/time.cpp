@@ -32,6 +32,12 @@ void Time::Step() {
 }
 
 void Time::Tick(f32 realDt) {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_BENCH_FIXED_STEP)
+    // Reproducible benchmark: every frame advances the game by exactly one
+    // 60 Hz frame (one 30 Hz logic tick every two frames), however long it
+    // took, so the scripted scenario is the same simulation on every run.
+    realDt = 1.0f / 60.0f;
+#endif
     if (realDt < 0.0001f) realDt = 0.0001f;
     if (realDt > 0.25f)  realDt = 0.25f;
     deltaTime = realDt;

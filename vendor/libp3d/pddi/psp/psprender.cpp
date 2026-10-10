@@ -1529,6 +1529,16 @@ void pspDisplay::RenderOverlay() {
     }
 }
 
+#if defined(PSP_BENCH_COMBAT)
+// Frame of the scripted combat input; restarted with each benchmark scenario
+// (PSP_BENCH_FIXED_STEP) so the input no longer depends on loading time.
+static u32 g_benchCombatFrame = 0;
+
+void ResetPspBenchCombatInput() {
+    g_benchCombatFrame = 0;
+}
+#endif
+
 void pspGamepad::Poll() {
     SceCtrlData data{};
     if (sceCtrlReadBufferPositive(&data, 1) < 0) {
@@ -1572,8 +1582,7 @@ void pspGamepad::Poll() {
     // and left keep Jackie near the checkpoint (walking on blindly found a
     // deadly drop in scenario 6), with punches (Square) and kicks (Triangle)
     // against the enemies around it.
-    static u32 benchCombatFrame = 0;
-    const u32 benchFrame = benchCombatFrame++;
+    const u32 benchFrame = g_benchCombatFrame++;
     data.Buttons = 0;
     data.Lx = (benchFrame % 120u) < 60u ? 255 : 0;
     data.Ly = 128;

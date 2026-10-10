@@ -7,6 +7,7 @@ namespace DebugUI {
     void Init();
     void Draw();
 #if defined(RC_PLATFORM_PSP)
+    void BeginBenchmarkFrame(Game* game);
     void UpdateBenchmarkCamera(Camera* camera);
     void OnBenchmarkFrameRecorded();
     bool IsBenchmarkFinished();

@@ -261,6 +261,10 @@ bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
 // for callers that can produce the compact stream directly (PSP character
 // skinning): write `count` vertices to the returned array, then call End with
 // the tpage/CBA lanes. Begin returns nullptr when the buffer cannot take it.
+#if defined(PSP_BENCH_COMBAT)
+// Restarts the scripted combat input (benchmark scenario start).
+void ResetPspBenchCombatInput();
+#endif
 PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, u32 count);
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, const float* tpage, u32 tpageStride,
                                   const float* cba, u32 cbaStride, u32 count,

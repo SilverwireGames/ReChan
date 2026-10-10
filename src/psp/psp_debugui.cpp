@@ -9,8 +9,12 @@
 #include "p3d/input.h"
 #include "pc/inputaction.h"
 #include "psp/psp_perf.h"
+#include "gen/time.h"
+#include "p3d/p3dmath.h"
+#include "pddi/psp/psprender.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 
 #include "psp/psp_funcprof.h"
@@ -159,6 +163,28 @@ void Init() {}
 void Draw() {}
 
 #if defined(RC_PLATFORM_PSP)
+void BeginBenchmarkFrame(Game* game) {
+#if defined(PSP_AUTO_START_PHASE1) && defined(PSP_BENCH_FIXED_STEP)
+    // First Play frame of each scenario, before its logic runs: restart the
+    // random sequences, the 30 Hz tick phase and the scripted input, so the
+    // scenario no longer depends on what ran (or how long loading took)
+    // before it.
+    static s32 seededLevelId = -1;
+    if (!game || game->GetState() != GameState::Play || !game->GetWorld()) return;
+    const s32 levelId = game->GetWorld()->GetCurLevelID();
+    if (levelId == seededLevelId) return;
+    seededLevelId = levelId;
+    rmRandomSeedRef() = 0x12345678u;
+    std::srand(1u);
+    if (g_time) g_time->ResetPlayPresentationState();
+#if defined(PSP_BENCH_COMBAT)
+    ResetPspBenchCombatInput();
+#endif
+#else
+    (void)game;
+#endif
+}
+
 void UpdateBenchmarkCamera(Camera* camera) {
 #if defined(PSP_AUTO_START_PHASE1)
     if (!camera) return;
