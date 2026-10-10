@@ -101,8 +101,12 @@ public:
     // its compact-only path. Begin returns nullptr when that path is not
     // available (the caller then falls back to SetDynamicVertexData).
     PspPackedVertex* BeginPackedUpload(u32 count);
+    // laneSource != 0 promises the lanes are immutable memory identified by
+    // that value: repeating the last upload's source and lanes skips the
+    // per-vertex material comparison (it would find nothing to change).
     void EndPackedUpload(const float* tpage, u32 tpageStride,
-                         const float* cba, u32 cbaStride, u32 count);
+                         const float* cba, u32 cbaStride, u32 count,
+                         u32 laneSource = 0);
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour,
@@ -160,6 +164,14 @@ private:
     bool UpdateDynamicMaterials(const float* tpage, u32 tpageStride,
                                 const float* cba, u32 cbaStride, u32 count);
     bool packedUploadStaged = false;
+    // Lanes of the last full material update by EndPackedUpload; any other
+    // material writer clears packedLaneSource.
+    u32 packedLaneSource = 0;
+    const float* packedLaneTpage = nullptr;
+    const float* packedLaneCba = nullptr;
+    u32 packedLaneTpageStride = 0;
+    u32 packedLaneCbaStride = 0;
+    u32 packedLaneCount = 0;
     // True when the compact stream is current and the float stream is not.
     bool floatStale = false;
     // Colour patch state (PatchColours). Base colours are captured lazily on
@@ -204,7 +216,8 @@ bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
 // the tpage/CBA lanes. Begin returns nullptr when the buffer cannot take it.
 PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, u32 count);
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, const float* tpage, u32 tpageStride,
-                                  const float* cba, u32 cbaStride, u32 count);
+                                  const float* cba, u32 cbaStride, u32 count,
+                                  u32 laneSource = 0);
 // GU vertex colour for PSX fixed-point channels (packet byte / 128), exactly
 // as the buffer upload paths convert them.
 u32 MakePspGeometryColour(float r, float g, float b);

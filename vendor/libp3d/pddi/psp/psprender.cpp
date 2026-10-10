@@ -626,6 +626,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
     const bool sourceWillBeStaged = UsesStagedIndexedVertices();
     PrepareForMutation();
     const float* source = static_cast<const float*>(data);
+    packedLaneSource = 0;
     UpdateDynamicMaterials(source + 8, 10u, source + 9, 10u, count);
     // List-memory builds submit page geometry through the compact stream
     // only. With integral UVs, write just that stream and rebuild the float
@@ -715,9 +716,23 @@ PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count) {
 }
 
 void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
-                                    const float* cba, u32 cbaStride, u32 count) {
+                                    const float* cba, u32 cbaStride, u32 count,
+                                    u32 laneSource) {
     PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
-    UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
+    const bool lanesHeld = laneSource != 0u && laneSource == packedLaneSource
+        && materialRawBitsValid && materialRawBits.size() == count
+        && packedLaneTpage == tpage && packedLaneCba == cba
+        && packedLaneTpageStride == tpageStride && packedLaneCbaStride == cbaStride
+        && packedLaneCount == count;
+    if (!lanesHeld) {
+        UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
+        packedLaneSource = laneSource;
+        packedLaneTpage = tpage;
+        packedLaneCba = cba;
+        packedLaneTpageStride = tpageStride;
+        packedLaneCbaStride = cbaStride;
+        packedLaneCount = count;
+    }
     packedVerticesValid = true;
     floatStale = true;
     baseColoursValid = false;
@@ -950,6 +965,7 @@ bool pspPrimBuffer::FindMaterialRun(u32 start, bool* valid, u32* key, u32* end) 
 void pspPrimBuffer::RevalidateIndices() {
     // Indices or (in SetVertexData) material keys changed.
     materialRunsValid = false;
+    packedLaneSource = 0;
     indicesValid = true;
     const u32 vertexCount = static_cast<u32>(vertices.size());
     for (const u16 index : indices) {
@@ -971,9 +987,11 @@ PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* base, u32 count)
 }
 
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* base, const float* tpage, u32 tpageStride,
-                                  const float* cba, u32 cbaStride, u32 count) {
+                                  const float* cba, u32 cbaStride, u32 count,
+                                  u32 laneSource) {
     if (!base) return;
-    static_cast<pspPrimBuffer*>(base)->EndPackedUpload(tpage, tpageStride, cba, cbaStride, count);
+    static_cast<pspPrimBuffer*>(base)->EndPackedUpload(tpage, tpageStride, cba, cbaStride, count,
+                                                       laneSource);
 }
 
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,

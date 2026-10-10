@@ -53,6 +53,15 @@ struct SkinVertex {
     u16 padSourceIndex = 0;
 };
 
+#if defined(RC_PLATFORM_PSP)
+// Never 0; a new SkinData at a reused address still gets a new id.
+inline u32 NextPspSkinInstanceId() {
+    static u32 next = 0;
+    if (++next == 0) ++next;
+    return next;
+}
+#endif
+
 struct SkinData {
     SkinVertex* verts = nullptr;
     u16* indices = nullptr;
@@ -79,6 +88,9 @@ struct SkinData {
     // chain (see psp/psp_vfpu_skin.h). No allocation.
     bool pspColourBytesBuilt = false;
     bool pspColourBytes = false;
+    // Identifies this skin's immutable tpage/CBA lanes to the fused GE
+    // upload, which then skips re-comparing lanes it already holds.
+    u32 pspInstanceId = NextPspSkinInstanceId();
 #endif
 
     ~SkinData() {

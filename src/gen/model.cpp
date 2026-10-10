@@ -1942,8 +1942,13 @@ void DrawableSTree::Display(u32 /*flags*/) {
                     cbaStride = 10u;
                 }
             }
+            // Lanes straight from the skin are immutable: the buffer may skip
+            // re-comparing them. A suit-animated CBA lane changes per frame.
+            const u32 laneSource = (tpageLane == &skin->verts[0].tpage
+                                    && cbaLane == &skin->verts[0].cba)
+                ? skin->pspInstanceId : 0u;
             EndPspPrimBufferPackedUpload(skinnedBuffer, tpageLane, tpageStride,
-                                         cbaLane, cbaStride, skin->numVerts);
+                                         cbaLane, cbaStride, skin->numVerts, laneSource);
         }
         else
 #endif

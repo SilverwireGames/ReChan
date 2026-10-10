@@ -643,6 +643,48 @@ int main() {
         }
     }
 
+    if (kPackedStreamConsumed) {
+        // laneSource: repeating an immutable source skips the material pass
+        // without changing the result; another material writer in between
+        // (SetDynamicVertexData) must force the full comparison again.
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        constexpr u32 kCount = 6;
+        std::vector<float> lanesA(kCount * 10u, 1.0f);
+        std::vector<float> lanesB(kCount * 10u, 1.0f);
+        for (u32 v = 0; v < kCount; ++v) {
+            lanesA[v * 10u + 8u] = static_cast<float>(v % 3u);
+            lanesA[v * 10u + 9u] = static_cast<float>(v % 2u);
+            lanesB[v * 10u + 8u] = 7.0f;
+            lanesB[v * 10u + 9u] = v == 2u ? -1.0f : 5.0f;
+        }
+        pspPrimBuffer reference({PDDI_PRIM_TRIANGLES, kFormat, kCount, 6});
+        pspPrimBuffer fused({PDDI_PRIM_TRIANGLES, kFormat, kCount, 6});
+        reference.SetVertexData(lanesA.data(), kCount);
+        fused.SetVertexData(lanesA.data(), kCount);
+        const auto upload = [&](const std::vector<float>& lanes, u32 source) {
+            PspPackedVertex* out = fused.BeginPackedUpload(kCount);
+            require(out != nullptr, "fused upload refused");
+            for (u32 v = 0; v < kCount; ++v) out[v] = {};
+            fused.EndPackedUpload(&lanes[8], 10u, &lanes[9], 10u, kCount, source);
+        };
+        const auto sameMaterials = [&](const char* what) {
+            require(reference.materialKeys == fused.materialKeys
+                && reference.materialValid == fused.materialValid
+                && reference.materialRawBits == fused.materialRawBits, what);
+        };
+        reference.SetDynamicVertexData(lanesA.data(), kCount, true);
+        upload(lanesA, 77u);
+        sameMaterials("first sourced upload");
+        upload(lanesA, 77u);  // held: skipped
+        sameMaterials("repeated sourced upload");
+        fused.SetDynamicVertexData(lanesB.data(), kCount, true);
+        reference.SetDynamicVertexData(lanesB.data(), kCount, true);
+        sameMaterials("dynamic upload between sourced uploads");
+        reference.SetDynamicVertexData(lanesA.data(), kCount, true);
+        upload(lanesA, 77u);  // must compare again after the dynamic upload
+        sameMaterials("sourced upload after another material writer");
+    }
+
     std::printf("PASS: draws=%d copies=%d cluts=%d syncs=%d peak_list=%zu signature=%016llx\n",
         summaryDraws, summaryCopies, summaryCluts, summarySyncs, summaryPeak,
         static_cast<unsigned long long>(signature));
