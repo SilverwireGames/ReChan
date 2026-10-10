@@ -780,6 +780,8 @@ void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
         && packedLaneTpage == tpage && packedLaneCba == cba
         && packedLaneTpageStride == tpageStride && packedLaneCbaStride == cbaStride
         && packedLaneCount == count;
+    PspPerf::CountRenderer(lanesHeld ? PspPerf::RendererCounter::PackedLaneHolds
+                                     : PspPerf::RendererCounter::PackedLaneCompares);
     if (!lanesHeld) {
         UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
         packedLaneSource = laneSource;
@@ -982,6 +984,7 @@ void pspPrimBuffer::SetIndices(const u16* source, u32 count) {
 }
 
 void pspPrimBuffer::BuildMaterialRuns() {
+    PspPerf::CountRenderer(PspPerf::RendererCounter::MaterialRunBuilds);
     materialRuns.clear();
     const u32 count = static_cast<u32>(indices.size());
     for (u32 triangle = 0; triangle + 2u < count; triangle += 3u) {

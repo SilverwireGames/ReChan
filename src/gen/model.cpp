@@ -83,8 +83,6 @@ struct PspModelFrameScratch {
     std::vector<u16> litScratch;
     std::vector<u8> litWritten;
     std::vector<f32> skinVertexData;
-    // CBA lane of a suit-animated skin for the fused packed upload.
-    std::vector<f32> skinCbaLane;
     std::vector<GeoRenderVertex> litGeoVertices;
     std::vector<u32> litGeoColours;
 };
@@ -1184,6 +1182,75 @@ static void ApplyCompositeSuitFrameToVerts(CompositeAnimData* compositeAnim,
     }
 }
 
+#if defined(RC_PLATFORM_PSP) && defined(RC_PSP_VFPU_SKIN) && !defined(PSP_DISABLE_FUSED_SKIN_UPLOAD)
+namespace {
+
+// Suit CBA lanes for the fused character upload. A lane depends only on the
+// skin, the suit, the suit index and the misc anims the suit resolves through
+// (ApplyCompositeSuitFrameToVerts above), so each combination is built once
+// and handed to the upload under its own lane id: a buffer that already
+// holds that lane skips the per-vertex material comparison.
+struct PspSuitLane {
+    u32 skinId = 0;
+    const CompositeAnimData* suit = nullptr;
+    u32 suitIndex = 0;
+    u32 animGeneration = 0;
+    u32 laneId = 0;  // 0: empty slot
+    u32 lastUse = 0;
+    std::vector<f32> cba;
+};
+PspSuitLane g_pspSuitLanes[8];
+u32 g_pspSuitLaneClock = 0;
+
+void BuildPspSuitLane(CompositeAnimData* suit, u32 suitIndex, const SkinData* skin,
+                      std::vector<f32>& cba) {
+    ResizeRetainedScratch(cba, skin->numVerts);
+    for (u32 i = 0; i < skin->numVerts; i++) {
+        cba[i] = skin->verts[i].cba;
+    }
+    ApplyCompositeSuitFrameToVerts(suit, static_cast<s32>(suitIndex), skin, cba.data(), 1u);
+}
+
+const PspSuitLane& AcquirePspSuitLane(CompositeAnimData* suit, u32 suitIndex,
+                                      const SkinData* skin) {
+    const u32 generation = g_animMgr ? g_animMgr->generation : 0u;
+    PspSuitLane* victim = &g_pspSuitLanes[0];
+    for (PspSuitLane& lane : g_pspSuitLanes) {
+        if (lane.laneId != 0 && lane.skinId == skin->pspInstanceId && lane.suit == suit
+            && lane.suitIndex == suitIndex && lane.animGeneration == generation) {
+            lane.lastUse = ++g_pspSuitLaneClock;
+#if defined(PSP_PERF_TELEMETRY)
+            // Benchmarks re-check a cache hit now and then against a fresh
+            // build; any difference means the key misses an input.
+            if ((g_pspSuitLaneClock & 63u) == 0u) {
+                static std::vector<f32> fresh;
+                BuildPspSuitLane(suit, suitIndex, skin, fresh);
+                if (fresh.size() != lane.cba.size()
+                    || std::memcmp(fresh.data(), lane.cba.data(), fresh.size() * sizeof(f32)) != 0) {
+                    PspPerf::CountRenderer(PspPerf::RendererCounter::SuitLaneMismatches);
+                }
+            }
+#endif
+            return lane;
+        }
+        if (lane.lastUse < victim->lastUse) {
+            victim = &lane;
+        }
+    }
+    PspPerf::CountRenderer(PspPerf::RendererCounter::SuitLaneBuilds);
+    BuildPspSuitLane(suit, suitIndex, skin, victim->cba);
+    victim->skinId = skin->pspInstanceId;
+    victim->suit = suit;
+    victim->suitIndex = suitIndex;
+    victim->animGeneration = generation;
+    victim->laneId = NextPspSkinInstanceId();  // never reused, never 0
+    victim->lastUse = ++g_pspSuitLaneClock;
+    return *victim;
+}
+
+} // namespace
+#endif
+
 
 static const Mat4* FindJointWorldMatrixByHash(const STreeData* skeleton,
                                               const Mat4* jointMatrices,
@@ -1879,7 +1946,10 @@ void DrawableSTree::Display(u32 /*flags*/) {
                 (hasLitScratch && renderSource->primGeom)
                     ? static_cast<u32>(renderSource->primGeom->numVerts) : 0u,
             };
-            PspSkinPackedVfpu(loop, skin->numVerts, fusedVertices);
+            {
+                PspPerf::ScopeTimer kernelTimer(PspPerf::RendererCounter::SkinKernelUs);
+                PspSkinPackedVfpu(loop, skin->numVerts, fusedVertices);
+            }
             // Material lanes: tpage straight from the skin, CBA from the skin
             // or from a compact copy the suit animation rewrites.
             constexpr u32 kSkinVertexFloats = sizeof(SkinVertex) / sizeof(f32);
@@ -1888,16 +1958,13 @@ void DrawableSTree::Display(u32 /*flags*/) {
             const f32* cbaLane = &skin->verts[0].cba;
             u32 cbaStride = kSkinVertexFloats;
             CompositeAnimData* suit = renderSource ? renderSource->compositeAnim : nullptr;
+            u32 suitLaneId = 0;
             if (suit) {
-                std::vector<f32>& suitCba = g_pspModelFrameScratch.skinCbaLane;
-                ResizeRetainedScratch(suitCba, skin->numVerts);
-                for (u32 i = 0; i < skin->numVerts; i++) {
-                    suitCba[i] = skin->verts[i].cba;
-                }
-                ApplyCompositeSuitFrameToVerts(suit, static_cast<s32>(suitIndex), skin,
-                                               suitCba.data(), 1u);
-                cbaLane = suitCba.data();
+                PspPerf::ScopeTimer suitTimer(PspPerf::RendererCounter::SkinSuitUs);
+                const PspSuitLane& suitLane = AcquirePspSuitLane(suit, suitIndex, skin);
+                cbaLane = suitLane.cba.data();
                 cbaStride = 1u;
+                suitLaneId = suitLane.laneId;
             }
             // On-device equivalence check, like the VFPU self-test: the first
             // uploads also run the float path and compare every byte. Any
@@ -1942,11 +2009,13 @@ void DrawableSTree::Display(u32 /*flags*/) {
                     cbaStride = 10u;
                 }
             }
-            // Lanes straight from the skin are immutable: the buffer may skip
-            // re-comparing them. A suit-animated CBA lane changes per frame.
-            const u32 laneSource = (tpageLane == &skin->verts[0].tpage
-                                    && cbaLane == &skin->verts[0].cba)
-                ? skin->pspInstanceId : 0u;
+            // Lanes straight from the skin or from a built suit lane are
+            // immutable under their id: the buffer may skip re-comparing them.
+            // A check mismatch above switched to the reference lanes (no id).
+            u32 laneSource = 0;
+            if (tpageLane == &skin->verts[0].tpage) {
+                laneSource = cbaLane == &skin->verts[0].cba ? skin->pspInstanceId : suitLaneId;
+            }
             EndPspPrimBufferPackedUpload(skinnedBuffer, tpageLane, tpageStride,
                                          cbaLane, cbaStride, skin->numVerts, laneSource);
         }

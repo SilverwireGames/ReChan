@@ -25,6 +25,13 @@ enum class RendererCounter : u32 {
     IoUs, IoOps, IoBytes,
     // Skeleton world-matrix builds (logic and render) and their joints.
     SkeletonUs, SkeletonBuilds, SkeletonJoints,
+    // Fused character uploads whose material lanes the buffer already held
+    // vs. compared per vertex, rebuilt material runs, built suit CBA lanes,
+    // and cached suit lanes that differed from a fresh build (must stay 0).
+    PackedLaneHolds, PackedLaneCompares, MaterialRunBuilds, SuitLaneBuilds,
+    SuitLaneMismatches,
+    // Inside SkinPrepareUs: the fused skinning loop and the suit lane lookup.
+    SkinKernelUs, SkinSuitUs,
     Count
 };
 

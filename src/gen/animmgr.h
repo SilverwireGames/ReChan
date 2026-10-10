@@ -173,6 +173,9 @@ struct MiscAnimNode : public ccMinNode {
 class AnimationManager : public Manager {
 public:
     ccMinList animList; // +28: list of MiscAnimNode*
+    // Port addition, bumped by every list change (add, purge): name lookups
+    // through GetMiscAnim may resolve differently afterwards.
+    u32 generation = 0;
 
     AnimationManager();
     ~AnimationManager() override;

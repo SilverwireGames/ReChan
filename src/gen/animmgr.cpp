@@ -346,6 +346,7 @@ void AnimationManager::PurgePetal() {
         if (an->type == 2) {
             animList.RemNode(node);
             delete an;
+            ++generation;
         }
         node = next;
     }
@@ -357,6 +358,7 @@ void AnimationManager::PurgeLevel() {
     while (ccMinNode* n = animList.RemHead()) {
         delete n;
     }
+    ++generation;
 }
 
 // PSX: GetMiscAnim__16AnimationManagerUl (ANIMMGR.CPP:191, 0x80057308)
@@ -374,4 +376,5 @@ MiscAnimNode* AnimationManager::GetMiscAnim(u32 hash) {
 // PSX: AddNodeTail used from level loading code
 void AnimationManager::AddAnim(MiscAnimNode* node) {
     animList.AddNodeTail(node);
+    ++generation;
 }
