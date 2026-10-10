@@ -109,6 +109,9 @@ void HUD::InternalReset() {
 // PSX: Display__3HUD (HUD.CPP:357, 0x8003F67C)
 void HUD::Display() {
     MARKFUNCTION(0x8003F67C);
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer hudTimer(PspPerf::RendererCounter::HudUs);
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: hud begin");
 #endif

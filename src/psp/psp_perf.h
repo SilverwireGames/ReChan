@@ -44,6 +44,9 @@ enum class RendererCounter : u32 {
     // Skeleton builds by caller: skinned draw, rigid parts (ETree), attack
     // capture, joint-attached effects (WEffect), pushable stacks.
     SkelBuildsDisplay, SkelBuildsETree, SkelBuildsCapture, SkelBuildsEffect, SkelBuildsStack,
+    // The whole section HUD (HUD::Display: update, text layout and overlay
+    // submission), which OverlayUs only covers in the renderer.
+    HudUs,
     Count
 };
 
