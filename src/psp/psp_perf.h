@@ -47,6 +47,8 @@ enum class RendererCounter : u32 {
     // The whole section HUD (HUD::Display: update, text layout and overlay
     // submission), which OverlayUs only covers in the renderer.
     HudUs,
+    // Inside SkeletonUs: the joints' pre/post callbacks (game code).
+    SkelCallbackUs,
     Count
 };
 

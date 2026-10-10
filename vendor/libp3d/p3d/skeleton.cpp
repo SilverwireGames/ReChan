@@ -208,6 +208,9 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
         }
 
         if (invokeCallbacks && (j.flags & STF_PRE_CALLBACK_MASK) && j.preCallback) {
+#if defined(RC_PLATFORM_PSP)
+            PspPerf::ScopeTimer callbackTimer(PspPerf::RendererCounter::SkelCallbackUs);
+#endif
             j.preCallback(&j, i, current);
         }
 
@@ -227,6 +230,9 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
         }
 
         if (invokeCallbacks && (j.flags & STF_POST_CALLBACK_MASK) && j.postCallback) {
+#if defined(RC_PLATFORM_PSP)
+            PspPerf::ScopeTimer callbackTimer(PspPerf::RendererCounter::SkelCallbackUs);
+#endif
             j.postCallback(&j, i, current);
         }
 
