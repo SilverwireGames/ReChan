@@ -23,6 +23,8 @@ enum class RendererCounter : u32 {
     // Main-thread file access (Memory Stick open/read/seek/stat): it blocks
     // the frame, unlike the music worker's streaming reads.
     IoUs, IoOps, IoBytes,
+    // Skeleton world-matrix builds (logic and render) and their joints.
+    SkeletonUs, SkeletonBuilds, SkeletonJoints,
     Count
 };
 

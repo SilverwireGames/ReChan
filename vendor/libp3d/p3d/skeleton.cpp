@@ -1,6 +1,9 @@
 // skeleton.cpp - Pure3D v11.3 tSTree/tSJoint implementation
 // PSX: TSTREE.CPP (Display, ComputeMatrices), STLOAD.CPP (tSTreeLoader)
 #include "p3d/skeleton.h"
+#if defined(RC_PLATFORM_PSP)
+#include "psp/psp_perf.h"
+#endif
 #include "p3d/byteread.h"
 #include "p3d/hash.h"
 #include "pddi/pddi.h"
@@ -139,6 +142,11 @@ static void ComputeWorldMatricesInternal(STreeData* skeleton, Mat4* outMatrices,
     if (!skeleton || !skeleton->joints || skeleton->numJoints == 0) {
         return;
     }
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer skeletonTimer(PspPerf::RendererCounter::SkeletonUs);
+    PspPerf::CountRenderer(PspPerf::RendererCounter::SkeletonBuilds);
+    PspPerf::CountRenderer(PspPerf::RendererCounter::SkeletonJoints, skeleton->numJoints);
+#endif
 
     UninitMat4 matStack[32];
     s32 stackTop = 0;
