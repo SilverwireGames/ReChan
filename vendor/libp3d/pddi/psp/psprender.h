@@ -227,6 +227,9 @@ private:
     u32 packedLaneTpageStride = 0;
     u32 packedLaneCbaStride = 0;
     u32 packedLaneCount = 0;
+    // The keys of packedLaneSource were copied from precomputed lane keys
+    // (the raw bits are then stale, but the keys match the source).
+    bool packedLaneKeysCopied = false;
     // True when the compact stream is current and the float stream is not.
     bool floatStale = false;
     // Colour patch state (PatchColours). Base colours are captured lazily on

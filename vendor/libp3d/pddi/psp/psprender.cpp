@@ -854,7 +854,7 @@ void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
                                     const u8* laneValid) {
     PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
     const bool lanesHeld = laneSource != 0u && laneSource == packedLaneSource
-        && materialRawBitsValid && materialRawBits.size() == count
+        && (packedLaneKeysCopied || (materialRawBitsValid && materialRawBits.size() == count))
         && packedLaneTpage == tpage && packedLaneCba == cba
         && packedLaneTpageStride == tpageStride && packedLaneCbaStride == cbaStride
         && packedLaneCount == count;
@@ -875,9 +875,11 @@ void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
             // The raw bits no longer describe the keys; a later lane update
             // without precomputed keys converts every vertex.
             materialRawBitsValid = false;
+            packedLaneKeysCopied = true;
         }
         else {
             UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
+            packedLaneKeysCopied = false;
         }
         packedLaneSource = laneSource;
         packedLaneTpage = tpage;
