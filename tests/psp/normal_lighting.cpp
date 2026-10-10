@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 static HardwareLight lights[3];
@@ -180,6 +181,11 @@ void TestVfpuSkinReference() {
         RP_XformVertsLitCBF_CL(&geom, &joint, reinterpret_cast<u32*>(&matrix), expected.data());
         PspVfpuSkin::LightRangeReference(state, matrix, vertexList.data(), start, end, actual.data());
         require(expected == actual);
+        // Same result through the table the kernel reads (scratchpad copy).
+        std::fill(actual.begin(), actual.end(), 0xBEEFu);
+        PspVfpuSkin::LightRangeReference(state, matrix, vertexList.data(), start, end, actual.data(),
+                                         PspVfpuSkin::AcquireNormals());
+        require(expected == actual);
         // The 32-bit dot path must agree with the 64-bit one whenever chosen.
         if (narrow) {
             for (u32 v = 0; v < 256u; ++v) {
@@ -233,11 +239,64 @@ void TestVfpuSkinReference() {
                 narrowStates, wideStates, checked);
 }
 
+// Scratchpad layout/lease/refill logic (host: plain buffer at Base()).
+void TestScratchpad() {
+#if defined(RC_PSP_SCRATCHPAD)
+    using namespace PspScratchpad;
+    // Normals: bit-exact copy, filled once, refilled after any loss.
+    std::memset(Base(), 0xA5, kSize);
+    const u32 refills = g_stats.normalsRefills;
+    PspVfpuSkin::NormalTable table = PspVfpuSkin::AcquireNormals();
+    require(reinterpret_cast<const unsigned char*>(table) == Base() + kNormalsOffset);
+    require((reinterpret_cast<std::uintptr_t>(table) & 15u) == 0u);
+    require(std::memcmp(table, PspVfpuSkin::kNormals, kNormalsSize) == 0);
+    for (int i = 0; i < 8; ++i) {
+        require(PspVfpuSkin::AcquireNormals() == table);
+    }
+    require(g_stats.normalsRefills == refills + 1u);
+    GetHeader()->magic = 0;  // Lost header (suspend / power-on state).
+    std::memset(Base() + kNormalsOffset, 0, kNormalsSize);
+    table = PspVfpuSkin::AcquireNormals();
+    require(g_stats.normalsRefills == refills + 2u);
+    require(std::memcmp(table, PspVfpuSkin::kNormals, kNormalsSize) == 0);
+
+    // Joints lease: capacity limit, single owner, released on scope exit.
+    {
+        JointsLease too(kJointCapacity + 1u);
+        require(too.data() == nullptr);
+        JointsLease none(0u);
+        require(none.data() == nullptr);
+    }
+    {
+        JointsLease outer(kJointCapacity);
+        require(outer.data() == Base() + kJointsOffset);
+        require((reinterpret_cast<std::uintptr_t>(outer.data()) & 15u) == 0u);
+        JointsLease nested(1u);
+        require(nested.data() == nullptr);  // A nested draw keeps the RAM vector.
+        Mat4* joints = static_cast<Mat4*>(outer.data());
+        for (u32 i = 0; i < kJointCapacity; ++i) {
+            joints[i] = Mat4();
+            joints[i].m[12] = static_cast<f32>(i);
+        }
+        // The neighbours are untouched: normals still intact.
+        require(std::memcmp(PspVfpuSkin::AcquireNormals(), PspVfpuSkin::kNormals, kNormalsSize) == 0);
+        require(g_stats.normalsRefills == refills + 2u);
+    }
+    JointsLease again(3u);
+    require(again.data() != nullptr);
+    std::printf("PASS: scratchpad layout %u/%u bytes, normals refill on loss, joints lease\n",
+                kUsedEnd, kSize);
+#else
+    std::puts("SKIP: scratchpad disabled");
+#endif
+}
+
 } // namespace
 
 int main() {
     TestSkinViewCull();
     TestVfpuSkinReference();
+    TestScratchpad();
     std::array<std::uint32_t, 1024> bases;
     std::array<std::uint8_t, 1024> sizes;
     for (unsigned i = 0; i < bases.size(); ++i) {

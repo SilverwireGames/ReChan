@@ -331,7 +331,10 @@ void Display::EndFrame() {
     ++frameCounter;
     p3d::context->EndFrame();
     p3d::display->RenderOverlay();
+#if !defined(RC_PLATFORM_PSP)
+    // No light bar on PSP (see ControllerLight::Update).
     ControllerLight::Update();
+#endif
 #if defined(RC_PLATFORM_SWITCH)
     DrawDebugInfo();
 #endif

@@ -77,8 +77,25 @@ INCDIR = $(ROOT)/src $(ROOT)/vendor/libp3d $(ROOT)/vendor/cgltf $(ROOT)/vendor/s
 DEFINES = -DRC_PLATFORM_PSP -DPSP -DPSP_GE -DIMGUI_DISABLE -DPSP_SORT_OPAQUE_MATERIALS \
 	-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES
 
-COMMON_FLAGS = $(DEFINES) -std=gnu++17 -G0 -ffunction-sections -fdata-sections \
-	-fno-strict-aliasing -mno-check-zero-division -Wall -Wextra
+# Small-data (gp-relative) addressing. -G0 (inherited from the PSPSDK sample
+# Makefiles) puts every global behind a lui+addiu/lw absolute pair. The module
+# already runs with a valid $gp: PSP_MODULE_INFO publishes _gp, every thread
+# here is created by this module, nothing runs in interrupt context, and the
+# prebuilt newlib/libstdc++ already use gp-relative .sdata. -G8 lets globals of
+# up to 8 bytes use one gp-relative access; the linker rejects any GPREL16
+# reference out of range, and .sdata+.sbss stay ~6.5 KB of the 64 KB window.
+# Applied to the static-ELF release EBOOT only; PRX/telemetry/diagnostic modes
+# keep -G0. Override with PSP_GP_SIZE=0 (or 8) for A/B tests.
+ifeq ($(BUILD_MODE)$(BUILD_PRX),release)
+PSP_GP_SIZE ?= 8
+endif
+PSP_GP_SIZE ?= 0
+
+# -Wdouble-promotion: the Allegrex FPU is single precision only, so every
+# implicit float->double promotion becomes soft-float library calls
+# (__extendsfdf2/__muldf3/...). Warning only; it flags accidental double math.
+COMMON_FLAGS = $(DEFINES) -std=gnu++17 -G$(PSP_GP_SIZE) -ffunction-sections -fdata-sections \
+	-fno-strict-aliasing -mno-check-zero-division -Wall -Wextra -Wdouble-promotion
 
 CFLAGS += $(COMMON_FLAGS)
 CXXFLAGS += $(COMMON_FLAGS)
@@ -115,6 +132,18 @@ else ifeq ($(BUILD_MODE),shipping)
 CXXFLAGS += -Os -DNDEBUG
 else
 CXXFLAGS += -O3 -DNDEBUG
+endif
+
+# Optional link-time optimization for A/B measurement on hardware (off by
+# default): make -C psp BUILD_MODE=release PSP_LTO=1. The link step must see
+# the same optimization level, so the mode's -O flag is forwarded to LDFLAGS.
+# Measured with pspdev gcc 15.2: the LTO link does not apply -G, so a
+# PSP_LTO=1 binary falls back to absolute addressing (.sdata stays ~1.5 KB).
+PSP_LTO ?= 0
+ifeq ($(PSP_LTO),1)
+PSP_LTO_OPT := $(filter -O%,$(CXXFLAGS))
+CXXFLAGS += -flto=auto
+LDFLAGS += -flto=auto $(PSP_LTO_OPT)
 endif
 
 # build.mak supplies the user-mode PSP runtime and core exports. Keep only

@@ -61,6 +61,10 @@ struct Voice {
     LVector position{};
     u8 priority = 0;
     u32 fadeFrames = 0;
+    // Cursor step cached for (stepRate, stepPitchBits); see CachedCursorStep.
+    u64 step = 0;
+    u32 stepRate = 0;
+    u32 stepPitchBits = 0;
     bool loop = false;
     bool reserved = false;
     bool active = false;
@@ -138,12 +142,32 @@ static u32 ReadU32(const u8* data) {
     return value;
 }
 
-static u64 VoiceCursorStep(u32 rate, float pitch) {
+// Kept out of line: the Allegrex has no double-precision FPU, so this runs on
+// soft-float helpers and must stay off the audio callback's common path.
+__attribute__((noinline)) static u64 VoiceCursorStep(u32 rate, float pitch) {
     const float finitePitch = std::isfinite(pitch) ? std::max(pitch, 0.05f) : 1.0f;
-    // One conversion per voice/buffer, never per sample. Bound pathological
-    // input before converting to an integer; normal playback keeps its pitch.
-    const double frames = static_cast<double>(rate) / kOutputRate * finitePitch;
+    // Only recomputed when rate or pitch changes (CachedCursorStep). Bound
+    // pathological input before converting to an integer; normal playback
+    // keeps its pitch. The double precision is deliberate (exact step).
+    const double frames = static_cast<double>(rate) / kOutputRate * static_cast<double>(finitePitch);
     return static_cast<u64>(std::min(frames, static_cast<double>(UINT32_MAX)) * kCursorOne);
+}
+
+// VoiceCursorStep is a pure function of (rate, pitch). Pitch and rate only
+// change on voice start, SetVoicePitch or a sample reload, so recompute it only
+// when either input changes (pitch compared bit-for-bit, so NaN is stable;
+// stepRate 0 never matches a real rate, so a fresh voice always computes it).
+// The step is bit-identical to calling VoiceCursorStep every callback.
+static u64 CachedCursorStep(Voice& voice, u32 rate) {
+    u32 pitchBits = 0;
+    static_assert(sizeof(pitchBits) == sizeof(voice.pitch), "float bit pattern");
+    std::memcpy(&pitchBits, &voice.pitch, sizeof(pitchBits));
+    if (voice.stepRate != rate || voice.stepPitchBits != pitchBits) {
+        voice.step = VoiceCursorStep(rate, voice.pitch);
+        voice.stepRate = rate;
+        voice.stepPitchBits = pitchBits;
+    }
+    return voice.step;
 }
 
 static float CursorFraction(u64 cursor) {
@@ -447,7 +471,7 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
         float right = voice.volume * rightScale;
         if (g_mono) right = left = (left + right) * 0.5f;
         const u64 sampleEnd = static_cast<u64>(sample->frames) * kCursorOne;
-        u64 step = VoiceCursorStep(sample->rate, voice.pitch);
+        u64 step = CachedCursorStep(voice, sample->rate);
         // Reduce large looping strides once. The inner loop only needs one
         // subtraction to wrap, including one-frame clips and extreme pitch.
         if (voice.loop) {

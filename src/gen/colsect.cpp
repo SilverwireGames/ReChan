@@ -5,6 +5,9 @@
 #include "gen/colfloor.h"
 #include "p3d/p3dmath.h"
 #include <new>
+#if defined(RC_PLATFORM_PSP)
+#include "psp/psp_scratchpad.h"
+#endif
 
 // PSX: 12 collision sectors (demand-loaded). PC: 128 to cover all blocks at once.
 CollisionSector g_collisionSectors[MAX_COLLISION_SECTORS];
@@ -53,6 +56,10 @@ struct ActiveSector {
     CollisionSector* sector;
     const CollisionBox* wallBoxes;  // nullptr: read the Wall records
     const CollisionBox* floorBoxes; // nullptr: read the 80-byte floor records
+#if defined(RC_PSP_SCRATCHPAD)
+    s32 slot;
+    u32 boxCount; // walls + floors in wallBoxes (0 when not compact)
+#endif
 };
 
 bool s_sectorLoaded[MAX_COLLISION_SECTORS];
@@ -95,11 +102,185 @@ void RebuildActiveSectors() {
         }
         entry.wallBoxes = boxes;
         entry.floorBoxes = boxes ? boxes + sector->wallCount : nullptr;
+#if defined(RC_PSP_SCRATCHPAD)
+        entry.slot = slot;
+        entry.boxCount = boxes ? sector->wallCount + sector->floorCount : 0u;
+#endif
     }
     s_activeSectorCount = count;
 }
 
+#if defined(RC_PSP_SCRATCHPAD)
+// ---------------------------------------------------------------------------
+// Scratchpad residency (PSP; psp/psp_scratchpad.h, collision region).
+//
+// Every wall/floor query scans the whole compact box table of each sector it
+// overlaps, and every humanoid runs several of those queries per step (walls,
+// floor and ceiling heights, ledges) over the same one or two sectors. Between
+// two humanoids the AI, animation and the Wall/Floor records themselves evict
+// the boxes from the data cache, so each humanoid refilled the same lines from
+// RAM, frame after frame. A sector scanned twice is copied (tag + boxes) into
+// the scratchpad and later scans read it there: 1-cycle loads, no misses, no
+// cache pollution.
+//
+// Equivalence: the copy is the exact compact table (same s16 boxes, same
+// wall-then-floor order); the scans themselves are unchanged and still return
+// pointers to the RAM Wall/Floor records. A copy is dropped when its slot is
+// re-Loaded or Zero()ed (ReleaseSectorBoxes), when its in-scratchpad tag no
+// longer matches, or when the header tag was lost (power-on garbage, suspend):
+// the query then falls back to the RAM table and re-promotes later.
+//
+// Allocation: a FIFO ring over the region; a new copy evicts the entries it
+// overlaps. Sectors larger than the region are never copied.
+// ---------------------------------------------------------------------------
+struct ResidentTag {
+    u32 key;
+    u32 count;
+};
+static_assert(sizeof(ResidentTag) == sizeof(CollisionBox), "tag occupies one box slot");
+
+constexpr u32 kResidentSlots = PspScratchpad::kCollisionSize / sizeof(CollisionBox);
+constexpr s32 kMaxResident = 16;
+constexpr u8 kPromoteTouches = 2;
+
+struct ResidentEntry {
+    s32 slot;    // -1: free
+    u32 offset;  // in box slots, tag first
+    u32 length;  // box slots including the tag
+    u32 key;
+};
+
+ResidentEntry s_resident[kMaxResident];
+s8 s_slotResident[MAX_COLLISION_SECTORS];
+u8 s_slotTouches[MAX_COLLISION_SECTORS];
+u32 s_residentHead = 0;
+u32 s_residentSequence = 0;
+u32 s_collisionTag = 0;  // value of the header tag while the copies are ours
+
+CollisionBox* ResidentRegion() {
+    return PspScratchpad::At<CollisionBox>(PspScratchpad::kCollisionOffset);
+}
+
+void ResetResidency(PspScratchpad::Header* header) {
+    for (ResidentEntry& entry : s_resident) {
+        entry.slot = -1;
+    }
+    for (s32 slot = 0; slot < MAX_COLLISION_SECTORS; slot++) {
+        s_slotResident[slot] = -1;
+        s_slotTouches[slot] = 0;
+    }
+    s_residentHead = 0;
+    s_collisionTag = (s_collisionTag + 1u) | 0x80000000u;
+    header->collisionTag = s_collisionTag;
+    RC_PSP_SCRATCHPAD_COUNT(collisionResets);
+}
+
+void EvictResident(s32 index) {
+    ResidentEntry& entry = s_resident[index];
+    if (entry.slot >= 0) {
+        s_slotResident[entry.slot] = -1;
+        s_slotTouches[entry.slot] = 0;
+        entry.slot = -1;
+        RC_PSP_SCRATCHPAD_COUNT(collisionEvictions);
+    }
+}
+
+// Called for every Load/Zero of a slot: its RAM table is about to change.
+void DropResidentSlot(s32 slot) {
+    if (s_collisionTag == 0) {
+        return;  // Residency never initialised (static zero state).
+    }
+    if (s_slotResident[slot] >= 0) {
+        EvictResident(s_slotResident[slot]);
+    }
+    s_slotTouches[slot] = 0;
+}
+
+const CollisionBox* PromoteResident(const ActiveSector& active) {
+    const u32 length = active.boxCount + 1u;
+    if (s_residentHead + length > kResidentSlots) {
+        s_residentHead = 0;
+    }
+    const u32 begin = s_residentHead;
+    const u32 end = begin + length;
+    s32 freeIndex = -1;
+    s32 oldestIndex = -1;
+    for (s32 i = 0; i < kMaxResident; i++) {
+        const ResidentEntry& entry = s_resident[i];
+        if (entry.slot >= 0 && entry.offset < end && begin < entry.offset + entry.length) {
+            EvictResident(i);  // The new copy overwrites it.
+        }
+        if (entry.slot < 0) {
+            if (freeIndex < 0) freeIndex = i;
+        }
+        else if (oldestIndex < 0
+                 || static_cast<s32>(entry.key - s_resident[oldestIndex].key) < 0) {
+            oldestIndex = i;  // Lowest promotion sequence (wrap-safe).
+        }
+    }
+    if (freeIndex < 0) {
+        EvictResident(oldestIndex);
+        freeIndex = oldestIndex;
+    }
+
+    CollisionBox* region = ResidentRegion();
+    ResidentTag* tag = reinterpret_cast<ResidentTag*>(region + begin);
+    CollisionBox* boxes = region + begin + 1;
+    const CollisionBox* source = active.wallBoxes;
+    for (u32 i = 0; i < active.boxCount; i++) {
+        boxes[i] = source[i];
+    }
+    const u32 key = (++s_residentSequence << 8) | static_cast<u32>(active.slot);
+    tag->key = key;
+    tag->count = active.boxCount;
+
+    ResidentEntry& entry = s_resident[freeIndex];
+    entry.slot = active.slot;
+    entry.offset = begin;
+    entry.length = length;
+    entry.key = key;
+    s_slotResident[active.slot] = static_cast<s8>(freeIndex);
+    s_slotTouches[active.slot] = 0;
+    s_residentHead = end;
+    RC_PSP_SCRATCHPAD_COUNT(collisionPromotions);
+    return boxes;
+}
+
+// Box table to scan for a compact sector: the scratchpad copy when resident
+// (promoting it on its second scan), the RAM table otherwise. Walls first,
+// floors at + wallCount, exactly like ActiveSector::wallBoxes.
+const CollisionBox* ScanBoxes(const ActiveSector& active) {
+    const u32 count = active.boxCount;
+    if (count == 0 || count >= kResidentSlots) {
+        return active.wallBoxes;
+    }
+    PspScratchpad::Header* header = PspScratchpad::ValidHeader();
+    if (s_collisionTag == 0 || header->collisionTag != s_collisionTag) {
+        ResetResidency(header);
+    }
+    const s32 slot = active.slot;
+    const s32 index = s_slotResident[slot];
+    if (index >= 0) {
+        const ResidentEntry& entry = s_resident[index];
+        const ResidentTag* tag = reinterpret_cast<const ResidentTag*>(ResidentRegion() + entry.offset);
+        if (tag->key == entry.key && tag->count == count) {
+            RC_PSP_SCRATCHPAD_COUNT(collisionHits);
+            return reinterpret_cast<const CollisionBox*>(tag + 1);
+        }
+        EvictResident(index);  // Overwritten behind our back: use RAM.
+        return active.wallBoxes;
+    }
+    if (++s_slotTouches[slot] < kPromoteTouches) {
+        return active.wallBoxes;
+    }
+    return PromoteResident(active);
+}
+#endif // RC_PSP_SCRATCHPAD
+
 void ReleaseSectorBoxes(s32 slot) {
+#if defined(RC_PSP_SCRATCHPAD)
+    DropResidentSlot(slot);
+#endif
     delete[] s_sectorBoxes[slot];
     s_sectorBoxes[slot] = nullptr;
     s_sectorBoxesValid[slot] = false;
@@ -344,6 +525,9 @@ s32 CollisionSector::FillWorldFloorArray(
         if (sector->status == -1) continue;
 
         if (const CollisionBox* boxes = entry.floorBoxes) {
+#if defined(RC_PSP_SCRATCHPAD)
+            boxes = ScanBoxes(entry) + sector->wallCount;
+#endif
             u8* floorBase = (u8*)sector->floors;
             const u32 floorCount = sector->floorCount;
             for (u32 i = 0; i < floorCount; i++) {
@@ -717,6 +901,9 @@ s32 CollisionSector::FillWorldWallArray(
         if (sector->status == -1) continue;
 
         if (const CollisionBox* boxes = entry.wallBoxes) {
+#if defined(RC_PSP_SCRATCHPAD)
+            boxes = ScanBoxes(entry);
+#endif
             Wall* walls = sector->walls;
             const u32 wallCount = sector->wallCount;
             for (u32 i = 0; i < wallCount; i++) {

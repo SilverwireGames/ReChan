@@ -7,6 +7,7 @@
 #include "gen/colfloor.h"
 #include "gen/colsect.h"
 #include "gen/colwall.h"
+#include "psp/psp_scratchpad.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -238,6 +239,25 @@ int main() {
     for (s32 slot : order) LoadSlot(slot, block++);
     LoadSlot(64, block++, true);
     CompareQueries(3000);
+#if defined(RC_PSP_SCRATCHPAD)
+    // Scratchpad residency (host buffer): the copies must actually be used,
+    // and losing them (power-on garbage / suspend: header and data gone; or
+    // only the region overwritten) must fall back to RAM with equal results.
+    const PspScratchpad::Stats warm = PspScratchpad::g_stats;
+    require(warm.collisionPromotions > 0 && warm.collisionHits > warm.collisionPromotions,
+            "scratchpad collision copies reused");
+    std::memset(PspScratchpad::Base(), 0xA5, PspScratchpad::kSize);
+    CompareQueries(500);
+    require(PspScratchpad::g_stats.collisionResets > warm.collisionResets, "header loss resets residency");
+    const PspScratchpad::Stats beforeRegion = PspScratchpad::g_stats;
+    std::memset(PspScratchpad::Base() + PspScratchpad::kCollisionOffset, 0x5A,
+                PspScratchpad::kCollisionSize);
+    CompareQueries(500);
+    require(PspScratchpad::g_stats.collisionEvictions > beforeRegion.collisionEvictions,
+            "overwritten copies are dropped");
+    require(PspScratchpad::g_stats.collisionResets == beforeRegion.collisionResets,
+            "region loss alone keeps the header");
+#endif
 
     // Unload some, reload different data into others (including re-Load
     // without Unload) and fill the gaps.
@@ -268,4 +288,9 @@ int main() {
     std::printf("PASS: collision query equivalence (%ld comparisons; non-empty wall/floor fills %ld/%ld,"
         " truncated %ld, floors found %ld, ceilings %ld, railings %ld)\n",
         g_checks, g_wallHits, g_floorHits, g_truncated, g_validFloors, g_ceilings, g_railings);
+#if defined(RC_PSP_SCRATCHPAD)
+    const PspScratchpad::Stats& stats = PspScratchpad::g_stats;
+    std::printf("PASS: scratchpad collision residency (hits %u, promotions %u, evictions %u, resets %u)\n",
+        stats.collisionHits, stats.collisionPromotions, stats.collisionEvictions, stats.collisionResets);
+#endif
 }

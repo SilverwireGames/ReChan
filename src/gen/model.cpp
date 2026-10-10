@@ -2,6 +2,7 @@
 #include "psp/psp_perf.h"
 #if defined(RC_PLATFORM_PSP)
 #include "psp/psp_packet_lookup.h"
+#include "psp/psp_scratchpad.h"
 #include "psp/psp_skin_view_cull.h"
 #include "psp/psp_vfpu_skin.h"
 #include "pddi/psp/psprender.h"
@@ -47,6 +48,7 @@
 #include <cstring>
 #include <algorithm>
 #include <new>
+#include <type_traits>
 #include <vector>
 
 #include "extra/shadowcsm.h"
@@ -86,6 +88,11 @@ struct PspModelFrameScratch {
 };
 
 PspModelFrameScratch g_pspModelFrameScratch;
+
+// The scratchpad joints region is raw storage written by plain assignment.
+static_assert(sizeof(Mat4) == 64 && std::is_trivially_copyable<Mat4>::value
+                  && std::is_trivially_destructible<Mat4>::value,
+              "scratchpad joint slots hold 64-byte trivially copyable matrices");
 
 // Whole-character view rejection (see psp/psp_skin_view_cull.h). The joint
 // radii are derived once from the immutable load-time skin vertices; a
@@ -299,6 +306,7 @@ s32 PspLightJointsVfpu(const OriginalSTree* renderSource, const STreeData* skel,
     const PspVfpuSkin::LightState state =
         PspVfpuSkin::MakeLightState(GetCurrentPortAmbientLightColour(), lights);
     const u8* vertexList = renderSource->primGeom->GetVertexList();
+    const PspVfpuSkin::NormalTable normals = PspVfpuSkin::AcquireNormals();
     s32 lastJoint = -1;
     for (u32 jointIndex = 0; jointIndex < skel->numJoints; jointIndex++) {
         const STreeJoint& joint = skel->joints[jointIndex];
@@ -320,7 +328,8 @@ s32 PspLightJointsVfpu(const OriginalSTree* renderSource, const STreeData* skel,
             continue;  // The callback writes nothing without a vertex list.
         }
         const Mat4 lightingMatrix = lightingWorld * joints[jointIndex];
-        PspVfpuSkin::LightRange(state, lightingMatrix, vertexList, startIndex, clampedEnd, scratch);
+        PspVfpuSkin::LightRange(state, normals, lightingMatrix, vertexList, startIndex, clampedEnd,
+                                scratch);
         PspPerf::CountRenderer(PspPerf::RendererCounter::LightEvaluations, clampedEnd - startIndex);
     }
     return lastJoint;
@@ -1557,9 +1566,19 @@ void DrawableSTree::Display(u32 /*flags*/) {
     if (skel && skin && skin->numVerts > 0 && skel->joints && skinnedBuffer) {
         PspPerf::ScopeTimer skinTimer(PspPerf::RendererCounter::SkinPrepareUs);
 #if defined(RC_PLATFORM_PSP)
-        auto& jointMatrices = g_pspModelFrameScratch.jointMatrices;
-        ResizeRetainedScratch(jointMatrices, skel->numJoints);
-        skel->ComputeWorldMatricesWithCallbacks(jointMatrices.data());
+        // Joint world matrices: written once here, then read by the view
+        // cull, once per joint by the light pass and at every joint change of
+        // the skin pass, after the skin stream has evicted them from the data
+        // cache. In the scratchpad joints region (psp/psp_scratchpad.h) they
+        // cost no line fill on write, no write-back and no refill; a skeleton
+        // above the region capacity, or a nested draw, keeps the RAM vector.
+        PspScratchpad::JointsLease jointsLease(skel->numJoints);
+        Mat4* jointData = static_cast<Mat4*>(jointsLease.data());
+        if (!jointData) {
+            ResizeRetainedScratch(g_pspModelFrameScratch.jointMatrices, skel->numJoints);
+            jointData = g_pspModelFrameScratch.jointMatrices.data();
+        }
+        skel->ComputeWorldMatricesWithCallbacks(jointData);
 #else
         Mat4* jointMatrices = new Mat4[skel->numJoints];
         skel->ComputeWorldMatricesWithCallbacks(jointMatrices);
@@ -1569,7 +1588,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
         // Joint callbacks above still ran (attack capture, overrides). Only
         // the purely visual light/skin/pack/draw work is skipped, and only
         // when no vertex can reach the screen.
-        if (PspSkinOutsideView(skin, jointMatrices.data(), skel->numJoints, modelWorld)) {
+        if (PspSkinOutsideView(skin, jointData, skel->numJoints, modelWorld)) {
             PspPerf::CountRenderer(PspPerf::RendererCounter::SkinViewCulls);
             return;
         }
@@ -1648,7 +1667,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
                     vfpuTestLit.assign(sourceVertCount * 2u, 0u);
                     target = vfpuTestLit.data();
                 }
-                const s32 lastJoint = PspLightJointsVfpu(renderSource, skel, jointMatrices.data(),
+                const s32 lastJoint = PspLightJointsVfpu(renderSource, skel, jointData,
                                                          lightingWorld, sourceVertCount, target,
                                                          litWritten.data());
                 if (!vfpuSelfTest && lastJoint >= 0) {
@@ -1738,7 +1757,11 @@ void DrawableSTree::Display(u32 /*flags*/) {
                     if (litG < scratchMinG) scratchMinG = litG;
                     if (litB < scratchMinB) scratchMinB = litB;
                     if (litR > scratchMaxR) scratchMaxR = litR;
+#if defined(RC_PLATFORM_PSP)
+                Mat4 lightingMatrix = lightingWorld * jointData[jointIndex];
+#else
                     if (litG > scratchMaxG) scratchMaxG = litG;
+#endif
                     if (litB > scratchMaxB) scratchMaxB = litB;
                 }
             }
@@ -1757,7 +1780,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
         {
             const PspSkinLoop loop = {
                 skin->verts,
-                jointMatrices.data(),
+                jointData,
                 litScratch.data(),
                 litWritten.data(),
                 (hasLitScratch && renderSource->primGeom)

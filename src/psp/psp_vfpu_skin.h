@@ -27,6 +27,7 @@
 // with the production scalar code; the PSP kernels implement the same steps.
 
 #include "p3d/matrix.h"
+#include "psp/psp_scratchpad.h"
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -192,6 +193,41 @@ alignas(16) inline constexpr float kNormals[256][4] = {
     {  2882.0f,      0.0f,  -2911.0f, 0.0f}, {  2802.0f,   -959.0f,  -2830.0f, 0.0f},
 };
 
+using NormalTable = const float (*)[4];
+
+// Normal table used by the lighting kernel. With the scratchpad enabled it is
+// a copy in the scratchpad normals region (psp/psp_scratchpad.h), refilled
+// whenever the region tag was lost; otherwise the .rodata table.
+//
+// Why: each lit vertex does one lv.q at a data-dependent index of this 4 KB
+// table. A character's light pass touches most of its 64 cache lines, and the
+// skin and vertex-pack passes that follow stream far more than the 16 KB data
+// cache, so every character draw used to refill them from RAM. In the
+// scratchpad the lookups never miss and no longer compete with the streams.
+inline NormalTable AcquireNormals() {
+#if defined(RC_PSP_SCRATCHPAD)
+    constexpr std::uint32_t kNormalsTag = 0x4E524D31u;  // "NRM1"
+    PspScratchpad::Header* header = PspScratchpad::ValidHeader();
+    float (*table)[4] = PspScratchpad::At<float[4]>(PspScratchpad::kNormalsOffset);
+    if (header->normalsTag != kNormalsTag) {
+        RC_PSP_SCRATCHPAD_COUNT(normalsRefills);
+        for (unsigned i = 0; i < 256; ++i) {
+            table[i][0] = kNormals[i][0];
+            table[i][1] = kNormals[i][1];
+            table[i][2] = kNormals[i][2];
+            table[i][3] = kNormals[i][3];
+        }
+        header->normalsTag = kNormalsTag;
+    }
+    // The kernels read the table from asm without a "memory" clobber; keep
+    // the refill stores ahead of them.
+    __asm__ volatile("" : : : "memory");
+    return table;
+#else
+    return kNormals;
+#endif
+}
+
 // --- Lighting -------------------------------------------------------------
 
 // Port light state hoisted out of the per-vertex loop. The callback reads the
@@ -304,9 +340,10 @@ inline void StoreLit(std::uint16_t* scratch, std::uint32_t vertex, std::uint32_t
 
 // Portable model of LightRange(): the FPU rotation the VFPU kernel mirrors.
 inline void RotateNormalReference(const Mat4& m, std::uint8_t index, std::int32_t& nx,
-                                  std::int32_t& ny, std::int32_t& nz) {
+                                  std::int32_t& ny, std::int32_t& nz,
+                                  NormalTable normals = kNormals) {
     float x, y, z;
-    Mat4TransformDir(m, kNormals[index][0], kNormals[index][1], kNormals[index][2], x, y, z);
+    Mat4TransformDir(m, normals[index][0], normals[index][1], normals[index][2], x, y, z);
     nx = static_cast<std::int32_t>(x);
     ny = static_cast<std::int32_t>(y);
     nz = static_cast<std::int32_t>(z);
@@ -316,11 +353,12 @@ inline void RotateNormalReference(const Mat4& m, std::uint8_t index, std::int32_
 // (normal index at byte 6) with joint lighting matrix `m`.
 inline void LightRangeReference(const LightState& state, const Mat4& m,
                                 const std::uint8_t* vertexList, std::uint32_t start,
-                                std::uint32_t end, std::uint16_t* scratch) {
+                                std::uint32_t end, std::uint16_t* scratch,
+                                NormalTable normals = kNormals) {
     const bool narrow = NarrowDotSafe(state, m);
     for (std::uint32_t v = start; v < end; ++v) {
         std::int32_t nx, ny, nz;
-        RotateNormalReference(m, vertexList[v * 8u + 6u], nx, ny, nz);
+        RotateNormalReference(m, vertexList[v * 8u + 6u], nx, ny, nz, normals);
         StoreLit(scratch, v, narrow ? LitColour<true>(state, nx, ny, nz)
                                     : LitColour<false>(state, nx, ny, nz));
     }
@@ -382,7 +420,7 @@ inline void BeginVertices() {
         : : "r"(kVertexConstants) : "memory");
 }
 
-// `m` must be 16-byte aligned (see Align16Allocator).
+// `m` must be 16-byte aligned (Align16Allocator or the scratchpad joints region).
 inline void LoadJoint(const Mat4* m) {
     __asm__ volatile(
         "lv.q    C000, 0(%0)\n"
@@ -527,8 +565,9 @@ inline void LoadLightingMatrix(const Mat4& m) {
 // Starts C610 = trunc((col0 * nx + col1 * ny) + col2 * nz): the operation
 // order and single roundings of Mat4TransformDir, so the truncation matches.
 // Reads only the immutable normal table, so no "memory" clobber: the light
-// state can stay in registers across the pipelined loop.
-inline void IssueNormal(std::uint8_t index) {
+// state can stay in registers across the pipelined loop. `normals` is the
+// table from AcquireNormals() (scratchpad or .rodata).
+inline void IssueNormal(NormalTable normals, std::uint8_t index) {
     __asm__ volatile(
         "lv.q    C600, 0(%0)\n"
         "vscl.t  C610, C500, S600\n"
@@ -537,7 +576,7 @@ inline void IssueNormal(std::uint8_t index) {
         "vscl.t  C620, C520, S602\n"
         "vadd.t  C610, C610, C620\n"
         "vf2iz.t C610, C610, 0\n"
-        : : "r"(kNormals[index]));
+        : : "r"(normals[index]));
 }
 
 inline void ReadNormal(std::int32_t& nx, std::int32_t& ny, std::int32_t& nz) {
@@ -551,30 +590,32 @@ inline void ReadNormal(std::int32_t& nx, std::int32_t& ny, std::int32_t& nz) {
 // Software-pipelined: the next normal rotates on the VFPU while the integer
 // unit evaluates the lights for the current one.
 template <bool Narrow>
-inline void LightRangeKernel(const LightState& state, const std::uint8_t* vertexList,
-                             std::uint32_t start, std::uint32_t end, std::uint16_t* scratch) {
-    IssueNormal(vertexList[start * 8u + 6u]);
+inline void LightRangeKernel(const LightState& state, NormalTable normals,
+                             const std::uint8_t* vertexList, std::uint32_t start,
+                             std::uint32_t end, std::uint16_t* scratch) {
+    IssueNormal(normals, vertexList[start * 8u + 6u]);
     for (std::uint32_t v = start; v < end; ++v) {
         std::int32_t nx, ny, nz;
         ReadNormal(nx, ny, nz);
         if (v + 1u < end) {
-            IssueNormal(vertexList[(v + 1u) * 8u + 6u]);
+            IssueNormal(normals, vertexList[(v + 1u) * 8u + 6u]);
         }
         StoreLit(scratch, v, LitColour<Narrow>(state, nx, ny, nz));
     }
 }
 
-inline void LightRange(const LightState& state, const Mat4& m, const std::uint8_t* vertexList,
-                       std::uint32_t start, std::uint32_t end, std::uint16_t* scratch) {
+inline void LightRange(const LightState& state, NormalTable normals, const Mat4& m,
+                       const std::uint8_t* vertexList, std::uint32_t start,
+                       std::uint32_t end, std::uint16_t* scratch) {
     if (start >= end) {
         return;
     }
     LoadLightingMatrix(m);
     if (NarrowDotSafe(state, m)) {
-        LightRangeKernel<true>(state, vertexList, start, end, scratch);
+        LightRangeKernel<true>(state, normals, vertexList, start, end, scratch);
     }
     else {
-        LightRangeKernel<false>(state, vertexList, start, end, scratch);
+        LightRangeKernel<false>(state, normals, vertexList, start, end, scratch);
     }
 }
 

@@ -363,7 +363,14 @@ int main(int argc, char** argv) {
 
     MARKFUNCTION(0x8002635C);
 
+#if defined(RC_PLATFORM_PSP)
+    // Frame timing in integer microseconds: the same clock that
+    // Time::GetTimeInSeconds() divides by 1e6, without the soft-float double
+    // conversions/subtractions the Allegrex would pay every frame.
+    u64 prevTimeUs = sceKernelGetSystemTimeWide();
+#else
     f64 prevTime = Time::GetTimeInSeconds();
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     u32 pspPlayTraceFrames = 0;
 #endif
@@ -373,10 +380,17 @@ int main(int argc, char** argv) {
 #endif
 
     while (!p3d::display->ShouldClose()) {
+#if defined(RC_PLATFORM_PSP)
+        const u64 frameStartUs = sceKernelGetSystemTimeWide();
+        // Exact integer delta, one correctly rounded single-precision divide.
+        f32 realDt = static_cast<f32>(static_cast<s32>(frameStartUs - prevTimeUs)) / 1000000.0f;
+        prevTimeUs = frameStartUs;
+#else
         f64 frameStart = Time::GetTimeInSeconds();
 
         f32 realDt = (f32)(frameStart - prevTime);
         prevTime = frameStart;
+#endif
         g_time->Tick(realDt);
 #if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
         if (game.GetState() != pspLastObservedState && pspStateTransitionProbe < 24u) {
@@ -449,7 +463,11 @@ int main(int argc, char** argv) {
         }
 
         const GameState stateBeforeStep = game.GetState();
+#if defined(RC_PLATFORM_PSP)
+        const u64 stepT0Us = sceKernelGetSystemTimeWide();
+#else
         const f64 stepT0 = Time::GetTimeInSeconds();
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
         static u32 pspStageMainPlayFrames = 0;
         const bool pspStageMainProbe = stateBeforeStep == GameState::Play
@@ -496,7 +514,11 @@ int main(int argc, char** argv) {
             PspPerf::Trace("play: after Step");
         }
 #endif
+#if defined(RC_PLATFORM_PSP)
+        const f32 stepTotalMs = static_cast<f32>(static_cast<s32>(sceKernelGetSystemTimeWide() - stepT0Us)) / 1000.0f;
+#else
         const f32 stepTotalMs = (f32)((Time::GetTimeInSeconds() - stepT0) * 1000.0);
+#endif
         g_frameProfile.logicMs = stepTotalMs
             - g_frameProfile.drawSubmitMs
             - g_frameProfile.swapMs;
@@ -542,7 +564,12 @@ int main(int argc, char** argv) {
         jcsUpdateAmbience();
         jcsUpdateDialogCD();
 
+#if defined(RC_PLATFORM_PSP)
+        // A no-op on PSP (SwapBuffers already waits for vblank).
+        g_time->WaitForFrameEnd(0.0);
+#else
         g_time->WaitForFrameEnd(frameStart);
+#endif
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
         if (probePspPlayStep) {
             LOG("[PSP Frame] after wait frame=%lu", static_cast<unsigned long>(rFrameCount));
@@ -568,7 +595,7 @@ int main(int argc, char** argv) {
         // before moving to the next level; it never renders a measurement HUD.
         if (game.GetState() == GameState::Play && !DebugUI::IsBenchmarkFinished()) {
             PspPerf::RecordFrame(
-                static_cast<u32>((Time::GetTimeInSeconds() - frameStart) * 1000000.0),
+                static_cast<u32>(sceKernelGetSystemTimeWide() - frameStartUs),
                 g_frameProfile.logicMs,
                 g_frameProfile.drawSubmitMs,
                 g_frameProfile.swapMs);
@@ -602,6 +629,9 @@ int main(int argc, char** argv) {
 #endif
 #endif
 
+#if !defined(RC_PLATFORM_PSP)
+        // The PSP has no window title (pspDisplay::SetTitle is empty), so it
+        // skips this once-per-second double-formatting snprintf.
         static f32 titleAccumSec = 0.0f;
         titleAccumSec += g_time->deltaTime;
         if (titleAccumSec >= 1.0f) {
@@ -610,6 +640,7 @@ int main(int argc, char** argv) {
             p3d::display->SetTitle(titleBuf);
             titleAccumSec = 0.0f;
         }
+#endif
     }
 
 #if defined(RC_PLATFORM_PSP)

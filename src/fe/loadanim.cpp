@@ -11,6 +11,9 @@
 #include "pddi/pddidev.h"
 
 #include <cmath>
+#if defined(RC_PLATFORM_PSP)
+#include <pspkernel.h>
+#endif
 
 #if CUSTOM_MENU
 #include "extra/fecustommenumgr.h"
@@ -176,10 +179,21 @@ void FillMeter(u8 target) {
         return;
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // Same ramp in integer microseconds (the PSP clock behind
+    // Time::GetTimeInSeconds): 0.35 s * |delta| / 100 = 3500 us per unit.
+    // Both operands of the single-precision division are exact integers
+    // (< 2^24), so t is the correctly rounded ratio without soft-float doubles.
+    const f32 durationUs = static_cast<f32>(3500 * std::abs(delta));
+    const u64 fillStartUs = sceKernelGetSystemTimeWide();
+    for (;;) {
+        f32 t = static_cast<f32>(static_cast<s32>(sceKernelGetSystemTimeWide() - fillStartUs)) / durationUs;
+#else
     const f64 duration = kFillMeterDurationSec * (std::abs(delta) / 100.0);
     const f64 fillStart = Time::GetTimeInSeconds();
     for (;;) {
         f32 t = (f32)((Time::GetTimeInSeconds() - fillStart) / duration);
+#endif
         if (t >= 1.0f) {
             s_logo.currentFill = target;
             s_logo.targetFill = target;

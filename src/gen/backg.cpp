@@ -150,11 +150,37 @@ static bool BuildBackGDynamicEntry(OriginalGeo* sourceGeo, BackGGeoEntry* entry)
     return true;
 }
 
+#if defined(RC_PLATFORM_PSP)
+// The Allegrex FPU is single precision only, so the double expression below
+// costs a chain of soft-float calls twice per frame. This returns the exact
+// floor(sqrt(x*x + y*y)): a hardware sqrt.s estimate corrected with 64-bit
+// integer squares. The double version truncates the same value whenever
+// x*x + y*y < 2^52 (|x|, |y| below ~47 million), far beyond any BackG camera
+// coordinate, so the visible scroll is unchanged.
+static s32 BackGMag2(s32 x, s32 y) {
+    const u64 sum = static_cast<u64>(static_cast<s64>(x) * x) + static_cast<u64>(static_cast<s64>(y) * y);
+    const f32 fx = static_cast<f32>(x);
+    const f32 fy = static_cast<f32>(y);
+    s32 estimate = static_cast<s32>(std::sqrt(fx * fx + fy * fy));
+    if (estimate < 0) {
+        estimate = 0;
+    }
+    u64 root = static_cast<u64>(estimate);
+    while (root > 0 && root * root > sum) {
+        --root;
+    }
+    while ((root + 1) * (root + 1) <= sum) {
+        ++root;
+    }
+    return static_cast<s32>(root);
+}
+#else
 static s32 BackGMag2(s32 x, s32 y) {
     const f64 dx = static_cast<f64>(x);
     const f64 dy = static_cast<f64>(y);
     return static_cast<s32>(std::sqrt(dx * dx + dy * dy));
 }
+#endif
 
 // PSX rmCartesianToPolar semantics:
 // outMagnitude = rmMag2(x, y), outAngle = rmATan216(x, y), return outAngle.

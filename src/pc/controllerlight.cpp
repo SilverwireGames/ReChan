@@ -30,6 +30,13 @@ void ControllerLight::FlashDamage() {
 }
 
 void ControllerLight::Update() {
+#if defined(RC_PLATFORM_PSP)
+    // The PSP has no light bar: pspGamepad inherits the no-op
+    // pddiGamepad::SetLight, so the colour/flash state computed below could
+    // never reach any hardware. Skip it instead of paying its per-frame
+    // (double precision, soft-float) timing math.
+    return;
+#endif
     if (!p3d::context) {
         return;
     }

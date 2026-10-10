@@ -115,6 +115,19 @@ static void DrawBoundedQuad(tTexture* texture, const TitleLayerBounds& bounds,
 }
 #endif
 
+#if defined(RC_PLATFORM_PSP)
+// The PSP has no pointer: ActionInput::Update never samples one there (the
+// position stays at its 0,0 initializer and no mouse button is ever down) and
+// the PSP display emits no scroll messages. Pointer motion is therefore never
+// observed, and m_mouseInputActive (cleared by Activate, set only by pointer
+// motion/clicks/scroll) stays false while the menu runs. The double-precision
+// distance tests and hover mapping below are compiled out instead of running
+// on soft-float helpers; the resulting state is identical.
+static constexpr bool kPointerInputPossible = false;
+#else
+static constexpr bool kPointerInputPossible = true;
+#endif
+
 static f32 UiAnimSeconds() {
     return (f32)Time::GetTimeInSeconds();
 }
@@ -1313,12 +1326,14 @@ void feCustomMenuMgr::UpdateMouseCursorVisibility() {
         m_mousePosInitialized = true;
     }
     else if (m_mouseInputActive) {
-        mouseMoved = (std::fabs(sx - m_lastMouseX) > 0.5) || (std::fabs(sy - m_lastMouseY) > 0.5);
+        mouseMoved = kPointerInputPossible
+            && ((std::fabs(sx - m_lastMouseX) > 0.5) || (std::fabs(sy - m_lastMouseY) > 0.5));
         m_lastMouseX = sx;
         m_lastMouseY = sy;
     }
     else {
-        mouseMoved = (std::fabs(sx - m_lastMouseX) > 4.0) || (std::fabs(sy - m_lastMouseY) > 4.0);
+        mouseMoved = kPointerInputPossible
+            && ((std::fabs(sx - m_lastMouseX) > 4.0) || (std::fabs(sy - m_lastMouseY) > 4.0));
         if (mouseMoved) {
             m_lastMouseX = sx;
             m_lastMouseY = sy;
@@ -1453,7 +1468,7 @@ s32 feCustomMenuMgr::Invoke() {
         const s32 scroll = g_actionInput->ConsumeScrollDelta();
         bool scrollBarUsed = false;
 
-        if (m_mouseInputActive) {
+        if (kPointerInputPossible && m_mouseInputActive) {
             double sx = 0.0, sy = 0.0;
             g_actionInput->GetMousePosition(sx, sy);
             const f32 screenW = g_display ? (f32)g_display->GetScreenWidth() : DEFAULT_SCREEN_WIDTH;
@@ -1553,7 +1568,7 @@ s32 feCustomMenuMgr::Invoke() {
 
         double sx = 0.0, sy = 0.0;
         g_actionInput->GetMousePosition(sx, sy);
-        if (m_mouseInputActive) {
+        if (kPointerInputPossible && m_mouseInputActive) {
             const f32 screenW = g_display ? (f32)g_display->GetScreenWidth() : DEFAULT_SCREEN_WIDTH;
             const f32 screenH = g_display ? (f32)g_display->GetScreenHeight() : DEFAULT_SCREEN_HEIGHT;
             const f32 aspect = g_display ? g_display->GetAspectRatio() : (4.0f / 3.0f);
@@ -1740,12 +1755,14 @@ s32 feCustomMenuMgr::Invoke() {
             m_mousePosInitialized = true;
         }
         else if (m_mouseInputActive) {
-            mouseMoved = (std::fabs(sx - m_lastMouseX) > 0.5) || (std::fabs(sy - m_lastMouseY) > 0.5);
+            mouseMoved = kPointerInputPossible
+                && ((std::fabs(sx - m_lastMouseX) > 0.5) || (std::fabs(sy - m_lastMouseY) > 0.5));
             m_lastMouseX = sx;
             m_lastMouseY = sy;
         }
         else {
-            mouseMoved = (std::fabs(sx - m_lastMouseX) > 4.0) || (std::fabs(sy - m_lastMouseY) > 4.0);
+            mouseMoved = kPointerInputPossible
+                && ((std::fabs(sx - m_lastMouseX) > 4.0) || (std::fabs(sy - m_lastMouseY) > 4.0));
             if (mouseMoved) {
                 m_lastMouseX = sx;
                 m_lastMouseY = sy;
@@ -1824,7 +1841,7 @@ s32 feCustomMenuMgr::Invoke() {
         s32 hoverSlotIndex = m_keyBindSlotCursor;
         bool scrollBarUsed = false;
 
-        if (m_mouseInputActive) {
+        if (kPointerInputPossible && m_mouseInputActive) {
             const f32 screenW = g_display ? (f32)g_display->GetScreenWidth() : DEFAULT_SCREEN_WIDTH;
             const f32 screenH = g_display ? (f32)g_display->GetScreenHeight() : DEFAULT_SCREEN_HEIGHT;
             const f32 aspect = g_display ? g_display->GetAspectRatio() : (4.0f / 3.0f);
@@ -2111,7 +2128,7 @@ s32 feCustomMenuMgr::Invoke() {
         const bool leftDown = g_actionInput->IsMouseButtonDown(MouseBtn::Left);
         const bool rightClick = g_actionInput->IsMouseButtonTriggered(MouseBtn::Right);
         bool scrollBarUsed = false;
-        if (m_mouseInputActive) {
+        if (kPointerInputPossible && m_mouseInputActive) {
             const f32 screenW = g_display ? static_cast<f32>(g_display->GetScreenWidth()) : DEFAULT_SCREEN_WIDTH;
             const f32 screenH = g_display ? static_cast<f32>(g_display->GetScreenHeight()) : DEFAULT_SCREEN_HEIGHT;
             const f32 aspect = g_display ? g_display->GetAspectRatio() : (4.0f / 3.0f);
@@ -2244,7 +2261,7 @@ s32 feCustomMenuMgr::Invoke() {
     auto prevVal = GetBoundValue(*e);
 
     // Mouse hover and click
-    if (m_mouseInputActive) {
+    if (kPointerInputPossible && m_mouseInputActive) {
         // Convert screen to PSX coordinate space
         const f32 screenW = g_display ? (f32)g_display->GetScreenWidth() : DEFAULT_SCREEN_WIDTH;
         const f32 screenH = g_display ? (f32)g_display->GetScreenHeight() : DEFAULT_SCREEN_HEIGHT;
