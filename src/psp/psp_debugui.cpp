@@ -319,6 +319,16 @@ void OnBenchmarkFrameRecorded() {
         }
 #endif
         PspPerf::WriteReportTo(path, s_scenarioIndex + 1u, s_activeLevelId);
+#if defined(PSP_BENCH_FIXED_STEP)
+        {
+            // The same simulated frame on every run: a pixel diff between two
+            // builds shows any rendering change.
+            char shotPath[24] = {};
+            std::snprintf(shotPath, sizeof(shotPath), "SHOT_S%02lu.BMP",
+                static_cast<unsigned long>(s_scenarioIndex + 1u));
+            WritePspLastFrame(shotPath);
+        }
+#endif
         LOG("[PSP Bench] scenario %lu complete: levelId=%ld frames=%lu report=%s",
             static_cast<unsigned long>(s_scenarioIndex + 1u),
             static_cast<long>(kScenarios[s_scenarioIndex].levelId),

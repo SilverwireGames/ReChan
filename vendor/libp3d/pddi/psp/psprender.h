@@ -260,6 +260,10 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
                                         const void* data, u32 count,
                                         bool uvIsIntegral);
+#if defined(PSP_PERF_TELEMETRY)
+// Benchmark: writes the last presented frame as a 24-bit BMP.
+bool WritePspLastFrame(const char* path);
+#endif
 #if defined(PSP_BENCH_COMBAT)
 // Restarts the scripted combat input (benchmark scenario start).
 void ResetPspBenchCombatInput();
