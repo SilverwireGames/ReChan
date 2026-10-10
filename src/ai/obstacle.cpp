@@ -28,6 +28,7 @@
 #include "snd/snddrct.h"
 #include "gen/time.h"
 #include "extra/shadowcsm.h"
+#include <new>
 
 const LVector ZERO_DELTA_VELOCITY = { 0, 0, 0 };
 
@@ -254,16 +255,141 @@ static constexpr s32 OBSTACLE_DETECT_OBSTACLE_OFFSET_XZ = 0x100;
 static constexpr s32 OBSTACLE_DETECT_OBSTACLE_OFFSET_Y = 0x100;
 static constexpr s32 OBSTACLE_DETECT_OBSTACLE_RADIUS = 0x20;
 
+// ---------------------------------------------------------------------------
+// moveList broad-phase snapshot (pure cost, identical results).
+//
+// Every step, AI::MoveThings runs HandlePickupObstacleCollision for each
+// pickup (active and inactive) and HandleHumanoidObstacleCollision for each
+// humanoid; both walk the whole moveList (every obstacle of the stage) and,
+// per node, read flags, pos and collBox.extent from a large Obstacle object
+// -- several cache misses per node, O(things x obstacles) per step.
+//
+// Inside BeginCollisionPassBatch/EndCollisionPassBatch the passes test a
+// compact array of {pos.x, pos.z, extent, Obstacle*} for the TF_MODEL_CREATED
+// nodes, in list order, and only touch the Obstacle when the original
+// integer broad-phase passes.  Equivalence:
+//  * The snapshot holds exactly the values the original loop would read, as
+//    long as nothing changed obstacle pos/flags/extent or moveList since it
+//    was taken.  Inside the passes, the only calls that can do so are the
+//    mutating virtuals (HandlePickupCollision, HandleHumanoidCollision) and
+//    the humanoid ticket/ledge/land transitions; the snapshot is invalidated
+//    right after each of them (and by any Obstacle ctor/dtor).  Everything
+//    else called in the passes is a pure query (GetPhysical,
+//    GetObstacleFloorHeight, the static box tests, GetTicketIssuer,
+//    AnimationMatrices::GetMatrix) or only writes the humanoid's own model
+//    floor state (SetFloorHeight).
+//  * When a mutating call happens mid-scan (pickup pass), the scan resumes on
+//    the live list from that node's next pointer, exactly like the original.
+//  * Outside a batch, or if the snapshot cannot be allocated, the original
+//    live-list loops run unchanged.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ObstacleBroadPhaseEntry {
+    s32 x;
+    s32 z;
+    s32 extent;
+    Obstacle* obstacle;
+};
+
+ObstacleBroadPhaseEntry* s_obstacleBroadPhase = nullptr;
+s32 s_obstacleBroadPhaseCapacity = 0;
+s32 s_obstacleBroadPhaseCount = 0;
+bool s_obstacleBroadPhaseValid = false;
+s32 s_obstacleBroadPhaseBatchDepth = 0;
+s32 s_obstacleBroadPhaseSuspend = 0;
+
+inline void InvalidateObstacleBroadPhase() {
+    s_obstacleBroadPhaseValid = false;
+}
+
+// Wraps every call that may change obstacle state.  While it is open, any
+// (nested) pass uses the live list; on both entry and exit the snapshot is
+// dropped, so it is rebuilt from live data before the next use.
+struct ObstacleMutationScope {
+    ObstacleMutationScope() {
+        ++s_obstacleBroadPhaseSuspend;
+        InvalidateObstacleBroadPhase();
+    }
+    ~ObstacleMutationScope() {
+        --s_obstacleBroadPhaseSuspend;
+        InvalidateObstacleBroadPhase();
+    }
+    ObstacleMutationScope(const ObstacleMutationScope&) = delete;
+    ObstacleMutationScope& operator=(const ObstacleMutationScope&) = delete;
+};
+
+// Returns true when the snapshot can be used for the current scan.
+bool EnsureObstacleBroadPhase() {
+    if (s_obstacleBroadPhaseBatchDepth <= 0 || s_obstacleBroadPhaseSuspend > 0 || !g_ai) {
+        return false;
+    }
+    if (s_obstacleBroadPhaseValid) {
+        return true;
+    }
+
+    s32 count = 0;
+    for (ccMinNode* node = g_ai->moveList.head; node != nullptr; node = node->next) {
+        const Obstacle* obstacle = static_cast<const Obstacle*>(static_cast<const Thing*>(node));
+        if (obstacle->flags & TF_MODEL_CREATED) {
+            count++;
+        }
+    }
+
+    if (count > s_obstacleBroadPhaseCapacity) {
+        const s32 newCapacity = (count + 63) & ~63;
+        ObstacleBroadPhaseEntry* grown = new (std::nothrow) ObstacleBroadPhaseEntry[newCapacity];
+        if (!grown) {
+            return false;
+        }
+        delete[] s_obstacleBroadPhase;
+        s_obstacleBroadPhase = grown;
+        s_obstacleBroadPhaseCapacity = newCapacity;
+    }
+
+    s32 index = 0;
+    for (ccMinNode* node = g_ai->moveList.head; node != nullptr; node = node->next) {
+        Obstacle* obstacle = static_cast<Obstacle*>(static_cast<Thing*>(node));
+        if ((obstacle->flags & TF_MODEL_CREATED) == 0) {
+            continue;
+        }
+        ObstacleBroadPhaseEntry& entry = s_obstacleBroadPhase[index++];
+        entry.x = obstacle->pos.x;
+        entry.z = obstacle->pos.z;
+        entry.extent = (s32)obstacle->collBox.extent;
+        entry.obstacle = obstacle;
+    }
+    s_obstacleBroadPhaseCount = index;
+    s_obstacleBroadPhaseValid = true;
+    return true;
+}
+
+} // namespace
+
+void Obstacle::BeginCollisionPassBatch() {
+    if (s_obstacleBroadPhaseBatchDepth++ == 0) {
+        InvalidateObstacleBroadPhase();
+    }
+}
+
+void Obstacle::EndCollisionPassBatch() {
+    if (s_obstacleBroadPhaseBatchDepth > 0 && --s_obstacleBroadPhaseBatchDepth == 0) {
+        InvalidateObstacleBroadPhase();
+    }
+}
+
 Obstacle::Obstacle(const LVector* pos, u16 type) : Thing(pos, type) {
     MARKFUNCTION(0x8007CA08);
     collBox = { 0x7FFF, 0x7FFF, 0x7FFF, -0x7FFF, -0x7FFF, -0x7FFF, -0x7FFF, 0 };
     physicalType = 0;
     lightingFlag = 1;
     shadowFlag = 1;
+    InvalidateObstacleBroadPhase();
 }
 
 Obstacle::~Obstacle() {
     MARKFUNCTION(0x8007CA7C);
+    InvalidateObstacleBroadPhase();
 #if HIGH_FPS_PLAY_PRESENTATION
     ObstacleForgetRenderTransform(this);
 #endif
@@ -570,7 +696,56 @@ void Obstacle::HandlePickupObstacleCollision(Pickup* pickup) {
     tagCollisionSphere sphere = {};
     sphere.radius = 128;
 
-    for (ccMinNode* node = g_ai->moveList.head; node != nullptr; node = node->next) {
+    ccMinNode* liveStart = g_ai->moveList.head;
+    if (EnsureObstacleBroadPhase()) {
+        // Snapshot scan: same order, same integer broad-phase on the same
+        // values.  A hit calls a mutating virtual, after which the snapshot is
+        // stale, so the remaining nodes are scanned on the live list from the
+        // node after the one just handled (the original loop's node->next).
+        liveStart = nullptr;
+        const s32 count = s_obstacleBroadPhaseCount;
+        const ObstacleBroadPhaseEntry* entries = s_obstacleBroadPhase;
+        for (s32 i = 0; i < count; i++) {
+            const ObstacleBroadPhaseEntry& entry = entries[i];
+            const s32 threshold = static_cast<s32>(pickup->collisionRadius) + sphere.radius;
+
+            s32 deltaX = entry.x - pickup->pos.x;
+            if (deltaX < 0) {
+                deltaX = -deltaX;
+            }
+            if (deltaX >= threshold) {
+                continue;
+            }
+
+            s32 deltaZ = entry.z - pickup->pos.z;
+            if (deltaZ < 0) {
+                deltaZ = -deltaZ;
+            }
+            if (deltaZ >= threshold) {
+                continue;
+            }
+
+            Obstacle* obstacle = entry.obstacle;
+            if (CheckStaticBoxSphereCollision(
+                    obstacle->pos,
+                    obstacle->collBox,
+                    obstacle->orientation.y,
+                    pickup->pos,
+                    sphere)) {
+                {
+                    ObstacleMutationScope mutation;
+                    obstacle->HandlePickupCollision(pickup);
+                }
+                liveStart = static_cast<ccMinNode*>(static_cast<Thing*>(obstacle))->next;
+                break;
+            }
+        }
+        if (!liveStart) {
+            return;
+        }
+    }
+
+    for (ccMinNode* node = liveStart; node != nullptr; node = node->next) {
         Obstacle* obstacle = static_cast<Obstacle*>(static_cast<Thing*>(node));
         if ((obstacle->flags & TF_MODEL_CREATED) == 0) {
             continue;
@@ -600,6 +775,7 @@ void Obstacle::HandlePickupObstacleCollision(Pickup* pickup) {
                 obstacle->orientation.y,
                 pickup->pos,
                 sphere)) {
+            ObstacleMutationScope mutation;
             obstacle->HandlePickupCollision(pickup);
         }
     }
@@ -1172,84 +1348,116 @@ void Obstacle::HandleHumanoidObstacleCollision(Humanoid* hum) {
             exempt = 1;
         }
         if (!exempt) {
+            ObstacleMutationScope mutation;
             dt->Disembark();
         }
     }
 
     s32 pairCount = 0;
 
-    for (ccMinNode* node = g_ai->moveList.head; node != nullptr;) {
-        ccMinNode* next = node->next;
-        Obstacle* obs = static_cast<Obstacle*>((Thing*)node);
+    // Narrow phase for one obstacle that passed the integer broad-phase.
+    // Only pure queries are called here (no obstacle state changes).
+    auto narrowPhase = [&](Obstacle* obs) {
+        s32 physical = obs->GetPhysical();
 
-        if (obs->flags & TF_MODEL_CREATED) {
-            // Broad-phase: extent + cylinder radius
-            s32 threshold = (s32)obs->collBox.extent + humCyl.radius;
+        // Y range check
+        s32 dy = dt->homePos.y - obs->pos.y;
+        s32 yLow = (s32)obs->collBox.minY - humCyl.upperY;
+        s32 yHigh = (s32)obs->collBox.maxY - humCyl.lowerY;
+        bool yPass = (dy >= yLow && yHigh >= dy);
 
-            s32 dx = dt->homePos.x - obs->pos.x;
-            if (dx < 0) dx = -dx;
-
-            s32 dz = dt->homePos.z - obs->pos.z;
-            if (dz < 0) dz = -dz;
-
-            if (dx < threshold && dz < threshold) {
-                s32 physical = obs->GetPhysical();
-
-                // Y range check
-                s32 dy = dt->homePos.y - obs->pos.y;
-                s32 yLow = (s32)obs->collBox.minY - humCyl.upperY;
-                s32 yHigh = (s32)obs->collBox.maxY - humCyl.lowerY;
-                bool yPass = (dy >= yLow && yHigh >= dy);
-
+        if (CheckXZStaticBoxCylinderCollision(
+            obs->pos, obs->collBox, obs->orientation.y,
+            dt->homePos, humCyl)) {
+            // Floor height from physical obstacles
+            if (physical) {
                 if (CheckXZStaticBoxCylinderCollision(
                     obs->pos, obs->collBox, obs->orientation.y,
-                    dt->homePos, humCyl)) {
-                    // Floor height from physical obstacles
-                    if (physical) {
-                        if (CheckXZStaticBoxCylinderCollision(
-                            obs->pos, obs->collBox, obs->orientation.y,
-                            bonePos, footCyl)) {
-                            s32 floorH = obs->GetObstacleFloorHeight(bonePos);
-                            if (bestFloorHeight < floorH &&
-                                floorH < dt->homePos.y + humCyl.upperY) {
-                                bestFloorHeight = floorH;
-                            }
-                        }
-                    }
-
-                    // Distance-sorted pair insertion for HandleHumanoidCollision
-                    if (yPass) {
-                        s32 sortDist = GetXZStaticBoxCylinderCollisionSortDistance(
-                            obs->pos, obs->collBox, obs->orientation.y,
-                            hum->pos);
-
-                        if (pairCount < 8) {
-                            s32 insertIdx = pairCount;
-                            if (pairCount > 0) {
-                                s32 j = pairCount;
-                                while (j > 0) {
-                                    if (sortDist >= pairArray[j - 1].distance) {
-                                        break;
-                                    }
-                                    pairArray[j] = pairArray[j - 1];
-                                    j--;
-                                }
-                                insertIdx = j;
-                            }
-                            pairArray[insertIdx].distance = sortDist;
-                            pairArray[insertIdx].obstacle = obs;
-                            pairCount++;
-                        }
+                    bonePos, footCyl)) {
+                    s32 floorH = obs->GetObstacleFloorHeight(bonePos);
+                    if (bestFloorHeight < floorH &&
+                        floorH < dt->homePos.y + humCyl.upperY) {
+                        bestFloorHeight = floorH;
                     }
                 }
             }
-        }
 
-        node = next;
+            // Distance-sorted pair insertion for HandleHumanoidCollision
+            if (yPass) {
+                s32 sortDist = GetXZStaticBoxCylinderCollisionSortDistance(
+                    obs->pos, obs->collBox, obs->orientation.y,
+                    hum->pos);
+
+                if (pairCount < 8) {
+                    s32 insertIdx = pairCount;
+                    if (pairCount > 0) {
+                        s32 j = pairCount;
+                        while (j > 0) {
+                            if (sortDist >= pairArray[j - 1].distance) {
+                                break;
+                            }
+                            pairArray[j] = pairArray[j - 1];
+                            j--;
+                        }
+                        insertIdx = j;
+                    }
+                    pairArray[insertIdx].distance = sortDist;
+                    pairArray[insertIdx].obstacle = obs;
+                    pairCount++;
+                }
+            }
+        }
+    };
+
+    if (EnsureObstacleBroadPhase()) {
+        const s32 count = s_obstacleBroadPhaseCount;
+        const ObstacleBroadPhaseEntry* entries = s_obstacleBroadPhase;
+        const s32 homeX = dt->homePos.x;
+        const s32 homeZ = dt->homePos.z;
+        for (s32 i = 0; i < count; i++) {
+            const ObstacleBroadPhaseEntry& entry = entries[i];
+            // Broad-phase: extent + cylinder radius
+            s32 threshold = entry.extent + humCyl.radius;
+
+            s32 dx = homeX - entry.x;
+            if (dx < 0) dx = -dx;
+
+            s32 dz = homeZ - entry.z;
+            if (dz < 0) dz = -dz;
+
+            if (dx < threshold && dz < threshold) {
+                narrowPhase(entry.obstacle);
+            }
+        }
+    }
+    else {
+        for (ccMinNode* node = g_ai->moveList.head; node != nullptr;) {
+            ccMinNode* next = node->next;
+            Obstacle* obs = static_cast<Obstacle*>((Thing*)node);
+
+            if (obs->flags & TF_MODEL_CREATED) {
+                // Broad-phase: extent + cylinder radius
+                s32 threshold = (s32)obs->collBox.extent + humCyl.radius;
+
+                s32 dx = dt->homePos.x - obs->pos.x;
+                if (dx < 0) dx = -dx;
+
+                s32 dz = dt->homePos.z - obs->pos.z;
+                if (dz < 0) dz = -dz;
+
+                if (dx < threshold && dz < threshold) {
+                    narrowPhase(obs);
+                }
+            }
+
+            node = next;
+        }
     }
 
     // Process closest obstacle first, then re-check rest
     if (pairCount > 0) {
+        // HandleHumanoidCollision may move/kill obstacles (e.g. Pushable).
+        ObstacleMutationScope mutation;
         pairArray[0].obstacle->HandleHumanoidCollision(hum);
 
         for (s32 i = 1; i < pairCount; i++) {
@@ -1268,12 +1476,14 @@ void Obstacle::HandleHumanoidObstacleCollision(Humanoid* hum) {
     if (prevIssuer) {
         if (!curIssuer) {
             const LVector* obsPos = ((Obstacle*)prevIssuer)->GetDeltaVelocity();
+            ObstacleMutationScope mutation;
             dt->DisembarkObstacle(*obsPos);
             hum->LetGoOfLedge();
         }
         else {
             // PSX: vtable+80 = HandleLand(homePos.y) when transitioning to obstacle
             if (!wasOnObstacle) {
+                ObstacleMutationScope mutation;
                 hum->HandleLand(dt->homePos.y);
             }
             s32 mat = ((Obstacle*)curIssuer)->GetFloorMaterial();
@@ -1285,12 +1495,18 @@ void Obstacle::HandleHumanoidObstacleCollision(Humanoid* hum) {
         if (curIssuer) {
             // PSX: vtable+80 = HandleLand(homePos.y) when transitioning to obstacle
             if (!wasOnObstacle) {
+                ObstacleMutationScope mutation;
                 hum->HandleLand(dt->homePos.y);
             }
             s32 mat = ((Obstacle*)curIssuer)->GetFloorMaterial();
             hum->field436 = mat;
             hum->groundStandHeight = dt->homePos.y;
         }
+    }
+
+    // Conservative: any ticket transition path above made virtual calls.
+    if (prevIssuer || curIssuer) {
+        InvalidateObstacleBroadPhase();
     }
 }
 

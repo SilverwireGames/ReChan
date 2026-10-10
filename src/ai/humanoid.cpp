@@ -3784,7 +3784,9 @@ s32 Humanoid::CheckWallCollision(
         searchMax.z = endPos.z + radius;
     }
 
-    Wall* wallArray[64] = {};
+    // Only [0, wallCount) is read and FillWorldWallArray writes exactly those
+    // entries, so the array needs no zero-fill (saves a 256-byte clear/call).
+    Wall* wallArray[64];
     s32 wallCount = CollisionSector::FillWorldWallArray(searchMin, searchMax, wallArray, 64);
     if (wallCount > 64) {
         wallCount = 64;
@@ -3820,14 +3822,17 @@ s32 Humanoid::CheckDWOCollision(s16 angle, s32 distance) {
     }
 
     for (ccMinNode* node = g_ai->moveList.head; node; node = node->next) {
-        Obstacle* obstacle = dynamic_cast<Obstacle*>(static_cast<Thing*>(node));
-        if (!obstacle) {
+        // Test the plain Thing flag first; the accepted set and visit order
+        // are unchanged.  moveList only ever receives Obstacle subclasses
+        // (AI::AddThingNoTagList, type 201 / >= 402, single inheritance), so
+        // the former dynamic_cast<Obstacle*> never failed: static_cast gives
+        // the same pointer without the per-node RTTI walk.
+        Thing* thing = static_cast<Thing*>(node);
+        if ((thing->flags & TF_MODEL_CREATED) == 0) {
             continue;
         }
 
-        if ((obstacle->flags & TF_MODEL_CREATED) == 0) {
-            continue;
-        }
+        Obstacle* obstacle = static_cast<Obstacle*>(thing);
 
         if (!obstacle->GetPhysical()) {
             continue;

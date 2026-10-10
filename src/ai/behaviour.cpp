@@ -2086,7 +2086,12 @@ void Behaviour::Idle(Behaviour* self) {
         active = (activeZoneFromAttrib != nullptr) ? activeZoneFromAttrib->IsInActiveZone(Player::s_player) : false;
     }
 
-    if (owner->field392 != 0 || owner->field396 != 0 || owner->field400 != 0) {
+    // Sub-zone gate.  The lookups (FindNodeCRC list walks + box tests) are
+    // pure, so they are skipped when their result cannot matter: the block
+    // only computes "active && inSubZone" (nothing to do while active is
+    // already false; the field408 override below is independent), and
+    // "inSubZone || x" is true regardless of x.
+    if (active && (owner->field392 != 0 || owner->field396 != 0 || owner->field400 != 0)) {
         bool inSubZone = false;
 
         if (owner->field392 != 0) {
@@ -2094,12 +2099,12 @@ void Behaviour::Idle(Behaviour* self) {
             inSubZone = (sub != nullptr) ? sub->IsInSubZoneVolume(Player::s_player) : false;
         }
 
-        if (owner->field396 != 0) {
+        if (owner->field396 != 0 && !inSubZone) {
             SubZoneVolume* sub = static_cast<SubZoneVolume*>(ownerZone->subZoneList.FindNodeCRC((u32)owner->field396, nullptr));
             inSubZone = inSubZone || ((sub != nullptr) ? sub->IsInSubZoneVolume(Player::s_player) : false);
         }
 
-        if (owner->field400 != 0) {
+        if (owner->field400 != 0 && !inSubZone) {
             SubZoneVolume* sub = static_cast<SubZoneVolume*>(ownerZone->subZoneList.FindNodeCRC((u32)owner->field400, nullptr));
             inSubZone = inSubZone || ((sub != nullptr) ? sub->IsInSubZoneVolume(Player::s_player) : false);
         }
@@ -3302,15 +3307,39 @@ s32 Behaviour::NavigateEnemies(s32 mode) {
 
     navDecisionCounter++;
 
-    LVector ownerPos = owner->pos;
+    const LVector ownerPos = owner->pos;
     const s32 sideFieldAngle = owner->orientation.y - 0x4000;
-    s32 bias = 50;
 
-    if (aiParam != 0) {
-        ActiveZone* zone = owner->activeZone;
-        if (zone) {
-            for (s32 i = 0; i < 3; i++) {
-                Humanoid* other = zone->members[i];
+    // The side bias costs one atan2 + division per fighter (up to 11) but is
+    // only read on the ~1-in-51 decision steps, and there only when the roll
+    // reaches the "roll >= bias" test.  It is now computed at that point.
+    // Equivalent: the loop is pure (IsPointInFieldOf/rmATan216, no RNG) and
+    // nothing it reads changes in between -- only rmRangedRandom (global seed)
+    // and navDecision* are touched; position/orientation are captured above.
+    auto computeBias = [&]() -> s32 {
+        s32 bias = 50;
+        if (aiParam != 0) {
+            ActiveZone* zone = owner->activeZone;
+            if (zone) {
+                for (s32 i = 0; i < 3; i++) {
+                    Humanoid* other = zone->members[i];
+                    if (!other || other == owner) {
+                        continue;
+                    }
+
+                    if (IsPointInFieldOf(other->pos, ownerPos, sideFieldAngle, 0x4000, 0x4000)) {
+                        bias += 30;
+                    }
+                    else {
+                        bias -= 30;
+                    }
+                }
+            }
+        }
+        else {
+            Humanoid** humans = FightingCollision::GetHumanoidArray();
+            for (s32 i = 0; i < FIGHTING_COLLISION_MAX; i++) {
+                Humanoid* other = humans[i];
                 if (!other || other == owner) {
                     continue;
                 }
@@ -3323,23 +3352,8 @@ s32 Behaviour::NavigateEnemies(s32 mode) {
                 }
             }
         }
-    }
-    else {
-        Humanoid** humans = FightingCollision::GetHumanoidArray();
-        for (s32 i = 0; i < FIGHTING_COLLISION_MAX; i++) {
-            Humanoid* other = humans[i];
-            if (!other || other == owner) {
-                continue;
-            }
-
-            if (IsPointInFieldOf(other->pos, ownerPos, sideFieldAngle, 0x4000, 0x4000)) {
-                bias += 30;
-            }
-            else {
-                bias -= 30;
-            }
-        }
-    }
+        return bias;
+    };
 
     if (mode == 3) {
         if (navDecisionCounter >= 51) {
@@ -3348,7 +3362,7 @@ s32 Behaviour::NavigateEnemies(s32 mode) {
             if ((u32)(roll - 31) < 0x27u) {
                 navDecision = ((u32)(roll - 36) < 0x1Du) ? 5 : 4;
             }
-            else if (roll >= bias) {
+            else if (roll >= computeBias()) {
                 navDecision = 2;
             }
             else {
@@ -3373,7 +3387,7 @@ s32 Behaviour::NavigateEnemies(s32 mode) {
         if ((u32)(roll - 31) < 0x27u) {
             navDecision = ((u32)(roll - 41) < 0x13u) ? 5 : 4;
         }
-        else if (roll >= bias) {
+        else if (roll >= computeBias()) {
             navDecision = 2;
         }
         else {
@@ -3405,7 +3419,7 @@ s32 Behaviour::NavigateEnemies(s32 mode) {
     if ((u32)(roll - 41) < 0x13u) {
         navDecision = 5;
     }
-    else if (roll >= bias) {
+    else if (roll >= computeBias()) {
         navDecision = 2;
     }
     else {

@@ -50,6 +50,9 @@
 #include "ai/pushable.h"
 #include "ai/pendulum.h"
 #include "ai/table.h"
+#if defined(PSP_AUTOPLAY)
+#include "psp/psp_qa.h"
+#endif
 
 
 AI* g_ai = nullptr;
@@ -791,9 +794,13 @@ void AI::MoveThings() {
     // 3. Humanoid vs humanoid collision
     HandleHumanoidHumanoidCollision();
 
-    // 4. Obstacle collisions
+    // 4. Obstacle collisions.  The batch only lets these passes share a
+    // compact broad-phase snapshot of moveList (see obstacle.cpp); visit
+    // order and results are unchanged.
+    Obstacle::BeginCollisionPassBatch();
     MoveThingsObstacleCollisions();
     HandleHumanoidObstacleCollisions(humanoidList);
+    Obstacle::EndCollisionPassBatch();
 
     // 5. Pickup collisions
     MoveThingsPickupCollisions();
@@ -1281,18 +1288,21 @@ s32 AI::CheckObstacleAttack(
 
     s32 obstacleCount = 0;
     for (ccMinNode* node = moveList.head; node; node = node->next) {
-        Obstacle* obstacle = dynamic_cast<Obstacle*>(static_cast<Thing*>(node));
-        if (!obstacle) {
-            continue;
-        }
-
-        if (!obstacle->CareAboutAttack()) {
-            continue;
-        }
+        // Every moveList node is created by AddThingNoTagList's
+        // type 201 / >= 402 branch, all of which construct Obstacle
+        // subclasses (single inheritance), so the former dynamic_cast never
+        // returned null; static_cast yields the same pointer without the RTTI
+        // walk.  The pure distance test now runs before the virtual
+        // CareAboutAttack() (every override returns a constant).
+        Obstacle* obstacle = static_cast<Obstacle*>(static_cast<Thing*>(node));
 
         const s32 xzDistance = PsxAbsS32(obstacle->pos.x - humanoid->pos.x)
             + PsxAbsS32(obstacle->pos.z - humanoid->pos.z);
         if (xzDistance >= 2001) {
+            continue;
+        }
+
+        if (!obstacle->CareAboutAttack()) {
             continue;
         }
 
@@ -1499,5 +1509,8 @@ void aiPrivHandler(Handler* h) {
     MARKFUNCTION(0x800540E0);
     if (g_ai) {
         g_ai->MoveThings();
+#if defined(PSP_AUTOPLAY)
+        QaAutoplayTick();
+#endif
     }
 }

@@ -87,6 +87,9 @@ static void UploadRawTextureToWorldVRAM(s16 x, s16 y, s16 w, s16 h, const u8* ra
 #include <cstdlib>
 #include <unordered_map>
 #include <vector>
+#if defined(PSP_AUTOPLAY)
+#include "psp/psp_qa.h"
+#endif
 
 // Global block manager pointer (PSX: gp scope, set by World)
 BlockManager* g_blockManager = nullptr;
@@ -1673,6 +1676,11 @@ static s32 SwitchLevelComplete(Thing* thing, u32 argc, const char** argv) {
 
     s32* levelEnd = Director::GetLevelEndScript();
     if (g_director->codeSnipPtr != levelEnd) {
+#if defined(PSP_AUTOPLAY)
+        QaLog("level_complete argc=%lu boss=%s", (unsigned long)argc,
+              (argc && argv) ? QaName(argv[0]) : "-");
+        QaFlush();
+#endif
         g_director->SetCodeSnip(levelEnd, thing);
     }
 
@@ -5043,6 +5051,140 @@ static void DrawEntityList(ccList& list, u16 blockNum, u32 vramHandle) {
     }
 }
 
+#if defined(RC_PLATFORM_PSP)
+// PSP: pass 1 used to walk the four whole AI lists once per visible block
+// (O(blocks x things) pointer chasing). One counting-sort walk per list and
+// frame groups the things by visible block while keeping each list's order,
+// so every block still draws humanoids, inactive pickups, pickups and moves in
+// exactly the original sequence. Nothing in Thing::Draw paths adds/removes AI
+// list nodes; the blockNum is re-checked at draw time as a guard.
+namespace {
+constexpr u32 kPspEntityListCount = 4;
+constexpr u32 kPspEntityBlockTableSize = BLOCK_UNASSIGNED;  // valid block numbers are < 0x1000
+constexpr u8 kPspEntityNoSlot = 0xFFu;
+
+struct PspEntityBuckets {
+    std::vector<Thing*> things[kPspEntityListCount];
+    u32 start[kPspEntityListCount][kBlockManagerListCapacity + 1] = {};
+    u16 slotBlockNum[kBlockManagerListCapacity] = {};
+    u32 slotCount = 0;
+    bool ready = false;
+};
+
+PspEntityBuckets s_pspEntityBuckets;
+u8 s_pspEntityBlockSlot[kPspEntityBlockTableSize];
+bool s_pspEntityBlockSlotInit = false;
+
+u8 PspEntitySlotOf(u16 blockNum) {
+    return blockNum < kPspEntityBlockTableSize ? s_pspEntityBlockSlot[blockNum] : kPspEntityNoSlot;
+}
+
+void PspClearEntitySlots(PspEntityBuckets& buckets) {
+    for (u32 slot = 0; slot < buckets.slotCount; ++slot) {
+        s_pspEntityBlockSlot[buckets.slotBlockNum[slot]] = kPspEntityNoSlot;
+    }
+}
+
+// blockNums: visible blocks that are in the draw list (duplicates allowed).
+bool PspBuildEntityBuckets(const u16* blockNums, u32 blockCount, ccList* const* lists) {
+    PspEntityBuckets& buckets = s_pspEntityBuckets;
+    buckets.ready = false;
+    buckets.slotCount = 0;
+    if (!s_pspEntityBlockSlotInit) {
+        std::memset(s_pspEntityBlockSlot, kPspEntityNoSlot, sizeof(s_pspEntityBlockSlot));
+        s_pspEntityBlockSlotInit = true;
+    }
+
+    for (u32 i = 0; i < blockCount; ++i) {
+        const u16 bn = blockNums[i];
+        if (bn >= kPspEntityBlockTableSize || buckets.slotCount >= kBlockManagerListCapacity) {
+            PspClearEntitySlots(buckets);
+            buckets.slotCount = 0;
+            return false;
+        }
+        if (s_pspEntityBlockSlot[bn] == kPspEntityNoSlot) {
+            s_pspEntityBlockSlot[bn] = static_cast<u8>(buckets.slotCount);
+            buckets.slotBlockNum[buckets.slotCount++] = bn;
+        }
+    }
+
+    const u32 slotCount = buckets.slotCount;
+    for (u32 listIndex = 0; listIndex < kPspEntityListCount; ++listIndex) {
+        u32* start = buckets.start[listIndex];
+        for (u32 slot = 0; slot <= slotCount; ++slot) start[slot] = 0;
+
+        for (ccMinNode* n = lists[listIndex]->head; n; n = n->next) {
+            const u8 slot = PspEntitySlotOf(static_cast<Thing*>(n)->blockNum);
+            if (slot != kPspEntityNoSlot) ++start[slot + 1u];
+        }
+        for (u32 slot = 0; slot < slotCount; ++slot) start[slot + 1u] += start[slot];
+
+        std::vector<Thing*>& things = buckets.things[listIndex];
+        things.resize(start[slotCount]);
+        u32 cursor[kBlockManagerListCapacity];
+        for (u32 slot = 0; slot < slotCount; ++slot) cursor[slot] = start[slot];
+        for (ccMinNode* n = lists[listIndex]->head; n; n = n->next) {
+            Thing* thing = static_cast<Thing*>(n);
+            const u8 slot = PspEntitySlotOf(thing->blockNum);
+            if (slot != kPspEntityNoSlot) things[cursor[slot]++] = thing;
+        }
+    }
+
+    PspClearEntitySlots(buckets);
+    buckets.ready = true;
+    return true;
+}
+
+u32 PspFindEntityBucketSlot(u16 blockNum) {
+    const PspEntityBuckets& buckets = s_pspEntityBuckets;
+    for (u32 slot = 0; slot < buckets.slotCount; ++slot) {
+        if (buckets.slotBlockNum[slot] == blockNum) return slot;
+    }
+    return kPspEntityNoSlot;
+}
+}  // namespace
+
+// Same per-thing body as DrawEntityList, fed from the frame's bucket.
+static void DrawEntityListForBlock(u32 listIndex, ccList& list, u16 blockNum, u32 vramHandle) {
+    const PspEntityBuckets& buckets = s_pspEntityBuckets;
+    const u32 slot = buckets.ready ? PspFindEntityBucketSlot(blockNum) : kPspEntityNoSlot;
+    if (slot == kPspEntityNoSlot) {
+        DrawEntityList(list, blockNum, vramHandle);
+        return;
+    }
+
+    PspPerf::ScopeTimer entityTimer(PspPerf::RendererCounter::EntitiesUs);
+    MARKFUNCTION(0x8002B224);
+    const std::vector<Thing*>& things = buckets.things[listIndex];
+    const u32 end = buckets.start[listIndex][slot + 1u];
+    for (u32 index = buckets.start[listIndex][slot]; index < end; ++index) {
+        Thing* thing = things[index];
+        if (thing->blockNum != blockNum) continue;
+#if !defined(NDEBUG)
+        if (s_pspWorldRenderProbe) {
+            LOG("[PSP World] entity begin block=%u thing=%p type=%u model=%p",
+                static_cast<unsigned>(blockNum), static_cast<void*>(thing),
+                static_cast<unsigned>(thing->thingType), thing->model);
+        }
+#endif
+        p3d::context->SetVRAMHandle(vramHandle);
+        p3d::context->SetTexInfoOverride(false, 0);
+        thing->Draw();
+#if !defined(NDEBUG)
+        if (s_pspWorldRenderProbe) {
+            LOG("[PSP World] entity done block=%u thing=%p type=%u",
+                static_cast<unsigned>(blockNum), static_cast<void*>(thing),
+                static_cast<unsigned>(thing->thingType));
+        }
+#endif
+    }
+}
+#else
+static void DrawEntityListForBlock(u32 /*listIndex*/, ccList& list, u16 blockNum, u32 vramHandle) {
+    DrawEntityList(list, blockNum, vramHandle);
+}
+#endif
+
 #if MODERN_GRAPHICS
 static void DrawEntityCasterList(ccList& list, u16 blockNum, u32 vramHandle) {
     for (ccMinNode* n = list.head; n; n = n->next) {
@@ -5235,6 +5377,21 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("world render: pass1 begin");
 #endif
+#if defined(RC_PLATFORM_PSP) && !defined(PSP_STAGE_SKIP_ENTITIES)
+    if (g_ai) {
+        PspPerf::ScopeTimer entityTimer(PspPerf::RendererCounter::EntitiesUs);
+        u16 pspEntityBlocks[kBlockManagerListCapacity];
+        u32 pspEntityBlockCount = 0;
+        for (u32 i = 0; i < visibleCount; i++) {
+            const u16 bn = drawArray[i].block->blockNum;
+            if (blockMgr.InDrawList(bn)) pspEntityBlocks[pspEntityBlockCount++] = bn;
+        }
+        ccList* const pspEntityLists[4] = {
+            &g_ai->humanoidList, &g_ai->inactivePickupList, &g_ai->pickupList, &g_ai->moveList
+        };
+        PspBuildEntityBuckets(pspEntityBlocks, pspEntityBlockCount, pspEntityLists);
+    }
+#endif
     for (u32 i = 0; i < visibleCount; i++) {
         DrawEntry& entry = drawArray[i];
 #if defined(PSP_STAGE_DIAGNOSTIC)
@@ -5293,28 +5450,28 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
                 if (probePspWorldRender) LOG("[PSP World] humanoids begin block=%u", static_cast<unsigned>(bn));
 #endif
-                DrawEntityList(g_ai->humanoidList, bn, vramHandle);
+                DrawEntityListForBlock(0u, g_ai->humanoidList, bn, vramHandle);
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
                 if (probePspWorldRender) LOG("[PSP World] humanoids done block=%u", static_cast<unsigned>(bn));
 #endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: humanoids done");
 #endif
-                DrawEntityList(g_ai->inactivePickupList, bn, vramHandle);
+                DrawEntityListForBlock(1u, g_ai->inactivePickupList, bn, vramHandle);
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
                 if (probePspWorldRender) LOG("[PSP World] inactive done block=%u", static_cast<unsigned>(bn));
 #endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: inactive pickups done");
 #endif
-                DrawEntityList(g_ai->pickupList, bn, vramHandle);
+                DrawEntityListForBlock(2u, g_ai->pickupList, bn, vramHandle);
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)
                 if (probePspWorldRender) LOG("[PSP World] pickups done block=%u", static_cast<unsigned>(bn));
 #endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
                 PspPerf::Trace("world render: pickups done");
 #endif
-                DrawEntityList(g_ai->moveList, bn, vramHandle);
+                DrawEntityListForBlock(3u, g_ai->moveList, bn, vramHandle);
 #if defined(PSP_STAGE_DIAGNOSTIC)
                 if (pspStageWorldCall < 4u && i < 8u) {
                     Log::Get().LogMessage("[PSP Stage] entities done call=%lu block=%u", static_cast<unsigned long>(pspStageWorldCall), static_cast<unsigned>(bn));
@@ -5395,6 +5552,9 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
     }
 
     EndModelShadowQueue();
+#if defined(RC_PLATFORM_PSP)
+    s_pspEntityBuckets.ready = false;
+#endif
 #if defined(PSP_STAGE_DIAGNOSTIC)
     if (pspStageWorldCall < 4u) {
         Log::Get().LogMessage("[PSP Stage] pass1 done call=%lu", static_cast<unsigned long>(pspStageWorldCall));
@@ -5411,6 +5571,17 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
     // cross-block overdraw from clipping effects drawn earlier in the frame.
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("world render: pass2 begin");
+#endif
+#if defined(RC_PLATFORM_PSP)
+    {
+        s32 pspEffectBlocks[kBlockManagerListCapacity];
+        u32 pspEffectBlockCount = 0;
+        for (u32 i = 0; i < visibleCount; i++) {
+            const u16 bn = drawArray[i].block->blockNum;
+            if (blockMgr.InDrawList(bn)) pspEffectBlocks[pspEffectBlockCount++] = static_cast<s32>(bn);
+        }
+        Effects_BeginBlockBuckets(pspEffectBlocks, pspEffectBlockCount);
+    }
 #endif
     for (u32 i = 0; i < visibleCount; i++) {
         DrawEntry& entry = drawArray[i];
@@ -5449,6 +5620,9 @@ void World::DrawEverythingHandler(const LVector* playerPos) {
         Effects_DrawEffects(static_cast<s32>(bn));
         ComEffect_SetSeamOffset(0, 0, 0);
     }
+#if defined(RC_PLATFORM_PSP)
+    Effects_EndBlockBuckets();
+#endif
     ComEffect_ClearLateRenderQueue();
 #if defined(PSP_STAGE_DIAGNOSTIC)
     if (pspStageWorldCall < 4u) {

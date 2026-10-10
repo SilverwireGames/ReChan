@@ -40,6 +40,16 @@ s32 Effects_UpdateAll();
 // PSX: DrawEffects__7Effectsi (EFFECTS.CPP:207, 0x8004C8BC)
 s32 Effects_DrawEffects(s32 blockNum);
 
+#if defined(RC_PLATFORM_PSP)
+// PSP: World pass 2 calls Effects_DrawEffects once per visible block, which
+// walked the whole effect list each time. Between Begin/End the list is
+// grouped once by block (list order preserved per block) and
+// Effects_DrawEffects(blockNum) for a grouped block visits only its bucket,
+// applying the same per-effect checks. Other block numbers use the full walk.
+void Effects_BeginBlockBuckets(const s32* blockNums, u32 blockCount);
+void Effects_EndBlockBuckets();
+#endif
+
 // PSX: AddEffect__7Effectsi (EFFECTS.CPP:279, 0x8004C9D8)
 s32 Effects_AddEffect(Effects* effect, s32 addToHead);
 

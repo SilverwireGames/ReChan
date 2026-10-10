@@ -69,6 +69,14 @@ public:
     static s32 StaticGetObstacleFloorHeight(const LVector& pos);
     static void HandlePickupObstacleCollision(Pickup* pickup);
     static void HandleHumanoidObstacleCollision(Humanoid* hum);
+
+    // Pure-cost broad-phase cache for the per-step pickup/humanoid vs
+    // obstacle passes (AI::MoveThings).  Inside a batch the two functions
+    // above scan a compact {x, z, extent} snapshot of the model-created
+    // moveList nodes instead of chasing every Obstacle object; the snapshot
+    // is dropped whenever a call that may change obstacle state runs.
+    static void BeginCollisionPassBatch();
+    static void EndCollisionPassBatch();
 };
 
 // Global zero delta velocity (PSX: 0x800CE818)

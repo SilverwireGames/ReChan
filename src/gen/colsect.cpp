@@ -4,9 +4,164 @@
 #include "gen/colwall.h"
 #include "gen/colfloor.h"
 #include "p3d/p3dmath.h"
+#include <new>
 
 // PSX: 12 collision sectors (demand-loaded). PC: 128 to cover all blocks at once.
 CollisionSector g_collisionSectors[MAX_COLLISION_SECTORS];
+
+// ---------------------------------------------------------------------------
+// Query acceleration (pure cost, identical results).
+//
+// The world queries below used to visit all 128 sector slots and, inside each
+// overlapping sector, read the XZ box of every wall (56-byte stride) and floor
+// (80-byte stride).  Per humanoid and step that touched ~90 cache lines of
+// sector headers plus one line per wall/floor.  Load() now records, per slot,
+// a compact copy of the four box words of each wall/floor and an ordered list of loaded slots with their bounds.
+// The boxes are stored as s16 (8 bytes, eight per cache line, ~8 B of RAM per
+// wall/floor); a sector with any box word outside s16 keeps the strided path,
+// so the widened comparison is always exact.
+//
+// Equivalence:
+//  * Slots that never went through Load() (or were Zero()ed since) hold the
+//    Zero() state: no walls/floors and inverted bounds, so they never add an
+//    entry nor contain a point.  Skipping them changes nothing.
+//  * The active list is rebuilt in slot-index order, so sectors, walls and
+//    floors are still visited in exactly the original order (this matters for
+//    the 64-entry truncation and for the returned counts).
+//  * Sector bounds, wall and floor boxes are only written by Load()/Zero(),
+//    which refresh the copies; the collision records themselves are immutable
+//    after Load (PSP: Block-owned copy, PC: const archive data).
+//  * status is still checked at query time, after the (pure) bounds test.
+//  * If the compact allocation fails the original strided reads are used.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct CollisionBox {
+    s16 w0; // wall: xBound1 | floor: xMin (+64)
+    s16 w1; // wall: zBound1 | floor: zMin (+68)
+    s16 w2; // wall: xBound2 | floor: xMax (+72)
+    s16 w3; // wall: zBound2 | floor: zMax (+76)
+};
+static_assert(sizeof(CollisionBox) == 8, "compact collision box must stay 8 bytes");
+
+bool FitsS16(s32 value) {
+    return value >= -32768 && value <= 32767;
+}
+
+struct ActiveSector {
+    s32 minX, maxX, minY, maxY, minZ, maxZ;
+    CollisionSector* sector;
+    const CollisionBox* wallBoxes;  // nullptr: read the Wall records
+    const CollisionBox* floorBoxes; // nullptr: read the 80-byte floor records
+};
+
+bool s_sectorLoaded[MAX_COLLISION_SECTORS];
+CollisionBox* s_sectorBoxes[MAX_COLLISION_SECTORS];
+bool s_sectorBoxesValid[MAX_COLLISION_SECTORS];
+ActiveSector s_activeSectors[MAX_COLLISION_SECTORS];
+s32 s_activeSectorCount = 0;
+
+constexpr u32 kFloorRecordStride = 80;
+constexpr u32 kFloorBoxOffset = 64;
+
+s32 SectorSlot(const CollisionSector* sector) {
+    const CollisionSector* base = &g_collisionSectors[0];
+    if (sector < base || sector >= base + MAX_COLLISION_SECTORS) {
+        return -1;
+    }
+    return static_cast<s32>(sector - base);
+}
+
+void RebuildActiveSectors() {
+    s32 count = 0;
+    for (s32 slot = 0; slot < MAX_COLLISION_SECTORS; slot++) {
+        if (!s_sectorLoaded[slot]) {
+            continue;
+        }
+        CollisionSector* sector = &g_collisionSectors[slot];
+        ActiveSector& entry = s_activeSectors[count++];
+        entry.minX = sector->boundsMin.x;
+        entry.maxX = sector->boundsMax.x;
+        entry.minY = sector->boundsMin.y;
+        entry.maxY = sector->boundsMax.y;
+        entry.minZ = sector->boundsMin.z;
+        entry.maxZ = sector->boundsMax.z;
+        entry.sector = sector;
+        const CollisionBox* boxes = s_sectorBoxesValid[slot] ? s_sectorBoxes[slot] : nullptr;
+        // A valid table with no entries is still "compact" (zero iterations).
+        static const CollisionBox kEmpty = {};
+        if (s_sectorBoxesValid[slot] && !boxes) {
+            boxes = &kEmpty;
+        }
+        entry.wallBoxes = boxes;
+        entry.floorBoxes = boxes ? boxes + sector->wallCount : nullptr;
+    }
+    s_activeSectorCount = count;
+}
+
+void ReleaseSectorBoxes(s32 slot) {
+    delete[] s_sectorBoxes[slot];
+    s_sectorBoxes[slot] = nullptr;
+    s_sectorBoxesValid[slot] = false;
+}
+
+void BuildSectorBoxes(s32 slot, const CollisionSector* sector) {
+    ReleaseSectorBoxes(slot);
+    const u32 total = sector->wallCount + sector->floorCount;
+    if (total < sector->wallCount) {
+        return; // overflow: keep strided reads
+    }
+    if (total == 0) {
+        s_sectorBoxesValid[slot] = true;
+        return;
+    }
+    const u8* floorBase = reinterpret_cast<const u8*>(sector->floors);
+    for (u32 i = 0; i < sector->wallCount; i++) {
+        const Wall& wall = sector->walls[i];
+        if (!FitsS16(wall.xBound1) || !FitsS16(wall.zBound1)
+            || !FitsS16(wall.xBound2) || !FitsS16(wall.zBound2)) {
+            return; // keep strided reads for this sector
+        }
+    }
+    for (u32 i = 0; i < sector->floorCount; i++) {
+        const s32* floorBounds = reinterpret_cast<const s32*>(
+            floorBase + i * kFloorRecordStride + kFloorBoxOffset);
+        if (!FitsS16(floorBounds[0]) || !FitsS16(floorBounds[1])
+            || !FitsS16(floorBounds[2]) || !FitsS16(floorBounds[3])) {
+            return;
+        }
+    }
+
+    CollisionBox* boxes = new (std::nothrow) CollisionBox[total];
+    if (!boxes) {
+        return;
+    }
+    for (u32 i = 0; i < sector->wallCount; i++) {
+        const Wall& wall = sector->walls[i];
+        boxes[i].w0 = static_cast<s16>(wall.xBound1);
+        boxes[i].w1 = static_cast<s16>(wall.zBound1);
+        boxes[i].w2 = static_cast<s16>(wall.xBound2);
+        boxes[i].w3 = static_cast<s16>(wall.zBound2);
+    }
+    for (u32 i = 0; i < sector->floorCount; i++) {
+        const s32* floorBounds = reinterpret_cast<const s32*>(
+            floorBase + i * kFloorRecordStride + kFloorBoxOffset);
+        CollisionBox& box = boxes[sector->wallCount + i];
+        box.w0 = static_cast<s16>(floorBounds[0]);
+        box.w1 = static_cast<s16>(floorBounds[1]);
+        box.w2 = static_cast<s16>(floorBounds[2]);
+        box.w3 = static_cast<s16>(floorBounds[3]);
+    }
+    s_sectorBoxes[slot] = boxes;
+    s_sectorBoxesValid[slot] = true;
+}
+
+} // namespace
+
+static s32 FloorQueryImpl(
+    Floor** floorArray, s32 count, const LVector* pos, s32 radius, bool details,
+    s32* outCeilingH, LVector* outFloorNormal, LVector* outCeilingNormal,
+    s32* outHasRailing, LVector* outRailCorrection);
 
 // Scratch buffer for floor pointer collection (PSX: 0x800DFD58, capacity 64)
 static Floor* g_floorPtrScratch[64];
@@ -37,6 +192,13 @@ void CollisionSector::Zero() {
     walls = nullptr;
     floorCount = 0;
     floors = nullptr;
+
+    const s32 slot = SectorSlot(this);
+    if (slot >= 0 && (s_sectorLoaded[slot] || s_sectorBoxes[slot])) {
+        ReleaseSectorBoxes(slot);
+        s_sectorLoaded[slot] = false;
+        RebuildActiveSectors();
+    }
 }
 
 // PSX: Load__15CollisionSectorPUl (COLSECT.CPP:1601) 0x800422C0
@@ -55,6 +217,13 @@ void CollisionSector::Load(u32* data) {
     walls = (Wall*)&data[12];      // data+48 (inline wall data)
     // Floor data follows walls: each wall is 56 bytes = 14 u32s
     floors = (Floor*)((u8*)walls + wallCount * 56);
+
+    const s32 slot = SectorSlot(this);
+    if (slot >= 0) {
+        BuildSectorBoxes(slot, this);
+        s_sectorLoaded[slot] = true;
+        RebuildActiveSectors();
+    }
 }
 
 // PSX: Unload__15CollisionSector (COLSECT.CPP:445) 0x800422A0
@@ -69,8 +238,16 @@ s32 CollisionSector::GetBlockNumber(const LVector& pos) {
 
     s32 blockNum = -1;
 
-    for (s32 sectorIdx = 0; sectorIdx < MAX_COLLISION_SECTORS; sectorIdx++) {
-        const CollisionSector* sector = &g_collisionSectors[sectorIdx];
+    // Same slot order as the 0..127 scan; the (pure) containment test now runs
+    // before the IsValidBlockNumber list walk, which only matters for slots
+    // that contain pos.
+    for (s32 activeIdx = 0; activeIdx < s_activeSectorCount; activeIdx++) {
+        const ActiveSector& entry = s_activeSectors[activeIdx];
+        if (!(pos.x >= entry.minX && entry.maxX >= pos.x)) continue;
+        if (!(pos.y >= entry.minY && entry.maxY >= pos.y)) continue;
+        if (!(pos.z >= entry.minZ && entry.maxZ >= pos.z)) continue;
+
+        const CollisionSector* sector = entry.sector;
         if (sector->status == -1) {
             continue;
         }
@@ -80,18 +257,7 @@ s32 CollisionSector::GetBlockNumber(const LVector& pos) {
             continue;
         }
 
-        bool inside = false;
-        if (pos.x >= sector->boundsMin.x && sector->boundsMax.x >= pos.x) {
-            if (pos.y >= sector->boundsMin.y && sector->boundsMax.y >= pos.y) {
-                if (pos.z >= sector->boundsMin.z && sector->boundsMax.z >= pos.z) {
-                    inside = true;
-                }
-            }
-        }
-
-        if (inside) {
-            blockNum = sector->status;
-        }
+        blockNum = sector->status;
     }
 
     return blockNum;
@@ -102,15 +268,22 @@ s32 CollisionSector::GetBlockNumber(const LVector& pos) {
 s32 CollisionSector::GetWorldFloorHeight(const LVector& pos, s32 radius) {
     MARKFUNCTION(0x800417B8);
 
-    s32 floorHeight;
-    s32 ceilingHeight;
-    LVector floorNormal;
-    LVector ceilingNormal;
+    // Same search box and floor scan as GetWorldFloorAndCeilingHeight; the
+    // discarded normal/ceiling/railing outputs are simply not computed.
+    LVector searchMin = {};
+    searchMin.x = pos.x - radius;
+    searchMin.y = pos.y;
+    searchMin.z = pos.z - radius;
+    LVector searchMax = {};
+    searchMax.x = pos.x + radius;
+    searchMax.y = pos.y;
+    searchMax.z = pos.z + radius;
 
-    GetWorldFloorAndCeilingHeight(floorHeight, ceilingHeight,
-                                  floorNormal, ceilingNormal, pos, radius);
+    s32 count = FillWorldFloorArray(searchMin, searchMax, g_floorPtrScratch, 64);
+    if (count > 64) count = 64;
 
-    return floorHeight;
+    return FloorQueryImpl(g_floorPtrScratch, count, &pos, radius, false,
+                          nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // PSX: (COLSECT.CPP:1142) 0x800417F0
@@ -153,18 +326,42 @@ s32 CollisionSector::FillWorldFloorArray(
     MARKFUNCTION(0x80041980);
 
     s32 totalAdded = 0;
+    const s32 sMinX = searchMin.x;
+    const s32 sMinZ = searchMin.z;
+    const s32 sMaxX = searchMax.x;
+    const s32 sMaxZ = searchMax.z;
 
-    for (s32 sectorIdx = 0; sectorIdx < MAX_COLLISION_SECTORS; sectorIdx++) {
-        CollisionSector* sector = &g_collisionSectors[sectorIdx];
-        if (sector->status == -1) continue;
+    for (s32 activeIdx = 0; activeIdx < s_activeSectorCount; activeIdx++) {
+        const ActiveSector& entry = s_activeSectors[activeIdx];
 
         // AABB overlap test between search box and sector bounds
-        if (searchMax.x < sector->boundsMin.x) continue;
-        if (sector->boundsMax.x < searchMin.x) continue;
-        if (searchMax.z < sector->boundsMin.z) continue;
-        if (sector->boundsMax.z < searchMin.z) continue;
+        if (sMaxX < entry.minX) continue;
+        if (entry.maxX < sMinX) continue;
+        if (sMaxZ < entry.minZ) continue;
+        if (entry.maxZ < sMinZ) continue;
 
-        // Iterate floors in this sector
+        CollisionSector* sector = entry.sector;
+        if (sector->status == -1) continue;
+
+        if (const CollisionBox* boxes = entry.floorBoxes) {
+            u8* floorBase = (u8*)sector->floors;
+            const u32 floorCount = sector->floorCount;
+            for (u32 i = 0; i < floorCount; i++) {
+                const CollisionBox& box = boxes[i];
+                if (sMaxX < box.w0) continue;
+                if (box.w2 < sMinX) continue;
+                if (sMaxZ < box.w1) continue;
+                if (box.w3 < sMinZ) continue;
+
+                if (totalAdded < maxCount) {
+                    outArray[totalAdded] = (Floor*)(floorBase + i * kFloorRecordStride);
+                }
+                totalAdded++;
+            }
+            continue;
+        }
+
+        // Fallback (compact table unavailable): iterate floors in this sector
         // PSX: floor entries are 80 bytes (64B Floor + 16B AABB) in the data stream
         // but our Floor struct is 64B; the AABB bounds are at offsets +64..+76 past each entry
         u8* floorBase = (u8*)sector->floors;
@@ -192,34 +389,67 @@ s32 CollisionSector::FillWorldFloorArray(
     return totalAdded;
 }
 
-// PSX: (COLSECT.CPP:1271) 0x80041ADC
-// Scan collected floors for best floor height, ceiling height, and railing corrections
-void CollisionSector::GetArrayFloorAndCeilingHeight(
-    Floor** floorArray, s32 count,
-    s32& outFloorH, s32& outCeilingH,
-    LVector& outFloorNormal, LVector& outCeilingNormal,
-    s32* outHasRailing, LVector* outRailCorrection,
-    const LVector* pos, s32 radius) {
-    MARKFUNCTION(0x80041ADC);
+// Shared body of GetArrayFloorAndCeilingHeight.  With details == false only
+// the floor height is produced (normal, ceiling-normal and railing outputs are
+// not computed); the returned floor height is the same in both modes because
+// passes 1-2 are identical and pass 3 never changes v12/v17.
+static s32 FloorQueryImpl(
+    Floor** floorArray, s32 count, const LVector* pos, s32 radius, bool details,
+    s32* outCeilingH, LVector* outFloorNormal, LVector* outCeilingNormal,
+    s32* outHasRailing, LVector* outRailCorrection) {
 
     // PSX: v12 = lowest walkable ceiling above test pos
     //      v13 = lowest secondary ceiling above test pos
     s32 v12 = 0x7FFFFFFF;
     s32 v13 = 0x7FFFFFFF;
 
+    // Pure-cost restructuring (identical outputs):
+    //  * GetFloorHeight/CheckFloorBounds are pure, so each is evaluated at
+    //    most once per floor here (heights from pass 1 are reused, bounds are
+    //    memoised) and the cheap height/flag tests run before the bounds test
+    //    whenever the bounds result could not change the outcome.
+    //  * Pass 2 used to normalise the floor normal (integer sqrt + division)
+    //    on every improvement; only the last improvement is observable, so it
+    //    is normalised once after the pass.  Pass 3 likewise keeps only the
+    //    last railing correction.
+    // Callers clamp count to 64; larger arrays just bypass the memo.
+    constexpr s32 kMemo = 64;
+    s32 heights[kMemo];
+    s8 boundsMemo[kMemo];
+    const LVector& p = *pos;
+    auto heightAt = [&](s32 i) -> s32 {
+        return (i < kMemo) ? heights[i] : floorArray[i]->GetFloorHeight(p);
+    };
+    auto inBounds = [&](s32 i) -> bool {
+        if (i >= kMemo) {
+            return floorArray[i]->CheckFloorBounds(p, radius) != 0;
+        }
+        if (boundsMemo[i] < 0) {
+            boundsMemo[i] = floorArray[i]->CheckFloorBounds(p, radius) ? 1 : 0;
+        }
+        return boundsMemo[i] != 0;
+    };
+
     // Pass 1: find lowest surfaces ABOVE the test position
     // PSX condition: a9[1] < h  (pos->y < floorHeight)
+    // Original: if (pos.y < h && bounds) { if (f&1 && h<v12) v12=h;
+    //                                       else if (f&2 && h<v13) v13=h; }
+    const s32 posY = p.y;
     for (s32 i = 0; i < count; i++) {
         Floor* floor = floorArray[i];
-        s32 h = floor->GetFloorHeight(*pos);
+        s32 h = floor->GetFloorHeight(p);
+        if (i < kMemo) {
+            heights[i] = h;
+            boundsMemo[i] = -1;
+        }
 
-        if (pos->y < h && floor->CheckFloorBounds(*pos, radius)) {
-            if ((floor->flags & 1) && h < v12) {
-                v12 = h;
-            }
-            else if (((floor->flags >> 1) & 1) && h < v13) {
-                v13 = h;
-            }
+        if (!(posY < h)) continue;
+        const u16 flags = floor->flags;
+        if ((flags & 1) && h < v12) {
+            if (inBounds(i)) v12 = h;
+        }
+        else if (((flags >> 1) & 1) && h < v13) {
+            if (inBounds(i)) v13 = h;
         }
     }
 
@@ -229,44 +459,68 @@ void CollisionSector::GetArrayFloorAndCeilingHeight(
 
     // Pass 2: find highest walkable floor BELOW the ceiling (v12)
     s32 v17 = (s32)0x80000001;
+    const Floor* bestFloor = nullptr;
     for (s32 i = 0; i < count; i++) {
-        Floor* floor = floorArray[i];
+        const Floor* floor = floorArray[i];
 
-        bool walkable = (floor->flags & 1) != 0;
-        bool noRailing = ((floor->flags >> 2) & 1) == 0;
+        const u16 flags = floor->flags;
+        bool walkable = (flags & 1) != 0;
+        bool noRailing = ((flags >> 2) & 1) == 0;
         if (!(walkable && noRailing)) continue;
 
-        if (!floor->CheckFloorBounds(*pos, radius)) continue;
+        s32 h = heightAt(i);
+        if (!(h < v12 && v17 < h)) continue;
+        if (!inBounds(i)) continue;
 
-        s32 h = floor->GetFloorHeight(*pos);
-        if (h < v12 && v17 < h) {
-            v17 = h;
-            floor->GetFloorNormal(outFloorNormal);
-            outCeilingNormal.x = (s32)(u16)floor->field0C;
-        }
+        v17 = h;
+        bestFloor = floor;
+    }
+    if (!details) {
+        return (v17 <= (s32)0x80000001) ? (s32)0x80000001 : v17;
+    }
+    if (bestFloor) {
+        bestFloor->GetFloorNormal(*outFloorNormal);
+        outCeilingNormal->x = (s32)(u16)bestFloor->field0C;
     }
 
     // Pass 3: check railing floors for correction
     *outHasRailing = 0;
+    const Floor* railingFloor = nullptr;
     for (s32 i = 0; i < count; i++) {
-        Floor* floor = floorArray[i];
+        const Floor* floor = floorArray[i];
 
-        bool walkable = (floor->flags & 1) != 0;
-        bool hasRailing = ((floor->flags >> 2) & 1) != 0;
+        const u16 flags = floor->flags;
+        bool walkable = (flags & 1) != 0;
+        bool hasRailing = ((flags >> 2) & 1) != 0;
         if (!(walkable && hasRailing)) continue;
 
-        if (!floor->CheckFloorBounds(*pos, radius)) continue;
+        s32 h = heightAt(i);
+        if (!(h < v12 && v17 < h)) continue;
+        if (!inBounds(i)) continue;
 
-        s32 h = floor->GetFloorHeight(*pos);
-        if (h < v12 && v17 < h) {
-            *outHasRailing = 1;
-            floor->GetRailingCorrection(*outRailCorrection, *pos);
-        }
+        railingFloor = floor;
+    }
+    if (railingFloor) {
+        *outHasRailing = 1;
+        railingFloor->GetRailingCorrection(*outRailCorrection, p);
     }
 
     // PSX output: a3 = v17 (floor to stand on), a4 = v13 (secondary ceiling)
-    outFloorH = (v17 <= (s32)0x80000001) ? (s32)0x80000001 : v17;
-    outCeilingH = (v13 == 0x7FFFFFFF) ? 0x7FFFFFFF : v13;
+    *outCeilingH = (v13 == 0x7FFFFFFF) ? 0x7FFFFFFF : v13;
+    return (v17 <= (s32)0x80000001) ? (s32)0x80000001 : v17;
+}
+
+// PSX: (COLSECT.CPP:1271) 0x80041ADC
+// Scan collected floors for best floor height, ceiling height, and railing corrections
+void CollisionSector::GetArrayFloorAndCeilingHeight(
+    Floor** floorArray, s32 count,
+    s32& outFloorH, s32& outCeilingH,
+    LVector& outFloorNormal, LVector& outCeilingNormal,
+    s32* outHasRailing, LVector* outRailCorrection,
+    const LVector* pos, s32 radius) {
+    MARKFUNCTION(0x80041ADC);
+    outFloorH = FloorQueryImpl(floorArray, count, pos, radius, true,
+        &outCeilingH, &outFloorNormal, &outCeilingNormal, outHasRailing, outRailCorrection);
 }
 
 // PSX: LedgePrototype__15CollisionSectorRC10tagLVectorT1llR9_RMVECT16R10tagLVectorRll (COLSECT.CPP:1403)
@@ -443,20 +697,44 @@ s32 CollisionSector::FillWorldWallArray(
     MARKFUNCTION(0x800411F8);
 
     s32 totalAdded = 0;
+    const s32 sMinX = searchMin.x;
+    const s32 sMinZ = searchMin.z;
+    const s32 sMaxX = searchMax.x;
+    const s32 sMaxZ = searchMax.z;
 
-    for (s32 sectorIdx = 0; sectorIdx < MAX_COLLISION_SECTORS; sectorIdx++) {
-        CollisionSector* sector = &g_collisionSectors[sectorIdx];
-        if (sector->status == -1) continue;
+    for (s32 activeIdx = 0; activeIdx < s_activeSectorCount; activeIdx++) {
+        const ActiveSector& entry = s_activeSectors[activeIdx];
 
         // 6-axis AABB overlap test (sector bounds vs search box)
-        if (searchMax.x < sector->boundsMin.x) continue;
-        if (sector->boundsMax.x < searchMin.x) continue;
-        if (searchMax.y < sector->boundsMin.y) continue;
-        if (sector->boundsMax.y < searchMin.y) continue;
-        if (searchMax.z < sector->boundsMin.z) continue;
-        if (sector->boundsMax.z < searchMin.z) continue;
+        if (sMaxX < entry.minX) continue;
+        if (entry.maxX < sMinX) continue;
+        if (searchMax.y < entry.minY) continue;
+        if (entry.maxY < searchMin.y) continue;
+        if (sMaxZ < entry.minZ) continue;
+        if (entry.maxZ < sMinZ) continue;
 
-        // Iterate walls in this sector (stride = 56 bytes = sizeof(Wall))
+        CollisionSector* sector = entry.sector;
+        if (sector->status == -1) continue;
+
+        if (const CollisionBox* boxes = entry.wallBoxes) {
+            Wall* walls = sector->walls;
+            const u32 wallCount = sector->wallCount;
+            for (u32 i = 0; i < wallCount; i++) {
+                const CollisionBox& box = boxes[i];
+                if (!(sMinX < box.w2)) continue;
+                if (!(sMinZ < box.w3)) continue;
+                if (!(box.w0 < sMaxX)) continue;
+                if (!(box.w1 < sMaxZ)) continue;
+
+                if (totalAdded < maxCount) {
+                    outArray[totalAdded] = &walls[i];
+                }
+                totalAdded++;
+            }
+            continue;
+        }
+
+        // Fallback (compact table unavailable): walls, stride 56 = sizeof(Wall)
         for (u32 i = 0; i < sector->wallCount; i++) {
             Wall* wall = &sector->walls[i];
 

@@ -14,3 +14,10 @@ esac
     "$root/tests/psp/collision_lifetime.cpp" "$root/src/gen/block.cpp" \
     "$root/src/gen/colsect.cpp" "$root/src/gen/colfloor.cpp" -o "$output/collision"
 "$output/collision"
+"${CXX:-c++}" -std=c++17 -O1 -g -DNDEBUG -DRC_PLATFORM_PSP \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra \
+    -ffunction-sections -fdata-sections "$gc_sections" \
+    -I"$root/src" -I"$root/vendor/libp3d" -I"$root/vendor/cgltf" -I"$root/vendor/stb" \
+    "$root/tests/psp/collision_query_equivalence.cpp" \
+    "$root/src/gen/colsect.cpp" "$root/src/gen/colfloor.cpp" -o "$output/collision_query"
+"$output/collision_query"

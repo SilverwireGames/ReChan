@@ -25,6 +25,14 @@ public:
     s32 mHealthToAdd = 0;
     s32 mLivesToAdd = 0;
     s32 mTimer = 20;
+#if defined(RC_PLATFORM_PSP)
+    // PSP: the shadow floor under a floating collectible is refreshed
+    // periodically (staggered) or after a large XZ move instead of every step.
+    s32 mShadowFloorX = 0;
+    s32 mShadowFloorZ = 0;
+    u8 mShadowFloorCountdown = 0;
+    bool mShadowFloorValid = false;
+#endif
 
     Collectible(const LVector* pos, u16 type);
     ~Collectible() override;

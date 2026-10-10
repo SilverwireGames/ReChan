@@ -26,6 +26,9 @@
 #include "gen/world.h"
 #include "snd/snddrct.h"
 #include "fe/hud.h"
+#if defined(PSP_AUTOPLAY)
+#include "psp/psp_qa.h"
+#endif
 #if NEW_CHEATS
 #include "extra/cheats.h"
 #endif
@@ -1309,6 +1312,13 @@ void Player::OnCheckpoint() {
     }
     checkpoint.field28 = 0;
     checkpoint.SetValidState(1);
+#if defined(PSP_AUTOPLAY)
+    QaLog("checkpoint pos=%ld,%ld,%ld block=%ld valid=%d red=%u gold=%u",
+          static_cast<long>(pos.x), static_cast<long>(pos.y), static_cast<long>(pos.z),
+          static_cast<long>(checkpoint.field24), checkpoint.IsValid() ? 1 : 0,
+          g_scoreManager ? static_cast<unsigned>(g_scoreManager->currentCollectCount) : 0u,
+          g_scoreManager ? static_cast<unsigned>(g_scoreManager->currentGoldDragons) : 0u);
+#endif
 }
 
 void Player::SetLivesLeft(s32 lives) {

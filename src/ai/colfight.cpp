@@ -111,10 +111,18 @@ static bool CheckAttackCylinder(
         < (s64)totalRadius * totalRadius;
 }
 
+// Weapon sweep step count depends only on the attack (not on the target).
+// CheckAttack evaluates it lazily once per call instead of once per target
+// (float sqrt + integer division each time); same value, same use.
+struct WeaponSweepSteps {
+    s32 steps = -1; // -1: not computed yet
+};
+
 static bool CheckAttackCylinder(
     const Humanoid* target,
     const Humanoid* source,
-    const FightingCollisionAttackType* attackType) {
+    const FightingCollisionAttackType* attackType,
+    WeaponSweepSteps* sweepCache = nullptr) {
     MARKFUNCTION(0x800729EC);
 
     if (!attackType) {
@@ -134,11 +142,20 @@ static bool CheckAttackCylinder(
             attackType->endB.z - attackType->endA.z,
         };
 
-        const s32 length = static_cast<s32>(rmMag3(
-            static_cast<f32>(diffStart.x),
-            static_cast<f32>(diffStart.y),
-            static_cast<f32>(diffStart.z)));
-        const s32 steps = (length / COLFIGHT_MAX_WEAPON_SPACING) + 1;
+        s32 steps;
+        if (sweepCache && sweepCache->steps >= 0) {
+            steps = sweepCache->steps;
+        }
+        else {
+            const s32 length = static_cast<s32>(rmMag3(
+                static_cast<f32>(diffStart.x),
+                static_cast<f32>(diffStart.y),
+                static_cast<f32>(diffStart.z)));
+            steps = (length / COLFIGHT_MAX_WEAPON_SPACING) + 1;
+            if (sweepCache && steps >= 0) {
+                sweepCache->steps = steps;
+            }
+        }
         for (s32 i = 1; !hit && i <= steps; ++i) {
             const s32 ratio = i * (0x10000 / steps);
             LVector interpStart = {
@@ -161,9 +178,10 @@ static bool CheckAttackCylinder(
 static bool CheckAttackPair(
     const Humanoid* target,
     const Humanoid* source,
-    const FightingCollisionAttackType* attackType) {
+    const FightingCollisionAttackType* attackType,
+    WeaponSweepSteps* sweepCache = nullptr) {
     MARKFUNCTION(0x800729CC);
-    return CheckAttackCylinder(target, source, attackType);
+    return CheckAttackCylinder(target, source, attackType, sweepCache);
 }
 
 namespace FightingCollision {
@@ -272,6 +290,7 @@ s32 CheckAttack(
     }
 
     s32 hitCount = 0;
+    WeaponSweepSteps sweepCache;
     for (s32 i = 0; i < FIGHTING_COLLISION_MAX; ++i) {
         Humanoid* target = g_fightArray[i];
         if (!target || target == source) {
@@ -286,7 +305,7 @@ s32 CheckAttack(
         const s32 dy = PsxAbsS32(target->pos.y - source->pos.y);
         const s32 dz = PsxAbsS32(target->pos.z - source->pos.z);
         if (dx < QUICK_CHECK_MAX_X && dy < QUICK_CHECK_MAX_Y && dz < QUICK_CHECK_MAX_Z
-            && CheckAttackPair(target, source, attackType)) {
+            && CheckAttackPair(target, source, attackType, &sweepCache)) {
             if (hitCount < maxCount && outHumanoids) {
                 outHumanoids[hitCount] = target;
             }

@@ -14,9 +14,49 @@
 #include "gen/scoremgr.h"
 #include "snd/snddrct.h"
 
+#if defined(PSP_AUTOPLAY)
+#include "psp/psp_qa.h"
+#endif
+
 static constexpr s32 COLLECT_FLOAT_STEP = 1092;
 static constexpr s32 COLLECT_PICKUP_PAD_XZ = 96;  // PC: extra grab margin on each XZ side
 static constexpr s32 COLLECT_PICKUP_PAD_Y = 64;   // PC: extra grab margin on each Y side
+
+#if defined(RC_PLATFORM_PSP)
+// PSP: Obstacle::UpdateShadowFloorHeight scans every loaded collision sector
+// plus the whole moveList. Collectibles only bob around a fixed anchor, so the
+// floor under them changes rarely; sample it every N steps (phase spread by
+// uniqueID so the cost is not bunched on one step) or when XZ moved far.
+// Moving platforms passing below are picked up within N steps. Pendulums keep
+// their per-step refresh (pendulum.cpp).
+static constexpr u8 kPspShadowFloorRefreshSteps = 8;
+static constexpr s32 kPspShadowFloorMoveThreshold = 24;
+
+static void Collectible_PspMarkShadowFloorSampled(Collectible* c, bool firstSample) {
+    c->mShadowFloorX = c->pos.x;
+    c->mShadowFloorZ = c->pos.z;
+    c->mShadowFloorValid = (c->model != nullptr);
+    c->mShadowFloorCountdown = firstSample
+        ? static_cast<u8>(c->uniqueID % kPspShadowFloorRefreshSteps)
+        : static_cast<u8>(kPspShadowFloorRefreshSteps - 1u);
+}
+
+static void Collectible_PspRefreshShadowFloor(Collectible* c) {
+    if (c->mShadowFloorValid && c->mShadowFloorCountdown != 0) {
+        s32 dx = c->pos.x - c->mShadowFloorX;
+        s32 dz = c->pos.z - c->mShadowFloorZ;
+        if (dx < 0) dx = -dx;
+        if (dz < 0) dz = -dz;
+        if (dx < kPspShadowFloorMoveThreshold && dz < kPspShadowFloorMoveThreshold) {
+            --c->mShadowFloorCountdown;
+            return;
+        }
+    }
+    const bool firstSample = !c->mShadowFloorValid;
+    c->UpdateShadowFloorHeight();
+    Collectible_PspMarkShadowFloorSampled(c, firstSample);
+}
+#endif
 
 static bool CollectibleBoxLooksValid(const tagCollisionBox& box) {
     return box.maxX >= box.minX && box.maxY >= box.minY && box.maxZ >= box.minZ;
@@ -541,11 +581,18 @@ void Collectible::CreateModel(const char* name) {
 
     mInitialPos = pos;
     AllocateAndCreateShadow();
+#if defined(RC_PLATFORM_PSP)
+    // AllocateAndCreateShadow just sampled the floor; start the staggered cycle.
+    Collectible_PspMarkShadowFloorSampled(this, true);
+#endif
 }
 
 void Collectible::DeleteModel() {
     MARKFUNCTION(0x80012C5C);
     mBoundTransformAnim = nullptr;
+#if defined(RC_PLATFORM_PSP)
+    mShadowFloorValid = false;
+#endif
     Thing::DeleteModel();
 }
 
@@ -624,7 +671,11 @@ void Collectible::Think() {
     }
 
     pos.z = mInitialPos.z;
+#if defined(RC_PLATFORM_PSP)
+    Collectible_PspRefreshShadowFloor(this);
+#else
     UpdateShadowFloorHeight();
+#endif
 }
 
 // PC
@@ -675,6 +726,14 @@ void Collectible::HandleHumanoidCollision(Humanoid* hum) {
         return;
     }
 
+#if defined(PSP_AUTOPLAY)
+    // QA probe (read-only): counters before the pickup is applied.
+    const unsigned qaRedBefore = g_scoreManager ? g_scoreManager->currentCollectCount : 0u;
+    const unsigned qaGoldBefore = g_scoreManager ? g_scoreManager->currentGoldDragons : 0u;
+    const unsigned qaHpBefore = hum->health;
+    const long qaLivesBefore = Player::s_player ? static_cast<long>(Player::s_player->livesLeft) : -1L;
+#endif
+
     if (g_scoreManager) {
         g_scoreManager->RegisterGotCollectible(this, mCollectible);
     }
@@ -709,6 +768,22 @@ void Collectible::HandleHumanoidCollision(Humanoid* hum) {
             g_hud->DisplayExtraTake();
         }
     }
+
+#if defined(PSP_AUTOPLAY)
+    {
+        const char* qaKind = "other";
+        if (mCollectible == 1) qaKind = "red";
+        else if (mCollectible == 2) qaKind = "gold";
+        else if (mLivesToAdd != 0) qaKind = "take";
+        else if (mHealthToAdd != 0) qaKind = "health";
+        QaLog("collect kind=%s name=%s id=%u type=%ld red=%u->%u gold=%u->%u hp=%u->%u lives=%ld->%ld",
+              qaKind, QaName(name), static_cast<unsigned>(uniqueID), static_cast<long>(mCollectible),
+              qaRedBefore, g_scoreManager ? static_cast<unsigned>(g_scoreManager->currentCollectCount) : 0u,
+              qaGoldBefore, g_scoreManager ? static_cast<unsigned>(g_scoreManager->currentGoldDragons) : 0u,
+              qaHpBefore, static_cast<unsigned>(hum->health),
+              qaLivesBefore, Player::s_player ? static_cast<long>(Player::s_player->livesLeft) : -1L);
+    }
+#endif
 
     Kill();
 }
