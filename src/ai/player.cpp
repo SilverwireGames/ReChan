@@ -2862,6 +2862,12 @@ void Player::_LedgePullup() {
 void Player::_Dead() {
     MARKFUNCTION(0x80033858);
 
+#if defined(RC_PLATFORM_PSP) && defined(PSP_BENCH_COMBAT)
+    // Unattended combat benchmark: a fall or level hazard must not run the
+    // death script and end the scenario on the Game Over screen.
+    return;
+#endif
+
     if (!field620) {
         field620 = 1;
         if (g_director) {

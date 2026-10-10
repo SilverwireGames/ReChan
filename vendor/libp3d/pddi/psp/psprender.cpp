@@ -892,6 +892,12 @@ void pspPrimBuffer::BuildMaterialRuns() {
 }
 
 bool pspPrimBuffer::FindMaterialRun(u32 start, bool* valid, u32* key, u32* end) {
+#if defined(PSP_DISABLE_MATERIAL_RUN_CACHE)
+    (void)valid;
+    (void)key;
+    (void)end;
+    return false;  // A/B: DrawPrimBuffer keeps its per-triangle scan
+#endif
     if (start % 3u != 0u) return false;
     if (!materialRunsValid) BuildMaterialRuns();
     // First run ending after start: the run that contains its triangle.
