@@ -54,6 +54,19 @@ struct SkinVertex {
 };
 
 #if defined(RC_PLATFORM_PSP)
+// Input of the fused character skinning loop, derived once from a skin's
+// immutable SkinVertex array (48 bytes, two thirds unused there): half the
+// bytes streamed per frame, colour and UV already in their integer form.
+struct PspSkinStreamVertex {
+    f32 x, y, z;      // SkinVertex lx, ly, lz (first: the VFPU loads 0/4/8)
+    u8 r, g, b;       // SkinVertex r/g/b * 128 (exact for PspSkinColoursAreBytes)
+    u8 joint;         // SkinVertex jointIdx (< 256)
+    s16 u, v;         // static_cast<s16>(SkinVertex u, v)
+    u16 source;       // SkinVertex sourceIndex
+    u16 pad;
+};
+static_assert(sizeof(PspSkinStreamVertex) == 24, "compact skin stream vertex");
+
 // Never 0; a new SkinData at a reused address still gets a new id.
 inline u32 NextPspSkinInstanceId() {
     static u32 next = 0;
@@ -91,6 +104,10 @@ struct SkinData {
     // Identifies this skin's immutable tpage/CBA lanes to the fused GE
     // upload, which then skips re-comparing lanes it already holds.
     u32 pspInstanceId = NextPspSkinInstanceId();
+    // Lazily built on the first fused draw; null when a vertex does not fit
+    // the compact form (the fused loop then reads `verts`).
+    bool pspStreamBuilt = false;
+    PspSkinStreamVertex* pspStream = nullptr;
 #endif
 
     ~SkinData() {
@@ -102,6 +119,7 @@ struct SkinData {
         delete[] primPacketSize;
 #if defined(RC_PLATFORM_PSP)
         delete[] pspJointRadius;
+        delete[] pspStream;
 #endif
     }
 };

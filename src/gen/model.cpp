@@ -302,8 +302,23 @@ void PspSkinVerticesVfpu(const PspSkinLoop& loop, u32 begin, u32 end, f32* out) 
 //   since PspSkinColoursAreBytes; lit m = min((c * light + 64) >> 7, 255)),
 //   then the GU byte MakeGeometryColor gives m / 128;
 // - UV: the same float to s16 conversion.
-void PspSkinPackedVfpu(const PspSkinLoop& loop, u32 count, PspPackedVertex* out) {
-    const SkinVertex* sv = loop.verts;
+// The input is the skin's compact stream when it has one (conversions done
+// once, PspSkinStreamVertex), else its SkinVertex array.
+struct PspSkinPackedInput {
+    u32 joint, r, g, b, source;
+    s16 u, v;
+};
+inline PspSkinPackedInput ReadPackedInput(const SkinVertex& sv) {
+    return {sv.jointIdx, static_cast<u32>(sv.r * 128.0f), static_cast<u32>(sv.g * 128.0f),
+            static_cast<u32>(sv.b * 128.0f), static_cast<u32>(sv.sourceIndex),
+            static_cast<s16>(sv.u), static_cast<s16>(sv.v)};
+}
+inline PspSkinPackedInput ReadPackedInput(const PspSkinStreamVertex& sv) {
+    return {sv.joint, sv.r, sv.g, sv.b, sv.source, sv.u, sv.v};
+}
+
+template <typename Vertex>
+void PspSkinPackedVfpu(const PspSkinLoop& loop, const Vertex* sv, u32 count, PspPackedVertex* out) {
     const Mat4* joints = loop.joints;
     const u16* lit = loop.lit;
     const u8* litMask = loop.litMask;
@@ -317,27 +332,52 @@ void PspSkinPackedVfpu(const PspSkinLoop& loop, u32 count, PspPackedVertex* out)
     };
     u32 loadedJoint = 0xFFFFFFFFu;
     for (u32 i = 0; i < count; i++, sv++, out++) {
-        const u32 joint = sv->jointIdx;
-        if (joint != loadedJoint) {
-            loadedJoint = joint;
-            PspVfpuSkin::LoadJoint(&joints[joint]);
+        const PspSkinPackedInput in = ReadPackedInput(*sv);
+        if (in.joint != loadedJoint) {
+            loadedJoint = in.joint;
+            PspVfpuSkin::LoadJoint(&joints[in.joint]);
         }
         PspVfpuSkin::SkinPosition(sv, &out->x);
-        u32 r = static_cast<u32>(sv->r * 128.0f);
-        u32 g = static_cast<u32>(sv->g * 128.0f);
-        u32 b = static_cast<u32>(sv->b * 128.0f);
-        const u32 sourceIndex = static_cast<u32>(sv->sourceIndex);
-        if (sourceIndex < litLimit && litMask[sourceIndex] != 0u) {
-            const u32 rg = lit[sourceIndex * 2u + 0u];
-            const u32 lb = lit[sourceIndex * 2u + 1u];
+        u32 r = in.r;
+        u32 g = in.g;
+        u32 b = in.b;
+        if (in.source < litLimit && litMask[in.source] != 0u) {
+            const u32 rg = lit[in.source * 2u + 0u];
+            const u32 lb = lit[in.source * 2u + 1u];
             r = litChannel(r, rg & 0xFFu);
             g = litChannel(g, (rg >> 8) & 0xFFu);
             b = litChannel(b, lb & 0xFFu);
         }
         out->color = guByte(r) | (guByte(g) << 8) | (guByte(b) << 16) | 0xFF000000u;
-        out->u = static_cast<s16>(sv->u);
-        out->v = static_cast<s16>(sv->v);
+        out->u = in.u;
+        out->v = in.v;
     }
+}
+
+// The skin's compact stream, built on first use; null (use `verts`) when a
+// joint index does not fit a byte or memory is short. Byte-colour skins only.
+const PspSkinStreamVertex* AcquirePspSkinStream(SkinData* skin) {
+    if (skin->pspStreamBuilt) {
+        return skin->pspStream;
+    }
+    skin->pspStreamBuilt = true;
+    PspSkinStreamVertex* stream = new (std::nothrow) PspSkinStreamVertex[skin->numVerts];
+    if (!stream) {
+        return nullptr;
+    }
+    for (u32 i = 0; i < skin->numVerts; i++) {
+        const SkinVertex& sv = skin->verts[i];
+        if (sv.jointIdx > 0xFFu) {
+            delete[] stream;
+            return nullptr;
+        }
+        const PspSkinPackedInput in = ReadPackedInput(sv);
+        stream[i] = {sv.lx, sv.ly, sv.lz,
+                     static_cast<u8>(in.r), static_cast<u8>(in.g), static_cast<u8>(in.b),
+                     static_cast<u8>(in.joint), in.u, in.v, static_cast<u16>(in.source), 0u};
+    }
+    skin->pspStream = stream;
+    return stream;
 }
 
 // VFPU equivalent of the RP_XformVertsLitCBF_CL joint loop in Display: same
@@ -1948,7 +1988,12 @@ void DrawableSTree::Display(u32 /*flags*/) {
             };
             {
                 PspPerf::ScopeTimer kernelTimer(PspPerf::RendererCounter::SkinKernelUs);
-                PspSkinPackedVfpu(loop, skin->numVerts, fusedVertices);
+                if (const PspSkinStreamVertex* stream = AcquirePspSkinStream(skin)) {
+                    PspSkinPackedVfpu(loop, stream, skin->numVerts, fusedVertices);
+                }
+                else {
+                    PspSkinPackedVfpu(loop, skin->verts, skin->numVerts, fusedVertices);
+                }
             }
             // Material lanes: tpage straight from the skin, CBA from the skin
             // or from a compact copy the suit animation rewrites.
