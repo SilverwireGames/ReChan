@@ -143,7 +143,7 @@ void ResetHandlerMetrics() {
 
 int g_mainThreadId = -1;  // SceUID of the thread that called Reset()
 u32 g_scenarioNote = 0;
-std::array<u32, 8> g_microbench{};
+std::array<u32, 16> g_microbench{};
 u32 g_fusedSkinChecks = 0;
 u32 g_fusedSkinMismatches = 0;
 

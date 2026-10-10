@@ -510,6 +510,8 @@ __attribute__((noinline)) inline void p3dVfpuMat4Mul<8>(const f32* a, const f32*
 }
 
 using P3dMat4MulFn = void (*)(const f32* a, const f32* b, f32* r);
+// Candidate kept by p3dVfpuMat4Select (1-8), 0 for the scalar product.
+inline int g_p3dVfpuMat4Mode = -1;
 
 __attribute__((noinline)) inline P3dMat4MulFn p3dVfpuMat4Select() {
     constexpr P3dMat4MulFn kModes[8] = {
@@ -532,8 +534,12 @@ __attribute__((noinline)) inline P3dMat4MulFn p3dVfpuMat4Select() {
             const f32 tolerance = 1.0e-4f * (1.0f + std::fabs(expected[i]));
             same = std::fabs(actual[i] - expected[i]) <= tolerance;
         }
-        if (same) return candidate;
+        if (same) {
+            g_p3dVfpuMat4Mode = static_cast<int>(&candidate - kModes) + 1;
+            return candidate;
+        }
     }
+    g_p3dVfpuMat4Mode = 0;
     return &p3dMat4MulScalar;
 }
 

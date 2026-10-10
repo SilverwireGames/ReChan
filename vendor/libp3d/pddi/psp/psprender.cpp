@@ -1,6 +1,9 @@
 #include "pddi/psp/psprender.h"
 #include "pc/log.h"
 #include "psp/psp_perf.h"
+#if defined(PSP_DRAW_MICROBENCH)
+#include "p3d/p3dmath.h"
+#endif
 
 #include <pspctrl.h>
 #include <pspdisplay.h>
@@ -1800,6 +1803,30 @@ void pspContext::RunDrawMicrobench() {
         gu3DStateReady = false;
         Setup3DState();
         time(7, [&](u32) { DrawPrimBuffer(triangle, 0, 3); });
+    }
+    // 8 Mat4 products, 9 sin/cos of distinct (memo-missing) angles, 10 the
+    // selected VFPU product mode + 1 (1 = scalar).
+    {
+        Mat4 a;
+        Mat4 b;
+        for (int i = 0; i < 16; ++i) {
+            a.m[i] = static_cast<float>(i) * 0.25f;
+            b.m[i] = static_cast<float>(16 - i) * 0.125f;
+        }
+        static Mat4 sink;
+        time(8, [&](u32) { sink = a * b; a.m[3] = sink.m[5]; });
+        static float trig = 0.0f;
+        static u32 angleBase = 0;
+        time(9, [&](u32 i) {
+            float s = 0.0f;
+            float c = 0.0f;
+            p3dSinCosPsxAngle(static_cast<s32>(angleBase + i * 337u), s, c);
+            trig += s + c;
+        });
+        angleBase += kReps * 337u;
+#if defined(P3D_VFPU_MAT4)
+        PspPerf::RecordMicrobench(10, static_cast<u32>(g_p3dVfpuMat4Mode + 1));
+#endif
     }
     vramHandle = savedVramHandle;
     // The texture/CLUT registers changed outside the caches.
