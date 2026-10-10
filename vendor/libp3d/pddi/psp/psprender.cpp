@@ -4,6 +4,7 @@
 #include "p3d/fileio.h"
 #if defined(PSP_DRAW_MICROBENCH)
 #include "p3d/p3dmath.h"
+#include "p3d/skeleton.h"
 #endif
 
 #include <pspctrl.h>
@@ -1999,6 +2000,58 @@ void pspContext::RunDrawMicrobench() {
 #if defined(P3D_VFPU_MAT4)
         PspPerf::RecordMicrobench(10, static_cast<u32>(g_p3dVfpuMat4Mode + 1));
 #endif
+    }
+    // Skeleton pieces (per rep): 11 three sin/cos pairs of spread angles,
+    // 12 a YZX joint rotation with translation, 13 a 64-byte Mat4 copy,
+    // 14 a whole 16-joint skeleton build (TRANSFORM on every joint, a few
+    // PUSH/POP, no callbacks) whose data stays in cache between reps.
+    {
+        static float trig = 0.0f;
+        static u32 angleBase = 12345u;
+        time(11, [&](u32 i) {
+            float s = 0.0f, c = 0.0f;
+            const u32 a = angleBase + i * 7919u;
+            p3dSinCosPsxAngle(static_cast<s32>(a), s, c); trig += s + c;
+            p3dSinCosPsxAngle(static_cast<s32>(a * 3u + 101u), s, c); trig += s - c;
+            p3dSinCosPsxAngle(static_cast<s32>(a * 5u + 977u), s, c); trig += c - s;
+        });
+        angleBase += kReps * 7919u;
+        static Mat4 rot;
+        time(12, [&](u32 i) {
+            const s16 a = static_cast<s16>(i * 4099u);
+            p3dBuildRotMatrixYZX(a, static_cast<s16>(a * 3), static_cast<s16>(a * 7), rot);
+            rot.SetTranslation(static_cast<f32>(i), 2.0f, 3.0f);
+        });
+        static Mat4 copyDst;
+        time(13, [&](u32 i) { rot.m[0] = static_cast<f32>(i); copyDst = rot; });
+        static STreeData* skeleton = nullptr;
+        static Mat4* matrices = nullptr;
+        if (!skeleton) {
+            skeleton = new STreeData();
+            skeleton->numJoints = 16;
+            skeleton->joints = static_cast<STreeJoint*>(std::calloc(16, sizeof(STreeJoint)));
+            matrices = new Mat4[16];
+            for (u32 j = 0; j < 16u && skeleton->joints; ++j) {
+                STreeJoint& joint = skeleton->joints[j];
+                new (&joint) STreeJoint();
+                joint.flags = STF_TRANSFORM | ((j % 4u) == 0u ? STF_PUSH_MATRIX : 0u)
+                    | ((j % 4u) == 3u ? STF_POP_MATRIX : 0u);
+                joint.translationX = static_cast<s32>(j * 37u);
+                joint.translationY = static_cast<s32>(j * 11u);
+                joint.translationZ = -static_cast<s32>(j * 5u);
+                joint.rotationX = static_cast<s16>(j * 2311u);
+                joint.rotationY = static_cast<s16>(j * 4447u);
+                joint.rotationZ = static_cast<s16>(j * 9973u);
+                joint.renderScale = 1.0f;
+                joint.captureBufferIdx = -1;
+            }
+        }
+        if (skeleton->joints) {
+            time(14, [&](u32 i) {
+                skeleton->joints[i & 15u].rotationY = static_cast<s16>(i * 131u);
+                skeleton->ComputeWorldMatrices(matrices);
+            });
+        }
     }
     vramHandle = savedVramHandle;
     // The texture/CLUT registers changed outside the caches.
