@@ -13,3 +13,8 @@ esac
     -I"$root/src" -I"$root/vendor/libp3d" -I"$root/vendor/cgltf" -I"$root/vendor/stb" \
     "$root/tests/psp/normal_lighting.cpp" "$root/src/gen/geometry.cpp" -o "$output/lighting"
 "$output/lighting"
+"${CXX:-c++}" -std=c++17 -O1 -g -DNDEBUG -DRC_PLATFORM_PSP \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra \
+    -I"$root/src" -I"$root/vendor/libp3d" \
+    "$root/tests/psp/trig_table.cpp" -o "$output/trig"
+"$output/trig"

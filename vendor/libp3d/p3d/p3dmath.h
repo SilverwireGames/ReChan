@@ -184,28 +184,40 @@ inline void p3dBuildRotMatrixYZX(f32 ax, f32 ay, f32 az, Mat4& m) {
 }
 
 #if defined(RC_PLATFORM_PSP)
-// Exact sinf/cosf of a PSX angle, memoized. Skeletons rebuild every joint's
-// rotation several times per frame (logic tick, attack capture, render pose)
-// from a small set of 16-bit angles; on the Allegrex each libm sinf/cosf costs
-// hundreds of cycles. A hit returns the very values the libm call produced.
-struct P3dSinCosEntry {
-    u32 key;  // angle + 1, so the zeroed table starts empty
-    f32 s;
-    f32 c;
-};
-inline P3dSinCosEntry g_p3dSinCosCache[1024];
+// sin/cos of a 16-bit PSX angle (65536 = one turn) from a quarter-wave table
+// of libm values, built once (64 KiB). Skeletons rebuild every joint's
+// rotation several times per frame from angles that change every frame, so
+// the former memo of exact sinf/cosf mostly missed, ~2 us per angle on the
+// Allegrex. The first quadrant returns exactly the libm value; the others use
+// sin(pi - x) = sin(x) and sin(x + pi) = -sin(x), and cos(a) = sin(a + 16384),
+// within an ulp or two of the libm call on the rounded radian argument.
+inline f32 g_p3dQuarterSine[16385];
+inline bool g_p3dQuarterSineReady = false;
+
+__attribute__((noinline)) inline void p3dBuildQuarterSine() {
+    for (u32 i = 0; i <= 16384u; i++) {
+        const f32 radians = ANGLE2RAD(i);  // float, as the former memo (sinf)
+        g_p3dQuarterSine[i] = std::sin(radians);
+    }
+    g_p3dQuarterSineReady = true;
+}
+
+inline f32 p3dSinPsxAngle(u32 angle) {
+    const u32 a = angle & 0xFFFFu;
+    const u32 i = a & 0x3FFFu;
+    switch (a >> 14) {
+        case 0: return g_p3dQuarterSine[i];
+        case 1: return g_p3dQuarterSine[16384u - i];
+        case 2: return -g_p3dQuarterSine[i];
+        default: return -g_p3dQuarterSine[16384u - i];
+    }
+}
 
 inline void p3dSinCosPsxAngle(s32 angle, f32& s, f32& c) {
-    const u32 a = static_cast<u32>(angle) & 0xFFFFu;
-    P3dSinCosEntry& entry = g_p3dSinCosCache[(a ^ (a >> 10)) & 1023u];
-    if (entry.key != a + 1u) {
-        const f32 radians = ANGLE2RAD(a);
-        entry.s = std::sin(radians);
-        entry.c = std::cos(radians);
-        entry.key = a + 1u;
-    }
-    s = entry.s;
-    c = entry.c;
+    if (!g_p3dQuarterSineReady) p3dBuildQuarterSine();
+    const u32 a = static_cast<u32>(angle);
+    s = p3dSinPsxAngle(a);
+    c = p3dSinPsxAngle(a + 0x4000u);
 }
 #endif
 

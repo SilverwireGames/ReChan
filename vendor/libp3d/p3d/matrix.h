@@ -526,7 +526,8 @@ __attribute__((noinline)) inline P3dMat4MulFn p3dVfpuMat4Select() {
     }
     f32 expected[16];
     p3dMat4MulScalar(a.m, b.m, expected);
-    for (const P3dMat4MulFn candidate : kModes) {
+    for (int mode = 0; mode < 8; ++mode) {
+        const P3dMat4MulFn candidate = kModes[mode];
         f32 actual[16];
         candidate(a.m, b.m, actual);
         bool same = true;
@@ -535,7 +536,7 @@ __attribute__((noinline)) inline P3dMat4MulFn p3dVfpuMat4Select() {
             same = std::fabs(actual[i] - expected[i]) <= tolerance;
         }
         if (same) {
-            g_p3dVfpuMat4Mode = static_cast<int>(&candidate - kModes) + 1;
+            g_p3dVfpuMat4Mode = mode + 1;
             return candidate;
         }
     }
