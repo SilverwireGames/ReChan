@@ -78,6 +78,111 @@ inline void p3dBuildRotMatrixX(f32 angle, Mat4& m) {
 }
 
 
+// p3dBuildRotMatrixZYX - PSX: 0x80093D58
+// PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
+// PSX computes: R = Ry(ay) * Rx(ax) * Rz(az)
+// Verified against PSX decompile: m[1][2] = -sin(ax) (pitch extraction)
+inline void p3dBuildRotMatrixZYX(f32 ax, f32 ay, f32 az, Mat4& m) {
+    f32 cx = std::cos(ax), sx = std::sin(ax);
+    f32 cy = std::cos(ay), sy = std::sin(ay);
+    f32 cz = std::cos(az), sz = std::sin(az);
+
+    m = Mat4();
+    m.m[0]  = cy * cz + sy * sx * sz;
+    m.m[1]  = cx * sz;
+    m.m[2]  = cy * sx * sz - sy * cz;
+
+    m.m[4]  = sy * sx * cz - cy * sz;
+    m.m[5]  = cx * cz;
+    m.m[6]  = sy * sz + cy * sx * cz;
+
+    m.m[8]  = sy * cx;
+    m.m[9]  = -sx;
+    m.m[10] = cy * cx;
+}
+
+// Overload taking PSX angle units (s32) - converts internally
+inline void p3dBuildRotMatrixZYX(s32 ax, s32 ay, s32 az, Mat4& m) {
+    p3dBuildRotMatrixZYX(
+        ANGLE2RAD(ax & 0xFFFF),
+        ANGLE2RAD(ay & 0xFFFF),
+        ANGLE2RAD(az & 0xFFFF),
+        m);
+}
+
+// Keep packed PSX angle fields unambiguous with GCC: converting u16/s16 to
+// either the float or integer overload is otherwise equally ranked.
+inline void p3dBuildRotMatrixZYX(u16 ax, u16 ay, u16 az, Mat4& m) {
+    p3dBuildRotMatrixZYX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+inline void p3dBuildRotMatrixZYX(s16 ax, s16 ay, s16 az, Mat4& m) {
+    p3dBuildRotMatrixZYX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+// p3dBuildRotMatrixXYZ - PSX: 0x800730F8
+// PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
+inline void p3dBuildRotMatrixXYZ(f32 ax, f32 ay, f32 az, Mat4& m) {
+    f32 cx = std::cos(ax), sx = std::sin(ax);
+    f32 cy = std::cos(ay), sy = std::sin(ay);
+    f32 cz = std::cos(az), sz = std::sin(az);
+
+    m = Mat4();
+    m.m[0]  = cy * cz;
+    m.m[1]  = cy * sz;
+    m.m[2]  = -sy;
+
+    m.m[4]  = sx * sy * cz - cx * sz;
+    m.m[5]  = sx * sy * sz + cx * cz;
+    m.m[6]  = sx * cy;
+
+    m.m[8]  = cx * sy * cz + sx * sz;
+    m.m[9]  = cx * sy * sz - sx * cz;
+    m.m[10] = cx * cy;
+}
+
+// Overload taking PSX angle units (s32)
+inline void p3dBuildRotMatrixXYZ(s32 ax, s32 ay, s32 az, Mat4& m) {
+    p3dBuildRotMatrixXYZ(
+        ANGLE2RAD(ax & 0xFFFF),
+        ANGLE2RAD(ay & 0xFFFF),
+        ANGLE2RAD(az & 0xFFFF),
+        m);
+}
+
+inline void p3dBuildRotMatrixXYZ(u16 ax, u16 ay, u16 az, Mat4& m) {
+    p3dBuildRotMatrixXYZ(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+inline void p3dBuildRotMatrixXYZ(s16 ax, s16 ay, s16 az, Mat4& m) {
+    p3dBuildRotMatrixXYZ(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
+}
+
+// p3dBuildRotMatrixYZX - PSX: 0x800737A4
+// PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
+// PSX computes: R = Rx(ax) * Rz(az) * Ry(ay)
+// Verified against PSX decompile scratchpad implementation
+inline void p3dBuildRotMatrixYZXFromSinCos(f32 cx, f32 sx, f32 cy, f32 sy, f32 cz, f32 sz,
+                                           Mat4& m) {
+    m = Mat4();
+    m.m[0]  = cz * cy;
+    m.m[1]  = cx * sz * cy + sx * sy;
+    m.m[2]  = sx * sz * cy - cx * sy;
+
+    m.m[4]  = -sz;
+    m.m[5]  = cx * cz;
+    m.m[6]  = sx * cz;
+
+    m.m[8]  = cz * sy;
+    m.m[9]  = cx * sz * sy - sx * cy;
+    m.m[10] = sx * sz * sy + cx * cy;
+}
+
+inline void p3dBuildRotMatrixYZX(f32 ax, f32 ay, f32 az, Mat4& m) {
+    p3dBuildRotMatrixYZXFromSinCos(std::cos(ax), std::sin(ax), std::cos(ay), std::sin(ay),
+                                   std::cos(az), std::sin(az), m);
+}
+
 #if defined(RC_PLATFORM_PSP)
 // sin/cos of a 16-bit PSX angle (65536 = one turn) from a quarter-wave table
 // of libm values, built once (64 KiB). Skeletons rebuild every joint's
@@ -115,133 +220,6 @@ inline void p3dSinCosPsxAngle(s32 angle, f32& s, f32& c) {
     c = p3dSinPsxAngle(a + 0x4000u);
 }
 #endif
-
-// p3dBuildRotMatrixZYX - PSX: 0x80093D58
-// PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
-// PSX computes: R = Ry(ay) * Rx(ax) * Rz(az)
-// Verified against PSX decompile: m[1][2] = -sin(ax) (pitch extraction)
-inline void p3dBuildRotMatrixZYXFromSinCos(f32 cx, f32 sx, f32 cy, f32 sy, f32 cz, f32 sz,
-                                           Mat4& m) {
-    m = Mat4();
-    m.m[0]  = cy * cz + sy * sx * sz;
-    m.m[1]  = cx * sz;
-    m.m[2]  = cy * sx * sz - sy * cz;
-
-    m.m[4]  = sy * sx * cz - cy * sz;
-    m.m[5]  = cx * cz;
-    m.m[6]  = sy * sz + cy * sx * cz;
-
-    m.m[8]  = sy * cx;
-    m.m[9]  = -sx;
-    m.m[10] = cy * cx;
-}
-
-inline void p3dBuildRotMatrixZYX(f32 ax, f32 ay, f32 az, Mat4& m) {
-    p3dBuildRotMatrixZYXFromSinCos(std::cos(ax), std::sin(ax), std::cos(ay), std::sin(ay),
-                                   std::cos(az), std::sin(az), m);
-}
-
-// Overload taking PSX angle units (s32) - converts internally
-inline void p3dBuildRotMatrixZYX(s32 ax, s32 ay, s32 az, Mat4& m) {
-#if defined(RC_PLATFORM_PSP)
-    // Same table as the YZX joints (GModel::Show builds one per prop per frame).
-    f32 sx, cx, sy, cy, sz, cz;
-    p3dSinCosPsxAngle(ax, sx, cx);
-    p3dSinCosPsxAngle(ay, sy, cy);
-    p3dSinCosPsxAngle(az, sz, cz);
-    p3dBuildRotMatrixZYXFromSinCos(cx, sx, cy, sy, cz, sz, m);
-#else
-    p3dBuildRotMatrixZYX(
-        ANGLE2RAD(ax & 0xFFFF),
-        ANGLE2RAD(ay & 0xFFFF),
-        ANGLE2RAD(az & 0xFFFF),
-        m);
-#endif
-}
-
-// Keep packed PSX angle fields unambiguous with GCC: converting u16/s16 to
-// either the float or integer overload is otherwise equally ranked.
-inline void p3dBuildRotMatrixZYX(u16 ax, u16 ay, u16 az, Mat4& m) {
-    p3dBuildRotMatrixZYX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
-}
-
-inline void p3dBuildRotMatrixZYX(s16 ax, s16 ay, s16 az, Mat4& m) {
-    p3dBuildRotMatrixZYX(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
-}
-
-// p3dBuildRotMatrixXYZ - PSX: 0x800730F8
-// PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
-inline void p3dBuildRotMatrixXYZFromSinCos(f32 cx, f32 sx, f32 cy, f32 sy, f32 cz, f32 sz,
-                                           Mat4& m) {
-    m = Mat4();
-    m.m[0]  = cy * cz;
-    m.m[1]  = cy * sz;
-    m.m[2]  = -sy;
-
-    m.m[4]  = sx * sy * cz - cx * sz;
-    m.m[5]  = sx * sy * sz + cx * cz;
-    m.m[6]  = sx * cy;
-
-    m.m[8]  = cx * sy * cz + sx * sz;
-    m.m[9]  = cx * sy * sz - sx * cz;
-    m.m[10] = cx * cy;
-}
-
-inline void p3dBuildRotMatrixXYZ(f32 ax, f32 ay, f32 az, Mat4& m) {
-    p3dBuildRotMatrixXYZFromSinCos(std::cos(ax), std::sin(ax), std::cos(ay), std::sin(ay),
-                                   std::cos(az), std::sin(az), m);
-}
-
-// Overload taking PSX angle units (s32)
-inline void p3dBuildRotMatrixXYZ(s32 ax, s32 ay, s32 az, Mat4& m) {
-#if defined(RC_PLATFORM_PSP)
-    f32 sx, cx, sy, cy, sz, cz;
-    p3dSinCosPsxAngle(ax, sx, cx);
-    p3dSinCosPsxAngle(ay, sy, cy);
-    p3dSinCosPsxAngle(az, sz, cz);
-    p3dBuildRotMatrixXYZFromSinCos(cx, sx, cy, sy, cz, sz, m);
-#else
-    p3dBuildRotMatrixXYZ(
-        ANGLE2RAD(ax & 0xFFFF),
-        ANGLE2RAD(ay & 0xFFFF),
-        ANGLE2RAD(az & 0xFFFF),
-        m);
-#endif
-}
-
-inline void p3dBuildRotMatrixXYZ(u16 ax, u16 ay, u16 az, Mat4& m) {
-    p3dBuildRotMatrixXYZ(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
-}
-
-inline void p3dBuildRotMatrixXYZ(s16 ax, s16 ay, s16 az, Mat4& m) {
-    p3dBuildRotMatrixXYZ(static_cast<s32>(ax), static_cast<s32>(ay), static_cast<s32>(az), m);
-}
-
-// p3dBuildRotMatrixYZX - PSX: 0x800737A4
-// PSX params: (ax, ay, az) = (X angle, Y angle, Z angle)
-// PSX computes: R = Rx(ax) * Rz(az) * Ry(ay)
-// Verified against PSX decompile scratchpad implementation
-inline void p3dBuildRotMatrixYZXFromSinCos(f32 cx, f32 sx, f32 cy, f32 sy, f32 cz, f32 sz,
-                                           Mat4& m) {
-    m = Mat4();
-    m.m[0]  = cz * cy;
-    m.m[1]  = cx * sz * cy + sx * sy;
-    m.m[2]  = sx * sz * cy - cx * sy;
-
-    m.m[4]  = -sz;
-    m.m[5]  = cx * cz;
-    m.m[6]  = sx * cz;
-
-    m.m[8]  = cz * sy;
-    m.m[9]  = cx * sz * sy - sx * cy;
-    m.m[10] = sx * sz * sy + cx * cy;
-}
-
-inline void p3dBuildRotMatrixYZX(f32 ax, f32 ay, f32 az, Mat4& m) {
-    p3dBuildRotMatrixYZXFromSinCos(std::cos(ax), std::sin(ax), std::cos(ay), std::sin(ay),
-                                   std::cos(az), std::sin(az), m);
-}
-
 
 // Overload taking PSX angle units (s32) - converts internally
 inline void p3dBuildRotMatrixYZX(s32 ax, s32 ay, s32 az, Mat4& m) {
