@@ -331,7 +331,7 @@ inline void sceGumLoadMatrix(const ScePspFMatrix4* matrix) {
     if (FakeGe::matrixMode == GU_PROJECTION) std::copy(matrix->m, matrix->m + 16, FakeGe::projection.begin());
 }
 inline void sceGumUpdateMatrix() { FakeGe::emit(192); }
-inline int sceCtrlReadBufferPositive(SceCtrlData* data, int) { *data = {0, 128, 128}; return 1; }
+inline int sceCtrlPeekBufferPositive(SceCtrlData* data, int) { *data = {0, 128, 128}; return 1; }
 inline int sceKernelMaxFreeMemSize() { return 16 * 1024 * 1024; }
 inline int sceKernelTotalFreeMemSize() { return 16 * 1024 * 1024; }
 #define GE_COMMAND(name) template<class... T> inline int name(T... args) { \

@@ -1541,7 +1541,10 @@ void ResetPspBenchCombatInput() {
 
 void pspGamepad::Poll() {
     SceCtrlData data{};
-    if (sceCtrlReadBufferPositive(&data, 1) < 0) {
+    // Peek, not Read: Read blocks until the next VBlank sample whenever the
+    // frame's sample was already consumed, idling the game thread for up to
+    // a whole refresh in what the frame timing counts as logic.
+    if (sceCtrlPeekBufferPositive(&data, 1) < 0) {
         connected = false;
         buttons = 0;
         axes.fill(0.0f);
