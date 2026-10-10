@@ -4,7 +4,11 @@
 #include "snd/rsdformat.h"
 #include "snd/hmndsnd.h"
 #include "xclib/xcfile.h"
+#include <algorithm>
 #include <utility>
+#if defined(RC_PLATFORM_PSP)
+#include "p3d/fileio.h"
+#endif
 #if MOD_LOADER
 #include "extra/modloader.h"
 #include <cctype>
@@ -92,6 +96,35 @@ void Sound::SetupSound() {
         u32 fileSize = 0;
         u8* fileData = ReadFileBytes(path, fileSize);
         if (!fileData) continue;
+
+#if defined(RC_PLATFORM_PSP)
+        // PSP: index only. Decoding all ~1.5k samples up front exceeds the 128-slot
+        // mixer and most effects stayed silent; samples load on first use instead.
+        {
+            RsdFormat::WaxIndex index = RsdFormat::ParseWaxIndex(fileData, fileSize);
+            delete[] fileData;
+
+            u32 count = (u32)index.sampleDescs.size();
+            if (count > MAX_SAMPLES_PER_BANK) count = MAX_SAMPLES_PER_BANK;
+            if (count == 0) continue;
+
+            BankInfo& info = banks[i];
+            info.numSamples = count;
+            info.adpcmSpuBase = index.spuBase;
+            info.adpcmFileOffset = index.adpcmFileOffset;
+            info.adpcmLength = index.adpcmLength;
+            for (u32 j = 0; j < count; j++) {
+                const RsdFormat::SampleDesc& desc = index.sampleDescs[j];
+                info.samples[j] = AUDIO_SAMPLE_INVALID;
+                info.descriptorWord2[j] = desc.flags;
+                info.spuAddr[j] = desc.spuAddr;
+                const u16 spuPitch = (u16)(desc.params & 0xFFFF);
+                info.sampleRate[j] = spuPitch > 0 ? 44100u * spuPitch / 4096u : PSX_SFX_RATE;
+            }
+            numWaxBanks++;
+            continue;
+        }
+#endif
 
         RsdFormat::WaxBank bank = RsdFormat::LoadWax(fileData, fileSize);
         delete[] fileData;
@@ -195,11 +228,80 @@ u32 Sound::GetBankSampleCount(u32 bankIndex) const {
     return banks[bankIndex].numSamples;
 }
 
+#if defined(RC_PLATFORM_PSP)
+AudioSample Sound::GetBankSample(u32 bankIndex, u32 sampleIndex) {
+    if (bankIndex >= MAX_WAX_BANKS) return AUDIO_SAMPLE_INVALID;
+    if (sampleIndex >= banks[bankIndex].numSamples) return AUDIO_SAMPLE_INVALID;
+    if (banks[bankIndex].samples[sampleIndex] != AUDIO_SAMPLE_INVALID) {
+        return banks[bankIndex].samples[sampleIndex];
+    }
+    return LoadPspWaxSample(bankIndex, sampleIndex);
+}
+
+// PSP: reads one sample's ADPCM from its bank file up to the END block, decodes it
+// and loads it into a mixer slot. The round-robin pool keeps the number of resident
+// effects bounded; the oldest entry is unloaded (stopping any voice using it).
+AudioSample Sound::LoadPspWaxSample(u32 bankIndex, u32 sampleIndex) {
+    BankInfo& info = banks[bankIndex];
+    if (info.adpcmLength == 0) return AUDIO_SAMPLE_INVALID;
+
+    const u32 spuAddr = info.spuAddr[sampleIndex];
+    if (spuAddr < info.adpcmSpuBase) return AUDIO_SAMPLE_INVALID;
+    const u32 byteOff = spuAddr - info.adpcmSpuBase;
+    if (byteOff >= info.adpcmLength) return AUDIO_SAMPLE_INVALID;
+
+    char path[32];
+    snprintf(path, sizeof(path), "SOUND/FX/RS%04X.WAX", static_cast<unsigned int>(bankIndex));
+    p3d::io::FileHandle file;
+    if (!file.Open(path, p3d::io::FileHandle::Mode::Read)) return AUDIO_SAMPLE_INVALID;
+    if (!file.Seek((int64_t)(info.adpcmFileOffset + byteOff), SEEK_SET)) return AUDIO_SAMPLE_INVALID;
+
+    // Gather whole 16-byte ADPCM blocks until (and including) the END-flagged block.
+    std::vector<u8> adpcm;
+    u8 chunk[16 * 32];
+    u32 remaining = info.adpcmLength - byteOff;
+    bool ended = false;
+    while (!ended && remaining >= 16) {
+        const u32 readBytes = std::min<u32>(remaining, sizeof(chunk)) & ~15u;
+        if (file.Read(chunk, readBytes) != readBytes) break;
+        for (u32 off = 0; off < readBytes && !ended; off += 16) {
+            adpcm.insert(adpcm.end(), chunk + off, chunk + off + 16);
+            ended = (chunk[off + 1] & 0x01) != 0;
+        }
+        remaining -= readBytes;
+    }
+    if (adpcm.empty()) return AUDIO_SAMPLE_INVALID;
+
+    std::vector<s16> pcm = SpuAdpcm::Decode(adpcm.data(), (u32)adpcm.size(), true);
+    if (pcm.empty()) return AUDIO_SAMPLE_INVALID;
+    const u32 frames = (u32)pcm.size();
+
+    // Recycle the oldest pool entry before loading, so the pool never grows past its size.
+    PspWaxPoolSlot& slot = pspWaxPool[pspWaxNextSlot];
+    pspWaxNextSlot = (pspWaxNextSlot + 1) % kPspWaxPoolSize;
+    if (slot.handle != AUDIO_SAMPLE_INVALID) {
+        AudioEngine::UnloadSample(slot.handle);
+        banks[slot.bank].samples[slot.sample] = AUDIO_SAMPLE_INVALID;
+    }
+    slot = {};
+
+    const AudioSample handle = AudioEngine::LoadSampleOwned(
+        std::move(pcm), frames, info.sampleRate[sampleIndex], 1);
+    if (handle == AUDIO_SAMPLE_INVALID) return handle;
+
+    slot.handle = handle;
+    slot.bank = bankIndex;
+    slot.sample = sampleIndex;
+    info.samples[sampleIndex] = handle;
+    return handle;
+}
+#else
 AudioSample Sound::GetBankSample(u32 bankIndex, u32 sampleIndex) const {
     if (bankIndex >= MAX_WAX_BANKS) return AUDIO_SAMPLE_INVALID;
     if (sampleIndex >= banks[bankIndex].numSamples) return AUDIO_SAMPLE_INVALID;
     return banks[bankIndex].samples[sampleIndex];
 }
+#endif
 
 #if MOD_LOADER
 // Shared by both PlayMusicTrack variants: looks up a mod override WAV named

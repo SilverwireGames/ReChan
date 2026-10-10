@@ -2135,6 +2135,9 @@ s32 jcsHandleControlEvent(s32 event, s32 param1, s32 param2, s32 param3) {
             // Mapping: location 0-20 -> bank 0-20, location 21+ -> bank 21.
             if (g_sound) {
                 g_sound->activeSfxBank = (param1 < 21) ? param1 : 21;
+#if defined(RC_PLATFORM_PSP)
+                LOG("[SFX-DIAG] SetLocation param=%d activeBank=%d", param1, g_sound->activeSfxBank);
+#endif
             }
             // PSX resets dialog header selection flags when switching level/location.
             if (EnsureDialogDataLoaded()) {

@@ -159,6 +159,9 @@ void rsdWorld::ComputeObjectVolumes(u16 baseVol, const LVector* objPos, u16& out
 // into the single active bank's 71-entry descriptor table.
 static bool RsdSampleToWax(u32 rsdSampleId, u32& outBank, u32& outSample) {
     if (!g_sound || g_sound->activeSfxBank < 0) {
+#if defined(RC_PLATFORM_PSP)
+        LOG("[SFX-DIAG] no active bank for rsd sample %u", rsdSampleId);
+#endif
         return false;
     }
 
@@ -218,6 +221,9 @@ s32 rsdWorld::PlayTransientPositional(u32 sampleId, void* posPtr, u16 volume, s1
 
     AudioSample s = g_sound->GetBankSample(bank, sample);
     if (s == AUDIO_SAMPLE_INVALID) {
+#if defined(RC_PLATFORM_PSP)
+        LOG("[SFX-DIAG] sample invalid bank=%u sample=%u", bank, sample);
+#endif
         return 0;
     }
 

@@ -305,6 +305,10 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
     u32 underrunFrame = requestedFrames;
     u32 mixedFrames = 0;
     const u64 streamEnd = static_cast<u64>(g_musicStream.totalFrames) * kCursorOne;
+    // Linear fade: constant increment per callback (see the voice mixer).
+    const float musicFadeStep = g_musicStream.fadeFrames > 0
+        ? (g_musicStream.targetVolume - g_musicStream.volume) / static_cast<float>(g_musicStream.fadeFrames)
+        : 0.0f;
     for (u32 frame = 0; frame < requestedFrames; ++frame) {
         if (g_musicStream.cursor >= streamEnd) {
             if (!g_musicStream.loop) {
@@ -371,8 +375,9 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
         ++mixedFrames;
         if (g_musicStream.fadeFrames > 0) {
             --g_musicStream.fadeFrames;
-            g_musicStream.volume += (g_musicStream.targetVolume - g_musicStream.volume)
-                / static_cast<float>(g_musicStream.fadeFrames + 1);
+            g_musicStream.volume = g_musicStream.fadeFrames == 0
+                ? g_musicStream.targetVolume
+                : g_musicStream.volume + musicFadeStep;
         }
     }
 
@@ -434,8 +439,12 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
             continue;
         }
 
-        float left = voice.volume * g_masterVolume * (1.0f - std::clamp(voice.pan, -1.0f, 1.0f)) * 0.5f;
-        float right = voice.volume * g_masterVolume * (1.0f + std::clamp(voice.pan, -1.0f, 1.0f)) * 0.5f;
+        // Pan scales are fixed for the callback; only the volume fades.
+        const float clampedPan = std::clamp(voice.pan, -1.0f, 1.0f);
+        const float leftScale = g_masterVolume * (1.0f - clampedPan) * 0.5f;
+        const float rightScale = g_masterVolume * (1.0f + clampedPan) * 0.5f;
+        float left = voice.volume * leftScale;
+        float right = voice.volume * rightScale;
         if (g_mono) right = left = (left + right) * 0.5f;
         const u64 sampleEnd = static_cast<u64>(sample->frames) * kCursorOne;
         u64 step = VoiceCursorStep(sample->rate, voice.pitch);
@@ -445,6 +454,27 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
             if (step >= sampleEnd) step %= sampleEnd;
             if (voice.cursor >= sampleEnd) voice.cursor %= sampleEnd;
         }
+
+        // The per-frame fade v += (t - v) / remaining is a linear ramp, so its
+        // increment is constant: compute it once per callback (re-derived each
+        // callback, and the last fade frame lands exactly on the target).
+        const float fadeStep = voice.fadeFrames > 0
+            ? (voice.targetVolume - voice.volume) / static_cast<float>(voice.fadeFrames)
+            : 0.0f;
+
+        const s16* pcm = sample->pcm.data();
+        const u32 channels = sample->channels;
+        const u32 lastFrame = sample->frames - 1;
+        const float invChannels = channels > 2 ? 1.0f / static_cast<float>(channels) : 1.0f;
+        const auto read = [&](u32 source) -> float {
+            if (channels == 1) return pcm[source];
+            const u32 index = source * channels;
+            // (a + b) * 0.5f is bit-identical to (a + b) / 2.0f.
+            if (channels == 2) return (static_cast<float>(pcm[index]) + static_cast<float>(pcm[index + 1])) * 0.5f;
+            float sum = 0.0f;
+            for (u32 channel = 0; channel < channels; ++channel) sum += pcm[index + channel];
+            return sum * invChannels;
+        };
 
         for (u32 frame = 0; frame < requestedFrames; ++frame) {
             if (!voice.active) break;
@@ -457,25 +487,21 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
             }
 
             const u32 sourceFrame = static_cast<u32>(voice.cursor >> kCursorFractionBits);
-            const u32 nextFrame = std::min<u32>(sourceFrame + 1, sample->frames - 1);
+            const u32 nextFrame = std::min<u32>(sourceFrame + 1, lastFrame);
             const float fraction = CursorFraction(voice.cursor);
-            const auto read = [&](u32 source) -> float {
-                if (sample->channels == 1) return sample->pcm[source];
-                const u32 index = source * sample->channels;
-                float sum = 0.0f;
-                for (u32 channel = 0; channel < sample->channels; ++channel) sum += sample->pcm[index + channel];
-                return sum / static_cast<float>(sample->channels);
-            };
-            const float value = read(sourceFrame) + (read(nextFrame) - read(sourceFrame)) * fraction;
+            const float current = read(sourceFrame);
+            const float value = current + (read(nextFrame) - current) * fraction;
             const u32 outputIndex = frame * 2;
             output[outputIndex] = static_cast<s16>(std::clamp(output[outputIndex] + value * left, -32768.0f, 32767.0f));
             output[outputIndex + 1] = static_cast<s16>(std::clamp(output[outputIndex + 1] + value * right, -32768.0f, 32767.0f));
             voice.cursor += step;
             if (voice.fadeFrames > 0) {
                 --voice.fadeFrames;
-                voice.volume += (voice.targetVolume - voice.volume) / static_cast<float>(voice.fadeFrames + 1);
-                left = voice.volume * g_masterVolume * (1.0f - std::clamp(voice.pan, -1.0f, 1.0f)) * 0.5f;
-                right = voice.volume * g_masterVolume * (1.0f + std::clamp(voice.pan, -1.0f, 1.0f)) * 0.5f;
+                voice.volume = voice.fadeFrames == 0 ? voice.targetVolume : voice.volume + fadeStep;
+                // Matches the previous mixer: fade updates use the panned
+                // (non-mono-averaged) gains.
+                left = voice.volume * leftScale;
+                right = voice.volume * rightScale;
             }
         }
     }
@@ -489,7 +515,13 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
 
 static AudioVoice AllocateVoice(u8 priority) {
     for (u32 i = 0; i < g_voices.size(); ++i) {
-        if (!g_voices[i].active && !g_voices[i].reserved) return i + 1;
+        if (!g_voices[i].active && !g_voices[i].reserved) {
+            // Reset the slot: a finished one-shot leaves its cursor at the end of
+            // the old sample, so the next (shorter) sound would start past its end
+            // and be silent on the first frame.
+            g_voices[i] = {};
+            return i + 1;
+        }
     }
     u32 candidate = 0;
     for (u32 i = 1; i < g_voices.size(); ++i) {

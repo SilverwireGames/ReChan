@@ -91,6 +91,43 @@ namespace RsdFormat {
         return bank;
     }
 
+    // PSP: header-only WAX index (no PCM decode). Gives each sample's SPU address,
+    // flags and pitch, plus the file offset of the shared ADPCM pool, so one sample
+    // at a time can be read and decoded on demand instead of holding every bank in
+    // the 128-slot mixer.
+    struct WaxIndex {
+        std::vector<SampleDesc> sampleDescs;
+        u32 spuBase = 0;
+        u32 adpcmFileOffset = 0;
+        u32 adpcmLength = 0;
+    };
+
+    inline WaxIndex ParseWaxIndex(const u8* fileData, u32 fileSize) {
+        WaxIndex index;
+        u32 pos = 0;
+        while (pos + 8 <= fileSize) {
+            u32 tag = *(const u32*)(fileData + pos);
+            u32 dataSize = *(const u32*)(fileData + pos + 4);
+            const u8* data = fileData + pos + 8;
+
+            if (pos + 8 + dataSize > fileSize) break;
+
+            if (tag == TAG_ADPCM_BLOCK && dataSize > 4) {
+                index.spuBase = *(const u32*)(data);
+                index.adpcmFileOffset = pos + 8 + 4;
+                index.adpcmLength = dataSize - 4;
+            }
+            else if (tag == TAG_SAMPLE_TABLE && dataSize >= 16) {
+                u32 numSamples = dataSize / 16;
+                index.sampleDescs.resize(numSamples);
+                memcpy(index.sampleDescs.data(), data, numSamples * 16);
+            }
+
+            pos += 8 + dataSize;
+        }
+        return index;
+    }
+
     // Decoded CLP ambient bank
     struct ClpBank {
         struct Clip {
