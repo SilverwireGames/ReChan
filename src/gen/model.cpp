@@ -337,7 +337,8 @@ void PspSkinPackedVfpu(const PspSkinLoop& loop, const Vertex* sv, u32 count, Psp
             loadedJoint = in.joint;
             PspVfpuSkin::LoadJoint(&joints[in.joint]);
         }
-        PspVfpuSkin::SkinPosition(sv, &out->x);
+        // The vertex's local position is its first three floats.
+        PspVfpuSkin::IssuePosition(reinterpret_cast<const float*>(sv));
         u32 r = in.r;
         u32 g = in.g;
         u32 b = in.b;
@@ -351,6 +352,7 @@ void PspSkinPackedVfpu(const PspSkinLoop& loop, const Vertex* sv, u32 count, Psp
         out->color = guByte(r) | (guByte(g) << 8) | (guByte(b) << 16) | 0xFF000000u;
         out->u = in.u;
         out->v = in.v;
+        PspVfpuSkin::StorePosition(&out->x);
     }
 }
 

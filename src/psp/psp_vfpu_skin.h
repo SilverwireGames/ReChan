@@ -421,13 +421,15 @@ inline void BeginVertices() {
 }
 
 // `m` must be 16-byte aligned (Align16Allocator or the scratchpad joints region).
+// The exact memory operand (no "memory" clobber) keeps the fused loop's
+// per-vertex values in registers across the reload.
 inline void LoadJoint(const Mat4* m) {
     __asm__ volatile(
-        "lv.q    C000, 0(%0)\n"
-        "lv.q    C010, 16(%0)\n"
-        "lv.q    C020, 32(%0)\n"
-        "lv.q    C030, 48(%0)\n"
-        : : "r"(m->m) : "memory");
+        "lv.q    C000, 0(%[m])\n"
+        "lv.q    C010, 16(%[m])\n"
+        "lv.q    C020, 32(%[m])\n"
+        "lv.q    C030, 48(%[m])\n"
+        : : [m] "r"(m->m), "m"(*m));
 }
 
 // Position: out[0..2] = joint * (lx, ly, lz, 1); E000 is the transposed view,
@@ -516,6 +518,30 @@ inline void SkinLitByteVertex(const void* sv, float* out, std::uint32_t lightR,
         :
         : [sv] "r"(sv), [out] "r"(out), [lr] "r"(lightR), [lg] "r"(lightG), [lb] "r"(lightB)
         : "memory");
+}
+
+// The same product split in two for the fused loop: issue loads the local
+// position and starts vhtfm4.q into C110; StorePosition writes it. Integer
+// work placed between them hides the VFPU latency. Exact memory operands (no
+// "memory" clobber) let the compiler keep the caller's values in registers;
+// nothing may touch the VFPU between the two (C110 is not tracked by GCC).
+inline void IssuePosition(const float* position) {
+    __asm__ volatile(
+        "lv.s    S100, 0(%[p])\n"
+        "lv.s    S101, 4(%[p])\n"
+        "lv.s    S102, 8(%[p])\n"
+        "vhtfm4.q C110, E000, C100\n"
+        :
+        : [p] "r"(position), "m"(*reinterpret_cast<const float(*)[3]>(position)));
+}
+
+inline void StorePosition(float* out) {
+    __asm__ volatile(
+        "sv.s    S110, 0(%[o])\n"
+        "sv.s    S111, 4(%[o])\n"
+        "sv.s    S112, 8(%[o])\n"
+        : "=m"(*reinterpret_cast<float(*)[3]>(out))
+        : [o] "r"(out));
 }
 
 // Position only, for the fused packed upload: out[0..2] = joint *
