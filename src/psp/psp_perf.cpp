@@ -143,6 +143,7 @@ void ResetHandlerMetrics() {
 
 int g_mainThreadId = -1;  // SceUID of the thread that called Reset()
 u32 g_scenarioNote = 0;
+std::array<u32, 8> g_microbench{};
 u32 g_fusedSkinChecks = 0;
 u32 g_fusedSkinMismatches = 0;
 
@@ -685,6 +686,12 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         "sequential"
 #endif
     );
+    for (u32 slot = 0; slot < g_microbench.size(); ++slot) {
+        if (g_microbench[slot] == 0) continue;
+        const std::size_t length = std::strlen(report);
+        std::snprintf(report + length, sizeof(report) - length, "microbench_%lu_us=%lu\n",
+            static_cast<unsigned long>(slot), static_cast<unsigned long>(g_microbench[slot]));
+    }
     static constexpr const char* rendererNames[] = {
         "page_binds_avg", "gu_state_writes_avg", "list_flushes_avg",
         "staging_bytes_avg", "staging_copies_avg", "matrix_uploads_avg", "clut_loads_avg",
@@ -788,6 +795,10 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
     }
     p3d::io::WriteTextFile(
         path && path[0] ? path : "PSP_PERF.TXT", std::string(report));
+}
+
+void RecordMicrobench(u32 slot, u32 totalUs) {
+    if (slot < g_microbench.size()) g_microbench[slot] = totalUs;
 }
 
 void SetScenarioNote(u32 note) {
@@ -914,6 +925,7 @@ void AddRendererMemory(s32) {}
 void SetAudioMemory(u32) {}
 void RecordAudioCallback(u32) {}
 void RecordMusicDecode(u32) {}
+void RecordMicrobench(u32, u32) {}
 void RecordAudioUnderrun() {}
 void RecordAudioMusicStart() {}
 void RecordAudioMusicMix(u32) {}

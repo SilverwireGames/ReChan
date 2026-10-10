@@ -1687,7 +1687,71 @@ void pspContext::BeginFrame() {
     listOpen = true;
     Setup3DState();
     if (pendingDepthClear) ClearDepthNow();
+#if defined(PSP_DRAW_MICROBENCH)
+    static u32 microbenchFrame = 0;
+    ++microbenchFrame;
+    if (microbenchFrame == 600u || microbenchFrame == 2400u) RunDrawMicrobench();
+#endif
 }
+
+#if defined(PSP_DRAW_MICROBENCH)
+// Diagnostic only: times 200 repetitions of each piece of a draw call at the
+// start of a frame (GE idle) and records the totals in the perf report:
+// 0 clock read, 1 list allocation (sceGuGetMemory), 2 eight NOP command
+// words (uncached list writes), 3 an off-screen 2D triangle (sceGuDrawArray
+// with its stall update), 4 CLUT load + texture image, 5 a 64-byte data-cache
+// writeback, 6 a page/CLUT bind alternating between two cached CLUTs.
+void pspContext::RunDrawMicrobench() {
+    constexpr u32 kReps = 200;
+    EnsureListSpace(kReps * 160u + 4096u);
+    const auto time = [&](u32 slot, auto&& body) {
+        const u32 start = sceKernelGetSystemTimeLow();
+        for (u32 i = 0; i < kReps; ++i) body(i);
+        PspPerf::RecordMicrobench(slot, sceKernelGetSystemTimeLow() - start);
+    };
+    time(0, [](u32) { (void)sceKernelGetSystemTimeLow(); });
+    time(1, [&](u32) { (void)AllocateListMemory(16); });
+    time(2, [](u32) {
+        for (int word = 0; word < 8; ++word) sceGuSendCommandi(0, 0);
+    });
+    Setup2DState();
+    GuDisable(GU_TEXTURE_2D);
+    auto* vertices = static_cast<PspVertex*>(AllocateListMemory(sizeof(PspVertex) * 3));
+    if (vertices) {
+        for (u32 v = 0; v < 3; ++v) vertices[v] = {0.0f, 0.0f, 0u, -64.0f, -64.0f, 0.0f};
+        time(3, [&](u32) {
+            sceGuDrawArray(GU_TRIANGLES,
+                GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                3, nullptr, vertices);
+        });
+    }
+    if (g_staticVram.initialized && g_staticVram.t8[0].pixels) {
+        time(4, [&](u32 i) {
+            sceGuClutLoad(16, clutCachePalettes.data() + (i & 1u) * 256u);
+            sceGuTexImage(0, kPageSize, kPageSize, kPageSize, g_staticVram.t8[0].pixels);
+        });
+    }
+    time(5, [&](u32 i) { WritebackDcacheRange(framePalettes.data() + (i & 7u) * 32u, 64u); });
+    const u32 savedVramHandle = vramHandle;
+    if (pageBindingValid && clutBindingValid) {
+        const u32 handle = lastBoundHandle;
+        const u16 tpage = lastBoundTpage;
+        const u16 cba = lastBoundCba;
+        time(6, [&](u32 i) {
+            vramHandle = handle;
+            BindPage(tpage, (i & 1u) ? cba : static_cast<u16>(cba ^ 1u), false, true);
+        });
+    }
+    vramHandle = savedVramHandle;
+    // The texture/CLUT registers changed outside the caches.
+    pageBindingValid = false;
+    clutBindingValid = false;
+    geClutEntry = kClutCacheNone;
+    g_clutGeContentValid = false;
+    gu3DStateReady = false;
+    Setup3DState();
+}
+#endif
 
 void pspContext::EndFrame() {
     // Opaque submissions can be reordered by material until the frame barrier.

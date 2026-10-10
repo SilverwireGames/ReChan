@@ -364,6 +364,9 @@ public:
     ~pspContext() override;
 
     void BeginFrame() override;
+#if defined(PSP_DRAW_MICROBENCH)
+    void RunDrawMicrobench();
+#endif
     void EndFrame() override;
     void SetCameraAspect(float aspect) override { cameraAspect = aspect; }
     float GetCameraAspect() const override { return cameraAspect; }
