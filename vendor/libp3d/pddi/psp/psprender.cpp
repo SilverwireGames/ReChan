@@ -305,13 +305,26 @@ struct StaticPageSlot {
     bool inUse = false;
 };
 
+// eDRAM page slots per format (32/64/128 KiB each). A page without a slot
+// is sampled from RAM: slower for the GE and contending with the CPU, but
+// identical. Overridable to trade eDRAM for that bandwidth.
+#if !defined(PSP_VRAM_T4_SLOTS)
+#define PSP_VRAM_T4_SLOTS 4
+#endif
+#if !defined(PSP_VRAM_T8_SLOTS)
+#define PSP_VRAM_T8_SLOTS 4
+#endif
+#if !defined(PSP_VRAM_RGBA16_SLOTS)
+#define PSP_VRAM_RGBA16_SLOTS 2
+#endif
+
 struct StaticPspVram {
     void* frameBuffer = nullptr;
     void* displayBuffer = nullptr;
     void* depthBuffer = nullptr;
-    std::array<StaticPageSlot, 4> t4{};
-    std::array<StaticPageSlot, 4> t8{};
-    std::array<StaticPageSlot, 2> rgba16{};
+    std::array<StaticPageSlot, PSP_VRAM_T4_SLOTS> t4{};
+    std::array<StaticPageSlot, PSP_VRAM_T8_SLOTS> t8{};
+    std::array<StaticPageSlot, PSP_VRAM_RGBA16_SLOTS> rgba16{};
     bool initialized = false;
     u32 allocatedBytes = 0;
 };
@@ -3429,6 +3442,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
             GuTexMode(page->format, 0, 0, 0);
             sceGuTexImage(0, kPageSize, kPageSize, kPageSize,
                           page->gpuPixels ? page->gpuPixels : page->pixels);
+            if (!page->gpuPixels) PspPerf::CountRenderer(PspPerf::RendererCounter::RamPageBinds);
         }
     }
     else {
@@ -3436,6 +3450,7 @@ void pspContext::BindPage(float tpageFloat, float cbaFloat, bool wordZeroKey,
             GuTexMode(GU_PSM_5551, 0, 0, 0);
             sceGuTexImage(0, kPageSize, kPageSize, kPageSize,
                           page->gpuPixels ? page->gpuPixels : page->pixels);
+            if (!page->gpuPixels) PspPerf::CountRenderer(PspPerf::RendererCounter::RamPageBinds);
         }
     }
     GuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);

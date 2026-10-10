@@ -54,6 +54,8 @@ enum class RendererCounter : u32 {
     DirectorOverlayUs, OverlayEffectDraws, OverlayEffectWalk,
     // SetVertexData calls that repeated the buffer's current input.
     VertexUploadSkips,
+    // Page binds whose texture the GE samples from RAM (no eDRAM slot).
+    RamPageBinds,
     Count
 };
 
