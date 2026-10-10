@@ -16,3 +16,4 @@ AUDIO_KERNEL_STUB(sceKernelWaitThreadEnd)
 AUDIO_KERNEL_STUB(sceKernelTerminateThread)
 AUDIO_KERNEL_STUB(sceKernelDelayThread)
 #undef AUDIO_KERNEL_STUB
+inline std::uint64_t sceKernelGetSystemTimeWide() { return 0; }

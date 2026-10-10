@@ -172,19 +172,29 @@ static u64 CachedCursorStep(Voice& voice, u32 rate) {
     return voice.step;
 }
 
-static float CursorFraction(u64 cursor) {
-    return static_cast<float>(static_cast<u32>(cursor) & kCursorFractionMask)
-        * (1.0f / static_cast<float>(kCursorOne));
-}
+// The worker runs above the game thread; a whole pair (~19 ms of decode on
+// the PSP-3000) in one piece took that time out of a single frame. Yield
+// between slices instead: a pair still decodes in a fraction of its ~2.6 s.
+constexpr u32 kMusicDecodeSliceBlocks = 128;
+constexpr SceUInt kMusicDecodeYieldUs = 500;
 
-static void DecodeMusicChunk(const u8* chunkData, std::array<s16, kMusicChunkSamples>& output) {
+// Returns the decode time, sleeps excluded.
+static u32 DecodeMusicChunk(const u8* chunkData, std::array<s16, kMusicChunkSamples>& output) {
     s32 prev0 = 0;
     s32 prev1 = 0;
-    for (u32 block = 0; block < kMusicChunkBlocks; ++block) {
-        s16 blockOutput[28];
-        SpuAdpcm::DecodeBlock(chunkData + block * 16, blockOutput, prev0, prev1);
-        std::memcpy(output.data() + block * 28, blockOutput, sizeof(blockOutput));
+    u32 busyUs = 0;
+    for (u32 slice = 0; slice < kMusicChunkBlocks; slice += kMusicDecodeSliceBlocks) {
+        const u64 sliceStart = sceKernelGetSystemTimeWide();
+        const u32 sliceEnd = std::min(slice + kMusicDecodeSliceBlocks, kMusicChunkBlocks);
+        for (u32 block = slice; block < sliceEnd; ++block) {
+            s16 blockOutput[28];
+            SpuAdpcm::DecodeBlock(chunkData + block * 16, blockOutput, prev0, prev1);
+            std::memcpy(output.data() + block * 28, blockOutput, sizeof(blockOutput));
+        }
+        busyUs += static_cast<u32>(sceKernelGetSystemTimeWide() - sliceStart);
+        if (sliceEnd < kMusicChunkBlocks) sceKernelDelayThread(kMusicDecodeYieldUs);
     }
+    return busyUs;
 }
 
 static bool PrepareMusicPair(u32 pair, MusicChunk& destination) {
@@ -203,13 +213,12 @@ static bool PrepareMusicPair(u32 pair, MusicChunk& destination) {
         return false;
     }
 
+    const u32 decodeUs = DecodeMusicChunk(g_musicStream.compressedPair.data(), destination.left)
+        + DecodeMusicChunk(g_musicStream.compressedPair.data() + kMusicChunkBytes, destination.right);
 #if defined(PSP_PERF_TELEMETRY)
-    const u64 decodeStart = sceKernelGetSystemTimeWide();
-#endif
-    DecodeMusicChunk(g_musicStream.compressedPair.data(), destination.left);
-    DecodeMusicChunk(g_musicStream.compressedPair.data() + kMusicChunkBytes, destination.right);
-#if defined(PSP_PERF_TELEMETRY)
-    PspPerf::RecordMusicDecode(static_cast<u32>(sceKernelGetSystemTimeWide() - decodeStart));
+    PspPerf::RecordMusicDecode(decodeUs);
+#else
+    (void)decodeUs;
 #endif
     destination.pair = pair;
     return true;
@@ -325,7 +334,39 @@ static bool PromoteMusicPair(u32 pair) {
     return true;
 }
 
-static void MixMusicStream(s16* output, u32 requestedFrames) {
+// Fixed-point mixing. The callback preempts the game thread every 23.2 ms;
+// its float path (int/float conversions and a clamp per voice and sample)
+// took ~3.2 ms of each period on the PSP-3000, about 14% of the CPU.
+// Voices and music add into a 24.8 accumulator (PCM level * 256), rounded
+// toward zero and clamped once per output sample, as the float path's s16
+// conversion did for a single source.
+constexpr u32 kMixFractionBits = 8;
+constexpr u32 kGainBits = 16;  // 1.0 == 65536
+constexpr u32 kLerpBits = 15;  // interpolation fraction
+std::array<s32, kOutputFrames * 2> g_mixAccumulator;
+
+static s32 GainToFixed(float gain) {
+    // Gains are non-negative products of volumes, pan scales and the master
+    // volume; bound them so the 64-bit product below cannot overflow.
+    const float scaled = std::clamp(gain, 0.0f, 256.0f) * static_cast<float>(1u << kGainBits);
+    return static_cast<s32>(scaled + 0.5f);
+}
+
+// Q15 value of a sample at `value` plus a fraction of the way to `next`.
+static s32 LerpQ15(s32 value, s32 next, u32 fraction) {
+    return value * (1 << kLerpBits) + (next - value) * static_cast<s32>(fraction);
+}
+
+static s32 ScaleToMix(s32 valueQ15, s32 gain) {
+    constexpr u32 shift = kLerpBits + kGainBits - kMixFractionBits;
+    return static_cast<s32>((static_cast<s64>(valueQ15) * gain) >> shift);
+}
+
+static u32 CursorLerpFraction(u64 cursor) {
+    return (static_cast<u32>(cursor) & kCursorFractionMask) >> (kCursorFractionBits - kLerpBits);
+}
+
+static void MixMusicStream(s32* mix, u32 requestedFrames) {
     g_musicMixers.fetch_add(1, std::memory_order_acquire);
     if (!g_musicStream.active.load(std::memory_order_acquire)
         || g_musicStream.totalFrames == 0) {
@@ -336,11 +377,20 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
     bool underrun = false;
     u32 underrunFrame = requestedFrames;
     u32 mixedFrames = 0;
+    s32 holdLeft = 0;
+    s32 holdRight = 0;
+    bool held = false;
     const u64 streamEnd = static_cast<u64>(g_musicStream.totalFrames) * kCursorOne;
     // Linear fade: constant increment per callback (see the voice mixer).
     const float musicFadeStep = g_musicStream.fadeFrames > 0
         ? (g_musicStream.targetVolume - g_musicStream.volume) / static_cast<float>(g_musicStream.fadeFrames)
         : 0.0f;
+    const u32 framesPerPair = g_musicStream.framesPerPair;
+    s32 gain = GainToFixed(g_musicStream.volume * g_masterVolume);
+    // First source frame of the pair being read: the per-frame pair/offset
+    // division only runs when the cursor leaves it.
+    u32 knownPair = kInvalidPair;
+    u32 knownFirst = 0;
     for (u32 frame = 0; frame < requestedFrames; ++frame) {
         if (g_musicStream.cursor >= streamEnd) {
             if (!g_musicStream.loop) {
@@ -357,19 +407,24 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
         }
 
         const u32 sourceFrame = static_cast<u32>(g_musicStream.cursor >> kCursorFractionBits);
-        const u32 pair = sourceFrame / g_musicStream.framesPerPair;
-        if (pair >= g_musicStream.pairCount) break;
-        if (pair != g_musicStream.currentPair) {
-            if (!PromoteMusicPair(pair)) {
-                // A slow Memory Stick or worker can miss a period. Keep the
-                // stream alive and hold the last sample for this period
-                // instead of producing a long zero-filled hole.
-                underrun = true;
-                underrunFrame = frame;
-                break;
+        if (knownPair == kInvalidPair || knownPair != g_musicStream.currentPair
+            || sourceFrame - knownFirst >= framesPerPair) {
+            const u32 pair = sourceFrame / framesPerPair;
+            if (pair >= g_musicStream.pairCount) break;
+            if (pair != g_musicStream.currentPair) {
+                if (!PromoteMusicPair(pair)) {
+                    // A slow Memory Stick or worker can miss a period. Keep
+                    // the stream alive and hold the last sample for this
+                    // period instead of producing a long zero-filled hole.
+                    underrun = true;
+                    underrunFrame = frame;
+                    break;
+                }
+                const u32 nextPair = pair + 1u < g_musicStream.pairCount ? pair + 1u : 0u;
+                if (g_musicStream.pairCount > 1u) RequestMusicPair(nextPair);
             }
-            const u32 nextPair = pair + 1u < g_musicStream.pairCount ? pair + 1u : 0u;
-            if (g_musicStream.pairCount > 1u) RequestMusicPair(nextPair);
+            knownPair = pair;
+            knownFirst = pair * framesPerPair;
         }
 
         const u32 currentBuffer = g_musicStream.currentBuffer.load(std::memory_order_acquire);
@@ -379,29 +434,22 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
             break;
         }
         const MusicChunk& chunkData = g_musicStream.chunks[currentBuffer];
-        const u32 localFrame = sourceFrame % g_musicStream.framesPerPair;
-        const u32 nextFrame = std::min<u32>(localFrame + 1, g_musicStream.framesPerPair - 1);
-        const float fraction = CursorFraction(g_musicStream.cursor);
-        const float left = static_cast<float>(chunkData.left[localFrame])
-            + (static_cast<float>(chunkData.left[nextFrame])
-                - static_cast<float>(chunkData.left[localFrame])) * fraction;
-        const float right = static_cast<float>(chunkData.right[localFrame])
-            + (static_cast<float>(chunkData.right[nextFrame])
-                - static_cast<float>(chunkData.right[localFrame])) * fraction;
-        const float gain = g_musicStream.volume * g_masterVolume;
-        const u32 outputIndex = frame * 2;
-        float outLeft = left * gain;
-        float outRight = right * gain;
+        const u32 localFrame = sourceFrame - knownFirst;
+        const u32 nextFrame = std::min<u32>(localFrame + 1, framesPerPair - 1);
+        const u32 fraction = CursorLerpFraction(g_musicStream.cursor);
+        const s32 left = LerpQ15(chunkData.left[localFrame], chunkData.left[nextFrame], fraction);
+        const s32 right = LerpQ15(chunkData.right[localFrame], chunkData.right[nextFrame], fraction);
+        s32 outLeft = ScaleToMix(left, gain);
+        s32 outRight = ScaleToMix(right, gain);
         if (g_mono) {
-            outLeft = outRight = (outLeft + outRight) * 0.5f;
+            outLeft = outRight = (outLeft + outRight) / 2;
         }
-        output[outputIndex] = static_cast<s16>(std::clamp(
-            static_cast<float>(output[outputIndex]) + outLeft, -32768.0f, 32767.0f));
-        output[outputIndex + 1] = static_cast<s16>(std::clamp(
-            static_cast<float>(output[outputIndex + 1]) + outRight, -32768.0f, 32767.0f));
-
-        g_musicStream.holdLeft = outLeft;
-        g_musicStream.holdRight = outRight;
+        const u32 outputIndex = frame * 2;
+        mix[outputIndex] += outLeft;
+        mix[outputIndex + 1] += outRight;
+        holdLeft = outLeft;
+        holdRight = outRight;
+        held = true;
 
         g_musicStream.cursor += kCursorOne / 2u;
         ++mixedFrames;
@@ -410,21 +458,28 @@ static void MixMusicStream(s16* output, u32 requestedFrames) {
             g_musicStream.volume = g_musicStream.fadeFrames == 0
                 ? g_musicStream.targetVolume
                 : g_musicStream.volume + musicFadeStep;
+            gain = GainToFixed(g_musicStream.volume * g_masterVolume);
         }
+    }
+    if (held) {
+        constexpr float kMixScale = 1.0f / static_cast<float>(1u << kMixFractionBits);
+        g_musicStream.holdLeft = static_cast<float>(holdLeft) * kMixScale;
+        g_musicStream.holdRight = static_cast<float>(holdRight) * kMixScale;
     }
 
     if (underrun) {
         PspPerf::RecordAudioUnderrun();
-        const s16 holdLeft = static_cast<s16>(std::clamp(
-            g_musicStream.holdLeft, -32768.0f, 32767.0f));
-        const s16 holdRight = static_cast<s16>(std::clamp(
-            g_musicStream.holdRight, -32768.0f, 32767.0f));
-        // The callback output was cleared before voice/music mixing. Fill the
-        // remainder with a stable tail sample to avoid a periodic hard click.
+        const s32 fillLeft = static_cast<s32>(static_cast<s16>(std::clamp(
+            g_musicStream.holdLeft, -32768.0f, 32767.0f))) * (1 << kMixFractionBits);
+        const s32 fillRight = static_cast<s32>(static_cast<s16>(std::clamp(
+            g_musicStream.holdRight, -32768.0f, 32767.0f))) * (1 << kMixFractionBits);
+        // Only the music adds after the voices: fill the remainder where the
+        // voices left silence with a stable tail sample, so an underrun does
+        // not click.
         for (u32 frame = underrunFrame; frame < requestedFrames; ++frame) {
             const u32 outputIndex = frame * 2;
-            if (output[outputIndex] == 0) output[outputIndex] = holdLeft;
-            if (output[outputIndex + 1] == 0) output[outputIndex + 1] = holdRight;
+            if (mix[outputIndex] == 0) mix[outputIndex] = fillLeft;
+            if (mix[outputIndex + 1] == 0) mix[outputIndex + 1] = fillRight;
         }
     }
 
@@ -456,13 +511,7 @@ static void ResetMusicStream() {
     g_musicStream.holdRight = 0.0f;
 }
 
-static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
-#if defined(PSP_PERF_TELEMETRY)
-    const u64 callbackStart = sceKernelGetSystemTimeWide();
-#endif
-    auto* output = static_cast<s16*>(buffer);
-    std::memset(output, 0, requestedFrames * 2 * sizeof(s16));
-
+static void MixVoices(s32* mix, u32 requestedFrames) {
     for (Voice& voice : g_voices) {
         if (!voice.active) continue;
         Sample* sample = GetSample(voice.sample);
@@ -478,6 +527,8 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
         float left = voice.volume * leftScale;
         float right = voice.volume * rightScale;
         if (g_mono) right = left = (left + right) * 0.5f;
+        s32 leftGain = GainToFixed(left);
+        s32 rightGain = GainToFixed(right);
         const u64 sampleEnd = static_cast<u64>(sample->frames) * kCursorOne;
         u64 step = CachedCursorStep(voice, sample->rate);
         // Reduce large looping strides once. The inner loop only needs one
@@ -497,19 +548,28 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
         const s16* pcm = sample->pcm.data();
         const u32 channels = sample->channels;
         const u32 lastFrame = sample->frames - 1;
-        const float invChannels = channels > 2 ? 1.0f / static_cast<float>(channels) : 1.0f;
-        const auto read = [&](u32 source) -> float {
-            if (channels == 1) return pcm[source];
-            const u32 index = source * channels;
-            // (a + b) * 0.5f is bit-identical to (a + b) / 2.0f.
-            if (channels == 2) return (static_cast<float>(pcm[index]) + static_cast<float>(pcm[index + 1])) * 0.5f;
-            float sum = 0.0f;
-            for (u32 channel = 0; channel < channels; ++channel) sum += pcm[index + channel];
-            return sum * invChannels;
+        // Q15 source value: mono as is, stereo as the exact average, wider
+        // layouts as their mean.
+        const auto readQ15 = [&](u32 source, u32 next, u32 fraction) -> s32 {
+            if (channels == 1) return LerpQ15(pcm[source], pcm[next], fraction);
+            if (channels == 2) {
+                const s32 current = pcm[source * 2] + pcm[source * 2 + 1];
+                const s32 following = pcm[next * 2] + pcm[next * 2 + 1];
+                return current * (1 << (kLerpBits - 1))
+                    + static_cast<s32>((static_cast<s64>(following - current) * fraction) >> 1);
+            }
+            s32 current = 0;
+            s32 following = 0;
+            for (u32 channel = 0; channel < channels; ++channel) {
+                current += pcm[source * channels + channel];
+                following += pcm[next * channels + channel];
+            }
+            const s64 value = static_cast<s64>(current) * (1 << kLerpBits)
+                + static_cast<s64>(following - current) * fraction;
+            return static_cast<s32>(value / static_cast<s32>(channels));
         };
 
         for (u32 frame = 0; frame < requestedFrames; ++frame) {
-            if (!voice.active) break;
             if (voice.cursor >= sampleEnd) {
                 if (voice.loop) voice.cursor -= sampleEnd;
                 else {
@@ -520,25 +580,47 @@ static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
 
             const u32 sourceFrame = static_cast<u32>(voice.cursor >> kCursorFractionBits);
             const u32 nextFrame = std::min<u32>(sourceFrame + 1, lastFrame);
-            const float fraction = CursorFraction(voice.cursor);
-            const float current = read(sourceFrame);
-            const float value = current + (read(nextFrame) - current) * fraction;
+            const s32 value = readQ15(sourceFrame, nextFrame, CursorLerpFraction(voice.cursor));
             const u32 outputIndex = frame * 2;
-            output[outputIndex] = static_cast<s16>(std::clamp(output[outputIndex] + value * left, -32768.0f, 32767.0f));
-            output[outputIndex + 1] = static_cast<s16>(std::clamp(output[outputIndex + 1] + value * right, -32768.0f, 32767.0f));
+            mix[outputIndex] += ScaleToMix(value, leftGain);
+            mix[outputIndex + 1] += ScaleToMix(value, rightGain);
             voice.cursor += step;
             if (voice.fadeFrames > 0) {
                 --voice.fadeFrames;
                 voice.volume = voice.fadeFrames == 0 ? voice.targetVolume : voice.volume + fadeStep;
                 // Matches the previous mixer: fade updates use the panned
                 // (non-mono-averaged) gains.
-                left = voice.volume * leftScale;
-                right = voice.volume * rightScale;
+                leftGain = GainToFixed(voice.volume * leftScale);
+                rightGain = GainToFixed(voice.volume * rightScale);
             }
         }
     }
+}
 
-    MixMusicStream(output, requestedFrames);
+static void MixPeriod(s16* output, u32 frames) {
+    s32* mix = g_mixAccumulator.data();
+    std::memset(mix, 0, frames * 2 * sizeof(s32));
+    MixVoices(mix, frames);
+    MixMusicStream(mix, frames);
+    for (u32 index = 0; index < frames * 2; ++index) {
+        // Toward zero, as the float path's s16 conversion.
+        const s32 value = mix[index];
+        const s32 level = (value + ((value >> 31) & ((1 << kMixFractionBits) - 1))) >> kMixFractionBits;
+        output[index] = static_cast<s16>(std::clamp<s32>(level, -32768, 32767));
+    }
+}
+
+static void AudioCallback(void* buffer, unsigned int requestedFrames, void*) {
+#if defined(PSP_PERF_TELEMETRY)
+    const u64 callbackStart = sceKernelGetSystemTimeWide();
+#endif
+    auto* output = static_cast<s16*>(buffer);
+    // pspaudiolib asks for kOutputFrames; split anything longer.
+    for (u32 done = 0; done < requestedFrames;) {
+        const u32 frames = std::min<u32>(requestedFrames - done, kOutputFrames);
+        MixPeriod(output + done * 2, frames);
+        done += frames;
+    }
 #if defined(PSP_PERF_TELEMETRY)
     const u64 callbackUs = sceKernelGetSystemTimeWide() - callbackStart;
     PspPerf::RecordAudioCallback(static_cast<u32>(std::min<u64>(callbackUs, 0xFFFFFFFFull)));
