@@ -593,6 +593,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
         materialRawBitsValid = false;
     }
     const bool reuseMaterialKeys = materialRawBitsValid;
+    bool materialChanged = false;
     // List-memory builds submit page geometry through the compact stream
     // only. With integral UVs, write just that stream and rebuild the float
     // copy on demand (vramHandle == 0 draws). Other builds never read the
@@ -610,6 +611,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
         const u64 rawMaterial = (static_cast<u64>(tpageBits) << 32) | cbaBits;
         if (!reuseMaterialKeys || materialRawBits[i] != rawMaterial) {
             materialRawBits[i] = rawMaterial;
+            materialChanged = true;
             const float tpage = input[8];
             const float cba = input[9];
             const bool materialIsValid = std::isfinite(tpage) && tpage >= 0.0f
@@ -671,6 +673,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
         packed.z = target.z;
     }
     materialRawBitsValid = true;
+    if (materialChanged) materialRunsValid = false;
     packedVerticesValid = packedOnly || packedUvValid;
     floatStale = packedOnly;
     // Colours were rewritten: a pending colour patch no longer applies.
@@ -870,7 +873,40 @@ void pspPrimBuffer::SetIndices(const u16* source, u32 count) {
 #endif
 }
 
+void pspPrimBuffer::BuildMaterialRuns() {
+    materialRuns.clear();
+    const u32 count = static_cast<u32>(indices.size());
+    for (u32 triangle = 0; triangle + 2u < count; triangle += 3u) {
+        const u16 index = indices[triangle];
+        const bool valid = HasMaterialKey(index);
+        const u32 key = valid ? GetMaterialKey(index) : 0u;
+        if (!materialRuns.empty() && materialRuns.back().valid == valid
+            && materialRuns.back().key == key) {
+            materialRuns.back().end = triangle + 3u;
+        }
+        else {
+            materialRuns.push_back({triangle + 3u, key, valid});
+        }
+    }
+    materialRunsValid = true;
+}
+
+bool pspPrimBuffer::FindMaterialRun(u32 start, bool* valid, u32* key, u32* end) {
+    if (start % 3u != 0u) return false;
+    if (!materialRunsValid) BuildMaterialRuns();
+    // First run ending after start: the run that contains its triangle.
+    const auto run = std::upper_bound(materialRuns.begin(), materialRuns.end(), start,
+        [](u32 position, const MaterialRun& candidate) { return position < candidate.end; });
+    if (run == materialRuns.end()) return false;
+    *valid = run->valid;
+    *key = run->key;
+    *end = run->end;
+    return true;
+}
+
 void pspPrimBuffer::RevalidateIndices() {
+    // Indices or (in SetVertexData) material keys changed.
+    materialRunsValid = false;
     indicesValid = true;
     const u32 vertexCount = static_cast<u32>(vertices.size());
     for (const u16 index : indices) {
@@ -2935,9 +2971,22 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
         u32 materialKey = 0;
         if (isTriangles && vramHandle && start + 2 < end) {
             const u16 firstIndex = indices[start];
-            const bool firstMaterialValid = texInfoOverride || buffer->HasMaterialKey(firstIndex);
-            const u32 firstMaterialKey = texInfoOverride
+            bool firstMaterialValid = texInfoOverride || buffer->HasMaterialKey(firstIndex);
+            u32 firstMaterialKey = texInfoOverride
                 ? texInfoWord : buffer->GetMaterialKey(firstIndex);
+            // The cached run gives the scans below their result directly.
+            bool runKnown = false;
+            if (!texInfoOverride) {
+                bool runValid = false;
+                u32 runKey = 0;
+                u32 runLimit = 0;
+                if (buffer->FindMaterialRun(start, &runValid, &runKey, &runLimit)) {
+                    firstMaterialValid = runValid;
+                    firstMaterialKey = runKey;
+                    if (runLimit < runEnd) runEnd = runLimit;
+                    runKnown = true;
+                }
+            }
 #if defined(PSP_GU_DIAGNOSTIC)
             if (probe) PSP_GU_DIAG("[PSP GU DIAG] prim #%lu material scan firstIndex=%u firstTpage=%f firstCba=%f",
                 static_cast<unsigned long>(primId), static_cast<unsigned>(firstIndex),
@@ -2946,7 +2995,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
 #endif
             if (firstMaterialValid) {
                 materialKey = firstMaterialKey;
-                if (!texInfoOverride) {
+                if (!texInfoOverride && !runKnown) {
                     for (u32 cursor = start + 3; cursor + 2 < runEnd; cursor += 3) {
 #if defined(PSP_GU_DIAGNOSTIC)
                         if (probe && (cursor == start + 3 || cursor % 300u == 0u)) {
@@ -2997,7 +3046,7 @@ void pspContext::DrawPrimBuffer(pddiPrimBuffer* base, u32 indexOffset, u32 index
                 // run at the next textured triangle; otherwise every textured
                 // face after it in the chunk is drawn untextured (hub gates:
                 // untextured edge strips precede the textured door faces).
-                for (u32 cursor = start + 3; cursor + 2 < runEnd; cursor += 3) {
+                for (u32 cursor = start + 3; !runKnown && cursor + 2 < runEnd; cursor += 3) {
                     if (buffer->HasMaterialKey(indices[cursor])) {
                         runEnd = cursor;
                         break;

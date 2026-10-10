@@ -114,6 +114,12 @@ public:
     u32 GetMaterialKey(u16 index) const {
         return index < materialKeys.size() ? materialKeys[index] : 0u;
     }
+    // Material run of the triangle starting at index position `start` (a
+    // multiple of 3): its class (valid, key) and the index position where the
+    // next class begins. Same boundaries as DrawPrimBuffer's per-triangle
+    // scan, which otherwise re-reads indices and both material arrays for
+    // every draw of an unchanged buffer. False when start is not a triangle.
+    bool FindMaterialRun(u32 start, bool* valid, u32* key, u32* end);
 
 private:
     pddiPrimType primType;
@@ -132,6 +138,16 @@ private:
     // raw float bits so unchanged lanes skip the finite/range/key conversion.
     std::vector<u64> materialRawBits;
     bool materialRawBitsValid = false;
+    // Maximal runs of whole triangles (from index 0) whose first vertex has
+    // the same material class; rebuilt lazily after indices or keys change.
+    struct MaterialRun {
+        u32 end;
+        u32 key;
+        bool valid;
+    };
+    std::vector<MaterialRun> materialRuns;
+    bool materialRunsValid = false;
+    void BuildMaterialRuns();
     // True when the compact stream is current and the float stream is not.
     bool floatStale = false;
     // Colour patch state (PatchColours). Base colours are captured lazily on

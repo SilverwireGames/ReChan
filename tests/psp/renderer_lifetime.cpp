@@ -1,5 +1,6 @@
 // Exercise the production renderer against delayed GE reads, not a duplicate
 // implementation of the cache. Run with scripts/test_psp_renderer.sh.
+#include <random>
 #include <array>
 #include <string>
 #include <utility>
@@ -507,6 +508,60 @@ int main() {
             "depth clear not restored after pause");
         PspReleasePauseBackdrop(); // idempotent
         display.SwapBuffers();
+    }
+
+    {
+        // Cached material runs must give exactly the per-triangle scan's
+        // boundaries (valid, invalid and mixed keys, partial tails), also
+        // after a dynamic upload rewrites material lanes.
+        std::mt19937 rng(20261010u);
+        const auto checkRuns = [&](pspPrimBuffer& runs, const std::vector<u16>& idx) {
+            for (u32 start = 0; start + 2 < idx.size(); start += 3) {
+                for (const u32 chunk : {3u, 9u, 30u, 8190u}) {
+                    u32 runEnd = start + std::min<u32>(chunk, static_cast<u32>(idx.size()) - start);
+                    runEnd -= (runEnd - start) % 3u;
+                    const bool firstValid = runs.HasMaterialKey(idx[start]);
+                    const u32 firstKey = runs.GetMaterialKey(idx[start]);
+                    u32 scanEnd = runEnd;
+                    for (u32 cursor = start + 3; cursor + 2 < runEnd; cursor += 3) {
+                        const u16 tri = idx[cursor];
+                        const bool differs = firstValid
+                            ? (!runs.HasMaterialKey(tri) || runs.GetMaterialKey(tri) != firstKey)
+                            : runs.HasMaterialKey(tri);
+                        if (differs) { scanEnd = cursor; break; }
+                    }
+                    bool valid = false;
+                    u32 key = 0;
+                    u32 limit = 0;
+                    require(runs.FindMaterialRun(start, &valid, &key, &limit), "material run missing");
+                    require(valid == firstValid && (!valid || key == firstKey)
+                        && std::min(runEnd, limit) == scanEnd, "material run differs from the scan");
+                }
+            }
+        };
+        for (int round = 0; round < 300; ++round) {
+            const u32 vertexCount = 1u + rng() % 48u;
+            const u32 indexCount = 3u * (1u + rng() % 60u) + rng() % 3u;
+            pspPrimBuffer runs({PDDI_PRIM_TRIANGLES,
+                PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, vertexCount, indexCount});
+            std::vector<float> data(vertexCount * 10u, 1.0f);
+            const auto material = [&](float* lane) {
+                const u32 kind = rng() % 4u;
+                lane[0] = kind == 0u ? -1.0f : static_cast<float>(kind);
+                lane[1] = kind == 0u ? 0.0f : static_cast<float>(rng() % 2u);
+            };
+            for (u32 v = 0; v < vertexCount; ++v) material(&data[v * 10u + 8u]);
+            runs.SetVertexData(data.data(), vertexCount);
+            std::vector<u16> idx(indexCount);
+            for (u16& index : idx) index = static_cast<u16>(rng() % vertexCount);
+            runs.SetIndices(idx.data(), indexCount);
+            checkRuns(runs, idx);
+            for (u32 v = 0; v < vertexCount; ++v) {
+                if (rng() % 3u == 0u) material(&data[v * 10u + 8u]);
+            }
+            require(runs.SetDynamicVertexData(data.data(), vertexCount, true), "dynamic upload refused");
+            checkRuns(runs, idx);
+        }
     }
 
     std::printf("PASS: draws=%d copies=%d cluts=%d syncs=%d peak_list=%zu signature=%016llx\n",
