@@ -3,7 +3,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output=$(mktemp -d "${TMPDIR:-/tmp}/rechan-psp-tests.XXXXXX")
 trap 'rm -rf "$output"' EXIT HUP INT TERM
-for variant in fallback native native-list native-persistent reference ram; do
+for variant in fallback native native-list native-persistent reference ram triple; do
     case "$variant" in
         fallback) defines="" ;;
         native) defines="-DPSP_ENABLE_NATIVE_INDEXED" ;;
@@ -11,6 +11,7 @@ for variant in fallback native native-list native-persistent reference ram; do
         native-persistent) defines="-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES" ;;
         reference) defines="-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_PALETTE_REFERENCE" ;;
         ram) defines="-DPSP_DISABLE_STATIC_PAGE_UPLOAD" ;;
+        triple) defines="-DPSP_ENABLE_NATIVE_INDEXED -DPSP_INDEXED_LIST_MEMORY -DPSP_INDEXED_PERSISTENT_INDICES -DPSP_TRIPLE_BUFFER" ;;
     esac
     # Intentionally split this fixed, internal defines list into arguments.
     "${CXX:-c++}" -std=c++17 -O1 -g -DNDEBUG -DRC_PLATFORM_PSP $defines \
@@ -22,7 +23,7 @@ for variant in fallback native native-list native-persistent reference ram; do
     cat "$output/$variant.txt"
 done
 # The emitted logical geometry must be identical across submission paths.
-for variant in native native-list native-persistent reference ram; do
+for variant in native native-list native-persistent reference ram triple; do
     test "$(sed 's/.*signature=//' "$output/fallback.txt")" = \
          "$(sed 's/.*signature=//' "$output/$variant.txt")"
 done

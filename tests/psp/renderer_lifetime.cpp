@@ -67,7 +67,12 @@ int main() {
     pspDisplay display;
     require(display.InitDisplay(pddiDisplayInit{}), "display init");
     require(g_staticVram.initialized && !g_staticVram.frameBuffer, "offset zero is valid");
+#if defined(PSP_TRIPLE_BUFFER)
+    // Three RGB565 colour buffers free one 32-bit buffer's worth of eDRAM.
+    require(g_staticVram.allocatedBytes == 2048000 - 512 * 272 * 2, "bounded eDRAM layout");
+#else
     require(g_staticVram.allocatedBytes == 2048000, "bounded eDRAM layout");
+#endif
     auto context = std::make_unique<pspContext>(&display);
     auto& ctx = *context;
     std::vector<u16> image(1024 * 512, 0x4321);
@@ -461,16 +466,15 @@ int main() {
         const auto edram = reinterpret_cast<uintptr_t>(sceGeEdramGetAddr());
         const auto depth = reinterpret_cast<uintptr_t>(g_staticVram.depthBuffer);
         ctx.BeginFrame();
-        const void* drawTarget = g_drawingSecondBuffer
-            ? g_staticVram.displayBuffer : g_staticVram.frameBuffer;
+        const void* drawTarget = FakeGe::drawBuffer;
         ctx.Clear(PDDI_BUFFER_ALL);
         require(FakeGe::clearFlags == (GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT), "normal clear");
         require(!PspDrawPauseBackdrop(), "backdrop drawn before capture");
         require(PspCapturePauseBackdrop() && PspHasPauseBackdrop(), "capture failed");
         require(FakeGe::texture == reinterpret_cast<const void*>(edram
-            + reinterpret_cast<uintptr_t>(drawTarget)) && FakeGe::textureFormat == GU_PSM_8888,
+            + reinterpret_cast<uintptr_t>(drawTarget)) && FakeGe::textureFormat == kFramebufferPsm,
             "capture must read the frame being drawn");
-        require(FakeGe::drawBufferFormat == GU_PSM_8888 && FakeGe::drawBuffer == drawTarget
+        require(FakeGe::drawBufferFormat == kFramebufferPsm && FakeGe::drawBuffer == drawTarget
             && FakeGe::depthMask == GU_TRUE, "capture must restore the colour target");
         display.SwapBuffers();
         for (int frame = 0; frame < 3; ++frame) {
@@ -683,6 +687,41 @@ int main() {
         reference.SetDynamicVertexData(lanesA.data(), kCount, true);
         upload(lanesA, 77u);  // must compare again after the dynamic upload
         sameMaterials("sourced upload after another material writer");
+    }
+
+    {
+        // Presentation under VBlanks at random points between and inside
+        // frames: the display stubs reject any GE write to the buffer on
+        // screen or queued, and any swap over a still-queued frame.
+        std::mt19937 vblanks(11);
+        const int swapsBefore = FakeGe::swaps;
+        for (int frame = 0; frame < 400; ++frame) {
+            for (int n = static_cast<int>(vblanks() % 3u); n > 0; --n) FakeDisplay::Vblank();
+            ctx.BeginFrame();
+            ctx.Clear(PDDI_BUFFER_ALL);
+            if (vblanks() % 2u) FakeDisplay::Vblank();
+            ctx.DrawPrimBuffer(&buffer, 0, 3);
+            if (frame % 50 == 7) {
+                require(PspCapturePauseBackdrop(), "capture under presentation");
+                ctx.DrawPrimBuffer(&buffer, 0, 3);  // releases it again
+            }
+            display.SwapBuffers();
+        }
+        require(FakeGe::swaps == swapsBefore + 400, "every frame presented once");
+#if defined(PSP_TRIPLE_BUFFER)
+        // A frame slower than one refresh starts drawing at once.
+        ctx.BeginFrame();
+        display.SwapBuffers();
+        const int vcountBefore = FakeDisplay::vcount;
+        FakeDisplay::Vblank();
+        ctx.BeginFrame();
+        ctx.DrawPrimBuffer(&buffer, 0, 3);
+        display.SwapBuffers();
+        ctx.BeginFrame();
+        require(FakeDisplay::vcount == vcountBefore + 1, "triple buffering waited for a VBlank");
+        ctx.DrawPrimBuffer(&buffer, 0, 3);
+        display.SwapBuffers();
+#endif
     }
 
     std::printf("PASS: draws=%d copies=%d cluts=%d syncs=%d peak_list=%zu signature=%016llx\n",

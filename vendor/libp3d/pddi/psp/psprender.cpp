@@ -110,10 +110,18 @@ static void GuDepthMask(int mask) {
 // Incremented by every GUM matrix load from the 3D path. Setup2DState replaces
 // the GUM matrices; it can skip that work while no 3D load happened since.
 u32 g_gumMatrixSerial = 1;
+// 16-bit colour buffers: 3D draws dither (PSX gouraud/blend look); 2D
+// overlays do not, so exact 15-bit artwork stays exact.
+#if defined(PSP_TRIPLE_BUFFER)
+constexpr u32 kDitherCapability = 1u << GU_DITHER;
+#else
+constexpr u32 kDitherCapability = 0u;
+#endif
 // Capabilities Setup2DState disables. Their cached bits prove the 2D state.
 constexpr u32 k2DDisabledCapabilities = (1u << GU_DEPTH_TEST) | (1u << GU_CULL_FACE)
     | (1u << GU_ALPHA_TEST) | (1u << GU_COLOR_TEST) | (1u << GU_STENCIL_TEST)
-    | (1u << GU_COLOR_LOGIC_OP) | (1u << GU_LIGHTING) | (1u << GU_CLIP_PLANES);
+    | (1u << GU_COLOR_LOGIC_OP) | (1u << GU_LIGHTING) | (1u << GU_CLIP_PLANES)
+    | kDitherCapability;
 // sceGuSwapBuffers alternates the draw target between the two colour
 // buffers; the pause backdrop needs the one currently being rendered.
 bool g_drawingSecondBuffer = false;
@@ -121,6 +129,14 @@ bool g_drawingSecondBuffer = false;
 // may draw into the buffer that swap released (see WaitForSwapVblank).
 u32 g_swapVcount = 0;
 bool g_swapVblankPending = false;
+#if defined(PSP_TRIPLE_BUFFER)
+// Triple buffering: the buffer being drawn, the one last handed to the
+// display (on screen, or queued for the next VBlank) and the one it replaces.
+// The draw target is always the third: never scanned out, never queued.
+u32 g_drawFramebuffer = 0;
+u32 g_shownFramebuffer = 1;
+u32 g_replacedFramebuffer = 2;
+#endif
 
 // A swap queued with PSP_DISPLAY_SETBUF_NEXTVSYNC keeps scanning out the
 // released buffer until the next VBlank. One VBlank after the swap is all the
@@ -128,7 +144,7 @@ bool g_swapVblankPending = false;
 // instead of waiting for a further VBlank (a 35 ms frame presents at 35 ms
 // rather than being rounded up to 50 ms). The vcount is read after the swap,
 // so a VBlank racing the swap only costs one extra wait, never a tear.
-static void WaitForSwapVblank() {
+static void WaitForVblankSinceSwap() {
     if (!g_swapVblankPending) return;
     g_swapVblankPending = false;
     if (static_cast<u32>(sceDisplayGetVcount()) != g_swapVcount) return;
@@ -140,6 +156,14 @@ static void WaitForSwapVblank() {
     PspPerf::CountRenderer(PspPerf::RendererCounter::VblankUs,
         sceKernelGetSystemTimeLow() - vblankStart);
 #endif
+}
+
+static void WaitForSwapVblank() {
+#if !defined(PSP_TRIPLE_BUFFER)
+    WaitForVblankSinceSwap();
+#endif
+    // Triple buffering never draws into a buffer on screen or queued for it;
+    // SwapBuffers paces instead (see pspDisplay::SwapBuffers).
 }
 
 // Only the list-memory native path submits PspPackedVertex. Elsewhere the
@@ -163,7 +187,20 @@ constexpr int kVramWidth = 1024;
 constexpr int kVramHeight = 512;
 constexpr int kPageSize = 256;
 constexpr u32 kEdramBytes = 2u * 1024u * 1024u;
-constexpr u32 kFramebufferBytes = kBufferWidth * kHeight * 4u * 2u;
+#if defined(PSP_TRIPLE_BUFFER)
+// Three RGB565 colour buffers take less eDRAM than two RGBA8888 ones, so the
+// texture slots keep their space. The PSX itself outputs 15-bit colour; 3D
+// draws dither like its GPU (sceGuStart loads the PSX dither matrix).
+constexpr int kFramebufferPsm = GU_PSM_5650;
+constexpr u32 kFramebufferCount = 3u;
+constexpr u32 kFramebufferPixelBytes = 2u;
+#else
+constexpr int kFramebufferPsm = GU_PSM_8888;
+constexpr u32 kFramebufferCount = 2u;
+constexpr u32 kFramebufferPixelBytes = 4u;
+#endif
+constexpr u32 kFramebufferStride = kBufferWidth * kHeight * kFramebufferPixelBytes;
+constexpr u32 kFramebufferBytes = kFramebufferStride * kFramebufferCount;
 constexpr u32 kDepthBytes = kBufferWidth * kHeight * 2u;
 constexpr u32 kReservedEdramBytes = kFramebufferBytes + kDepthBytes;
 // Keep enough command-list headroom for a complete gameplay frame.  The
@@ -224,6 +261,25 @@ alignas(16) DisplayListStorage g_displayListStorage = {};
 StaticPspVram g_staticVram = {};
 pspContext* g_activeContext = nullptr;
 pspShader* g_activeShader = nullptr;
+
+// Relative eDRAM offset of the colour buffer the GE is drawing.
+static std::uintptr_t DrawFramebufferOffset() {
+#if defined(PSP_TRIPLE_BUFFER)
+    return static_cast<std::uintptr_t>(g_drawFramebuffer) * kFramebufferStride;
+#else
+    return reinterpret_cast<std::uintptr_t>(
+        g_drawingSecondBuffer ? g_staticVram.displayBuffer : g_staticVram.frameBuffer);
+#endif
+}
+
+#if defined(PSP_TRIPLE_BUFFER)
+// sceGuStart re-emits the SDK's own draw buffer, which SwapBuffers no longer
+// rotates; point the GE at ours after every list start.
+static void BindDrawFramebuffer() {
+    sceGuDrawBufferList(kFramebufferPsm, reinterpret_cast<void*>(DrawFramebufferOffset()),
+                        kBufferWidth);
+}
+#endif
 // A direct indexed draw borrows a prim buffer's persistent vertex storage.
 // Incrementing this generation after every GU fence gives those buffers a
 // cheap, allocation-free way to tell whether a CPU mutation needs a flush.
@@ -1231,11 +1287,16 @@ bool pspDisplay::InitDisplay(const pddiDisplayInit&) {
     // (which has no capacity check/reset and returns valid offset zero).
     g_staticVram = {};
     g_drawingSecondBuffer = false;
+#if defined(PSP_TRIPLE_BUFFER)
+    g_drawFramebuffer = 0;
+    g_shownFramebuffer = 1;
+    g_replacedFramebuffer = 2;
+#endif
     const u32 edramBytes = static_cast<u32>(sceGeEdramGetSize());
     if (edramBytes < kReservedEdramBytes) return false;
     const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
     g_staticVram.frameBuffer = nullptr; // relative offset zero is valid
-    g_staticVram.displayBuffer = reinterpret_cast<void*>(kBufferWidth * kHeight * 4u);
+    g_staticVram.displayBuffer = reinterpret_cast<void*>(kFramebufferStride);
     g_staticVram.depthBuffer = reinterpret_cast<void*>(kFramebufferBytes);
     u32 offset = kReservedEdramBytes;
     const auto reservePages = [&](auto& slots, u32 format, u32 bytes) {
@@ -1262,21 +1323,22 @@ bool pspDisplay::InitDisplay(const pddiDisplayInit&) {
     guSwapBuffersBehaviour(PSP_DISPLAY_SETBUF_NEXTVSYNC);
     ResetDisplayListGuard();
     sceGuStart(GU_DIRECT, g_displayListStorage.words);
-    sceGuDrawBuffer(GU_PSM_8888,
+    sceGuDrawBuffer(kFramebufferPsm,
                     g_staticVram.initialized ? g_staticVram.frameBuffer : reinterpret_cast<void*>(0),
                     kBufferWidth);
     sceGuDispBuffer(kWidth, kHeight,
                     g_staticVram.initialized
                         ? g_staticVram.displayBuffer
-                        : reinterpret_cast<void*>(kBufferWidth * kHeight * 4),
+                        : reinterpret_cast<void*>(kFramebufferStride),
                     kBufferWidth);
     // Two 32-bit colour buffers consume 2 * (512 * 272 * 4).  The PSP depth
     // surface is 16-bit, so placing it immediately after those buffers keeps
     // the complete framebuffer layout below the 2 MiB eDRAM limit.  The old
     // *8 offset treated depth as 64-bit and overran VRAM, corrupting GE state.
+    // (Three 16-bit buffers: 3 * (512 * 272 * 2), depth right after them.)
     sceGuDepthBuffer(g_staticVram.initialized
                          ? g_staticVram.depthBuffer
-                         : reinterpret_cast<void*>(kBufferWidth * kHeight * 4 * 2),
+                         : reinterpret_cast<void*>(kFramebufferBytes),
                      kBufferWidth);
     sceGuOffset(2048 - kWidth / 2, 2048 - kHeight / 2);
     sceGuViewport(2048, 2048, kWidth, kHeight);
@@ -1303,9 +1365,30 @@ void pspDisplay::SwapBuffers() {
     if (!g_activeContext) return;
     g_activeContext->EndFrame();
     g_activeContext->FinishList();
+#if defined(PSP_TRIPLE_BUFFER)
+    // The previous swap must reach the screen before this one is queued: a
+    // second queued buffer would replace it, leaving on screen the buffer
+    // drawn next. Frames slower than one refresh had a VBlank since the last
+    // swap and never wait; faster ones are held to the display rate.
+    WaitForVblankSinceSwap();
+    const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
+    sceDisplaySetFrameBuf(reinterpret_cast<void*>(edramBase + DrawFramebufferOffset()),
+                          kBufferWidth, kFramebufferPsm, PSP_DISPLAY_SETBUF_NEXTVSYNC);
+    // Read after queueing, as in the double-buffered path below.
+    g_swapVcount = sceDisplayGetVcount();
+    g_swapVblankPending = true;
+    // Queued: the buffer just finished. On screen until the next VBlank: the
+    // one shown so far. Free to draw: the buffer that one replaced.
+    const u32 finished = g_drawFramebuffer;
+    g_drawFramebuffer = g_replacedFramebuffer;
+    g_replacedFramebuffer = g_shownFramebuffer;
+    g_shownFramebuffer = finished;
+#else
     sceGuSwapBuffers();
     g_drawingSecondBuffer = !g_drawingSecondBuffer;
-#if defined(PSP_IMMEDIATE_VBLANK_WAIT)
+#endif
+#if defined(PSP_TRIPLE_BUFFER)
+#elif defined(PSP_IMMEDIATE_VBLANK_WAIT)
 #if defined(PSP_PERF_TELEMETRY)
     const u32 vblankStart = sceKernelGetSystemTimeLow();
 #endif
@@ -1539,6 +1622,9 @@ void pspContext::BeginFrame() {
     // First GE command of the frame: the draw target must be off screen.
     WaitForSwapVblank();
     sceGuStart(GU_DIRECT, g_displayListStorage.words);
+#if defined(PSP_TRIPLE_BUFFER)
+    BindDrawFramebuffer();
+#endif
     listOpen = true;
     Setup3DState();
     if (pendingDepthClear) ClearDepthNow();
@@ -1690,6 +1776,9 @@ void pspContext::FlushList() {
     // GE state and GUM matrices survive a list boundary. Do not clear, swap,
     // reset material state, or wait for VBlank in the middle of a frame.
     sceGuStart(GU_DIRECT, g_displayListStorage.words);
+#if defined(PSP_TRIPLE_BUFFER)
+    BindDrawFramebuffer();
+#endif
     listOpen = true;
 }
 
@@ -1736,6 +1825,7 @@ void pspContext::Setup3DState() {
     GuDisable(GU_STENCIL_TEST);
     GuDisable(GU_COLOR_LOGIC_OP);
     GuDisable(GU_CLIP_PLANES);
+    if (kDitherCapability) GuEnable(GU_DITHER);
     GuAmbientColor(0xffffffff);
     SetBlend(blendMode);
     if (zBufferEnabled) GuEnable(GU_DEPTH_TEST);
@@ -1776,6 +1866,7 @@ void pspContext::Setup2DState() {
     GuDisable(GU_COLOR_LOGIC_OP);
     GuDisable(GU_LIGHTING);
     GuDisable(GU_CLIP_PLANES);
+    if (kDitherCapability) GuDisable(GU_DITHER);
     GuDepthMask(GU_TRUE);
     sceGumMatrixMode(GU_PROJECTION);
     sceGumLoadIdentity();
@@ -1863,13 +1954,12 @@ bool pspContext::CapturePauseBackdrop() {
     EnsureListSpace(256u);
     Setup2DState(); // depth test off and depth writes masked: depth is the target
     const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
-    const auto drawOffset = reinterpret_cast<std::uintptr_t>(
-        g_drawingSecondBuffer ? g_staticVram.displayBuffer : g_staticVram.frameBuffer);
+    const std::uintptr_t drawOffset = DrawFramebufferOffset();
     const auto depthOffset = reinterpret_cast<std::uintptr_t>(g_staticVram.depthBuffer);
     // 512x272 RGB565 is exactly the 16-bit depth surface (278 KiB).
     sceGuDrawBufferList(GU_PSM_5650, reinterpret_cast<void*>(depthOffset), kBufferWidth);
-    DrawScreenCopy(GU_PSM_8888, reinterpret_cast<const void*>(edramBase + drawOffset));
-    sceGuDrawBufferList(GU_PSM_8888, reinterpret_cast<void*>(drawOffset), kBufferWidth);
+    DrawScreenCopy(kFramebufferPsm, reinterpret_cast<const void*>(edramBase + drawOffset));
+    sceGuDrawBufferList(kFramebufferPsm, reinterpret_cast<void*>(drawOffset), kBufferWidth);
     pauseBackdropValid = true;
     pauseBackdropUsedThisFrame = true;
     pendingDepthClear = false;

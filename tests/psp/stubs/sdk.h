@@ -69,6 +69,35 @@ inline bool inEdram(const void* ptr) {
     auto value = reinterpret_cast<uintptr_t>(ptr);
     return value >= 0x04000000 && value < 0x04200000;
 }
+// Colour/depth surfaces below the texture slots: two RGBA8888 buffers plus
+// depth, or three RGB565 buffers plus depth.
+#if defined(PSP_TRIPLE_BUFFER)
+constexpr size_t kSurfaceBytes = 512 * 272 * 2 * 4;
+#else
+constexpr size_t kSurfaceBytes = 512 * 272 * 10;
+#endif
+}
+
+// Display model (relative eDRAM offsets): the buffer scanned out, the one
+// queued for the next VBlank, and the PSPSDK's own draw/display pair, which
+// sceGuSwapBuffers exchanges and sceGuStart re-emits as the GE target.
+namespace FakeDisplay {
+constexpr uintptr_t kNone = ~uintptr_t(0);
+inline bool live = false;
+inline uintptr_t shown = kNone, queued = kNone;
+inline int vcount = 0;
+inline void* sdkDraw = nullptr;
+inline void* sdkDisplay = nullptr;
+inline void Vblank() {
+    if (queued != kNone) { shown = queued; queued = kNone; }
+    ++vcount;
+}
+inline void Queue(uintptr_t offset) {
+    // Replacing a queued buffer drops that frame and, with three buffers,
+    // leaves on screen the one the renderer draws next.
+    FakeGe::require(queued == kNone, "presented over a frame still queued");
+    queued = offset; ++FakeGe::swaps;
+}
 }
 struct ScePspFMatrix4 { float m[16]; };
 struct SceCtrlData { unsigned int Buttons; unsigned char Lx, Ly; };
@@ -80,10 +109,24 @@ inline int sceGuInit() { return 0; }
 inline void sceGuTerm() { FakeGe::require(!FakeGe::open, "terminating live list"); }
 inline void* sceGeEdramGetAddr() { return reinterpret_cast<void*>(0x04000000); }
 inline int sceGeEdramGetSize() { return 2 * 1024 * 1024; }
+namespace FakeGe {
+inline int clearFlags = 0;
+inline void* drawBuffer = nullptr;
+inline int drawBufferFormat = GU_PSM_8888;
+// The GE must never write the buffer on screen or queued for it.
+inline void requireOffScreenTarget() {
+    if (!FakeDisplay::live) return;
+    const auto target = reinterpret_cast<uintptr_t>(drawBuffer);
+    require(target != FakeDisplay::shown && target != FakeDisplay::queued,
+            "GE draws into a displayed buffer");
+}
+}
 inline int sceGuStart(int, void* ptr) {
     FakeGe::require(!FakeGe::open && FakeGe::reads.empty(), "restarted before sync");
     FakeGe::list = static_cast<unsigned char*>(ptr);
-    FakeGe::used = 0; FakeGe::open = true; FakeGe::emit(8); return 0;
+    FakeGe::used = 0; FakeGe::open = true; FakeGe::emit(8);
+    if (FakeDisplay::live) { FakeGe::emit(8); FakeGe::drawBuffer = FakeDisplay::sdkDraw; }
+    return 0;
 }
 inline int sceGuCheckList() { return static_cast<int>(FakeGe::used); }
 inline void* sceGuGetMemory(int size) {
@@ -99,13 +142,35 @@ inline void sceGuSync(int, int) {
     }
     FakeGe::reads.clear(); ++FakeGe::syncs;
 }
-inline void sceGuSwapBuffers() { ++FakeGe::swaps; }
-namespace FakeGe {
-inline int clearFlags = 0;
-inline void* drawBuffer = nullptr;
-inline int drawBufferFormat = GU_PSM_8888;
+inline void sceGuSwapBuffers() {
+    std::swap(FakeDisplay::sdkDraw, FakeDisplay::sdkDisplay);
+    FakeDisplay::Queue(reinterpret_cast<uintptr_t>(FakeDisplay::sdkDisplay));
 }
-inline void sceGuClear(int flags) { FakeGe::emit(32); ++FakeGe::clears; FakeGe::clearFlags = flags; }
+inline int sceDisplaySetFrameBuf(void* top, int width, int format, int sync) {
+    const auto offset = reinterpret_cast<uintptr_t>(top) - 0x04000000;
+    FakeGe::require(FakeDisplay::live && width == 512 && sync == PSP_DISPLAY_SETBUF_NEXTVSYNC
+        && format == FakeGe::drawBufferFormat && offset % (512 * 272 * 2) == 0
+        && offset < FakeGe::kSurfaceBytes, "bad display buffer");
+    FakeDisplay::Queue(offset);
+    return 0;
+}
+inline int sceDisplayGetVcount() { return FakeDisplay::vcount; }
+inline int sceDisplayWaitVblankStart() { FakeDisplay::Vblank(); return 0; }
+inline void sceGuDrawBuffer(int format, void* buffer, int) {
+    FakeGe::emit(20); FakeGe::drawBufferFormat = format; FakeGe::drawBuffer = buffer;
+    FakeDisplay::sdkDraw = buffer;
+}
+inline void sceGuDispBuffer(int, int, void* buffer, int) { FakeDisplay::sdkDisplay = buffer; }
+inline int sceGuDisplay(int on) {
+    FakeDisplay::live = on != 0;
+    FakeDisplay::shown = reinterpret_cast<uintptr_t>(FakeDisplay::sdkDisplay);
+    FakeDisplay::queued = FakeDisplay::kNone;
+    return 0;
+}
+inline void sceGuClear(int flags) {
+    FakeGe::emit(32); ++FakeGe::clears; FakeGe::clearFlags = flags;
+    FakeGe::requireOffScreenTarget();
+}
 inline void sceGuDrawBufferList(int format, void* buffer, int) {
     FakeGe::emit(12); FakeGe::drawBufferFormat = format; FakeGe::drawBuffer = buffer;
 }
@@ -148,7 +213,7 @@ inline void sceGuCopyImage(int format, int, int, int width, int height, int srcw
     FakeGe::require(FakeGe::inEdram(dest), "destination outside eDRAM (double alias)");
     const auto offset = reinterpret_cast<uintptr_t>(dest) - 0x04000000;
     const size_t bytes = width * height * 2;
-    FakeGe::require(offset >= 512 * 272 * 10 && offset + bytes <= FakeGe::edram.size(), "slot overlaps surfaces/end");
+    FakeGe::require(offset >= FakeGe::kSurfaceBytes && offset + bytes <= FakeGe::edram.size(), "slot overlaps surfaces/end");
     FakeGe::emit(32); FakeGe::read(src, bytes); ++FakeGe::copies;
     ++FakeGe::copyFormats[width == 64 ? 0 : (width == 128 ? 1 : 2)];
 }
@@ -158,6 +223,7 @@ inline void sceGuDrawArray(int primitive, int format, int count, const void* ind
     FakeGe::require(count > 0 && count <= 65535, "GE draw count overflow");
     FakeGe::require((reinterpret_cast<uintptr_t>(vertices) & 15) == 0, "unaligned vertices");
     FakeGe::emit(24); ++FakeGe::draws;
+    FakeGe::requireOffScreenTarget();
     const bool indexed = (format & GU_INDEX_16BIT) != 0;
     const int textureType = format & GU_TEXTURE_BITS;
     const int colourType = format & GU_COLOR_BITS;
@@ -210,7 +276,7 @@ inline int sceKernelTotalFreeMemSize() { return 16 * 1024 * 1024; }
 GE_COMMAND(sceGuAlphaFunc) GE_COMMAND(sceGuAmbientColor)
 GE_COMMAND(sceGuClearColor) GE_COMMAND(sceGuClearDepth) GE_COMMAND(sceGuClutMode)
 GE_COMMAND(sceGuDepthBuffer) GE_COMMAND(sceGuDepthFunc)
-GE_COMMAND(sceGuDepthOffset) GE_COMMAND(sceGuDispBuffer) GE_COMMAND(sceGuDrawBuffer)
+GE_COMMAND(sceGuDepthOffset)
 GE_COMMAND(sceGuFrontFace) GE_COMMAND(sceGuOffset) GE_COMMAND(sceGuScissor)
 GE_COMMAND(sceGuShadeModel) GE_COMMAND(sceGuTexEnvColor) GE_COMMAND(sceGuTexFilter)
 GE_COMMAND(sceGuTexOffset) GE_COMMAND(sceGuTexScale)
@@ -218,8 +284,7 @@ GE_COMMAND(sceGuTexSync) GE_COMMAND(sceGuTexWrap) GE_COMMAND(sceGuViewport)
 GE_COMMAND(sceGuTexFlush)
 #undef GE_COMMAND
 #define SDK_NOOP(name) template<class... T> inline int name(T...) { return 0; }
-SDK_NOOP(guSwapBuffersBehaviour) SDK_NOOP(sceGuDisplay) SDK_NOOP(sceDisplayWaitVblankStart)
-SDK_NOOP(sceDisplayGetVcount)
+SDK_NOOP(guSwapBuffersBehaviour)
 SDK_NOOP(sceCtrlSetSamplingCycle) SDK_NOOP(sceCtrlSetSamplingMode)
 SDK_NOOP(sceGumLoadIdentity) SDK_NOOP(sceGumOrtho)
 SDK_NOOP(sceKernelDcacheWritebackAll) SDK_NOOP(sceKernelDcacheWritebackRange)
