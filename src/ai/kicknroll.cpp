@@ -1,4 +1,5 @@
 #include "ai/kicknroll.h"
+#include "psp/psp_perf.h"
 #include "ai/humanoid.h"
 #include "ai/pickup.h"
 #include "ai/player.h"
@@ -1146,6 +1147,7 @@ void Stack::Think() {
             s_pspStackJointMatrices.reserve(flip->tree->numJoints);
         }
         s_pspStackJointMatrices.resize(flip->tree->numJoints);
+        PspPerf::CountRenderer(PspPerf::RendererCounter::SkelBuildsStack);
         flip->tree->ComputeWorldMatricesWithCallbacks(s_pspStackJointMatrices.data());
 #else
         Mat4* jointMatrices = new Mat4[flip->tree->numJoints];

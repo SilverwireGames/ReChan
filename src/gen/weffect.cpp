@@ -4328,6 +4328,7 @@ bool ComEffect::ResolveGeoByIndex(u32 geoIndex, OriginalGeo** outGeo, Mat4* outL
 #if defined(RC_PLATFORM_PSP)
                 std::vector<Mat4>& partJointMatrices = g_pspWEffectFrameScratch.partJointMatrices;
                 ResizeRetainedWEffectScratch(partJointMatrices, skeleton->numJoints);
+                PspPerf::CountRenderer(PspPerf::RendererCounter::SkelBuildsEffect);
                 skeleton->ComputeWorldMatricesWithCallbacks(partJointMatrices.data());
                 const Mat4* partMatrix = FindETreeJointWorldMatrixByHash(
                     skeleton,

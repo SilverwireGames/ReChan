@@ -41,6 +41,9 @@ enum class RendererCounter : u32 {
     // Lit prop draws whose colours were reused, built, and reused colours that
     // differed from a fresh build (re-checked every 64 reuses; must stay 0).
     GeoLightReuses, GeoLightBuilds, GeoLightMismatches,
+    // Skeleton builds by caller: skinned draw, rigid parts (ETree), attack
+    // capture, joint-attached effects (WEffect), pushable stacks.
+    SkelBuildsDisplay, SkelBuildsETree, SkelBuildsCapture, SkelBuildsEffect, SkelBuildsStack,
     Count
 };
 

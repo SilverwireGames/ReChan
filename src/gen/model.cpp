@@ -1832,6 +1832,7 @@ void DrawableSTree::Display(u32 /*flags*/) {
             ResizeRetainedScratch(g_pspModelFrameScratch.jointMatrices, skel->numJoints);
             jointData = g_pspModelFrameScratch.jointMatrices.data();
         }
+        PspPerf::CountRenderer(PspPerf::RendererCounter::SkelBuildsDisplay);
         skel->ComputeWorldMatricesWithCallbacks(jointData);
 #else
         Mat4* jointMatrices = new Mat4[skel->numJoints];
@@ -2452,6 +2453,7 @@ void DrawableETree::Display(u32 flags) {
 
         if (skeleton) {
             ResizeRetainedScratch(partJointMatrices, skeleton->numJoints);
+            PspPerf::CountRenderer(PspPerf::RendererCounter::SkelBuildsETree);
             if (invokeCallbacks) {
                 skeleton->ComputeWorldMatricesWithCallbacks(partJointMatrices.data());
             }
@@ -3648,6 +3650,7 @@ void HumanoidModel::CaptureAttackJointMatrices() {
 #if defined(RC_PLATFORM_PSP)
     std::vector<Mat4>& jointWorld = g_pspModelFrameScratch.attackJointMatrices;
     ResizeRetainedScratch(jointWorld, skel->numJoints);
+    PspPerf::CountRenderer(PspPerf::RendererCounter::SkelBuildsCapture);
     skel->ComputeWorldMatricesWithCallbacks(jointWorld.data());
 #else
     std::vector<Mat4> jointWorld(skel->numJoints);
