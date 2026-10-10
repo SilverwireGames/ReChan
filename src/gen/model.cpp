@@ -1447,6 +1447,59 @@ static bool BuildLitGeoColours(OriginalGeo* geo, std::vector<u32>& outColours) {
 
     return true;
 }
+
+// BuildLitGeoColours's inputs besides the geo's vertices (whose colours only
+// change through a full buffer upload, which drops the patch): the rotation
+// GetGeoLightingWorld normalizes and the port lights it reads.
+static OriginalGeo::PspLightKey MakeGeoLightKey() {
+    OriginalGeo::PspLightKey key{};
+    const Mat4 lightingWorld = GetGeoLightingWorld();
+    const u32 rows[9] = {0, 1, 2, 4, 5, 6, 8, 9, 10};
+    for (u32 i = 0; i < 9; i++) {
+        key.rotation[i] = lightingWorld.m[rows[i]];
+    }
+    key.ambient = GetCurrentPortAmbientLightColour();
+    for (s32 slot = 0; slot < 3; slot++) {
+        if (const HardwareLight* light = GetCurrentPortHardwareLight(slot)) {
+            key.lights[slot][0] = light->directionX;
+            key.lights[slot][1] = light->directionY;
+            key.lights[slot][2] = light->directionZ;
+            key.lights[slot][3] = static_cast<s32>(light->colour | 0x80000000u);  // present
+        }
+    }
+    return key;
+}
+
+// Lit colours of a prop: reused when the buffer still holds the colours of
+// the same lighting inputs, else built and patched in.
+static bool PatchLitGeoColours(OriginalGeo* geo, std::vector<u32>& litColours) {
+    const OriginalGeo::PspLightKey key = MakeGeoLightKey();
+    if (geo->pspLightKeyValid && PspPrimBufferHasPatchedColours(geo->meshBuffer)
+        && std::memcmp(&geo->pspLightKey, &key, sizeof(key)) == 0) {
+        PspPerf::CountRenderer(PspPerf::RendererCounter::GeoLightReuses);
+#if defined(PSP_PERF_TELEMETRY)
+        static u32 reuseCount = 0;
+        if ((++reuseCount & 63u) == 0u && BuildLitGeoColours(geo, litColours)) {
+            static std::vector<u32> held;
+            ResizeRetainedScratch(held, geo->dynamicVertCount);
+            if (!ReadPspPrimBufferColours(geo->meshBuffer, held.data(), geo->dynamicVertCount)
+                || std::memcmp(held.data(), litColours.data(), held.size() * sizeof(u32)) != 0) {
+                PspPerf::CountRenderer(PspPerf::RendererCounter::GeoLightMismatches);
+            }
+        }
+#endif
+        return true;
+    }
+    geo->pspLightKeyValid = false;
+    if (!BuildLitGeoColours(geo, litColours)
+        || !PatchPspPrimBufferColours(geo->meshBuffer, litColours.data(), geo->dynamicVertCount)) {
+        return false;
+    }
+    PspPerf::CountRenderer(PspPerf::RendererCounter::GeoLightBuilds);
+    geo->pspLightKey = key;
+    geo->pspLightKeyValid = true;
+    return true;
+}
 #endif
 
 static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
@@ -1496,10 +1549,7 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     // static (a recorded GE list); the renderer restores the base colours
     // before any other draw of the buffer.
     std::vector<u32>& litColours = g_pspModelFrameScratch.litGeoColours;
-    const bool pspColoursPatched = applyLighting
-        && BuildLitGeoColours(geo, litColours)
-        && PatchPspPrimBufferColours(geo->meshBuffer, litColours.data(),
-                                     geo->dynamicVertCount);
+    const bool pspColoursPatched = applyLighting && PatchLitGeoColours(geo, litColours);
 #else
     std::vector<GeoRenderVertex> litVerts;
     constexpr bool pspColoursPatched = false;

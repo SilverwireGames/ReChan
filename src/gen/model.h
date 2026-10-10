@@ -257,6 +257,18 @@ struct OriginalGeo : public OriginalBasic {
     u16* dynamicPrimUVWords = nullptr;
     u32* dynamicPrimPacketOffset = nullptr;
     u32 dynamicPrimCount = 0;
+#if defined(RC_PLATFORM_PSP)
+    // Lighting inputs of the colours last patched into meshBuffer (see
+    // DrawGeoPartMesh): the normalized world rotation, the port ambient and
+    // the three port lights (direction, colour; zero when absent).
+    struct PspLightKey {
+        f32 rotation[9];
+        u32 ambient;
+        s32 lights[3][4];
+    };
+    PspLightKey pspLightKey{};
+    bool pspLightKeyValid = false;
+#endif
 
     OriginalGeo();
     ~OriginalGeo() override;

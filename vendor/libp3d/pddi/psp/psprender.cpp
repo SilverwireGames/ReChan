@@ -1193,6 +1193,24 @@ bool RestorePspPrimBufferColours(pddiPrimBuffer* base, u32 count) {
     return static_cast<pspPrimBuffer*>(base)->PatchColours(nullptr, count);
 }
 
+bool PspPrimBufferHasPatchedColours(const pddiPrimBuffer* base) {
+    return base && static_cast<const pspPrimBuffer*>(base)->HasPatchedColours();
+}
+
+bool ReadPspPrimBufferColours(const pddiPrimBuffer* base, u32* colours, u32 count) {
+    if (!base || !colours) return false;
+    const auto* buffer = static_cast<const pspPrimBuffer*>(base);
+    if (count != buffer->GetVertexCount()) return false;
+    if (kPackedStreamConsumed) {
+        if (!buffer->HasPackedVertices()) return false;
+        for (u32 i = 0; i < count; ++i) colours[i] = buffer->GetPackedVertices()[i].color;
+    }
+    else {
+        for (u32 i = 0; i < count; ++i) colours[i] = buffer->GetVertices()[i].color;
+    }
+    return true;
+}
+
 namespace {
 const pddiPrimBuffer* g_litColourDrawBuffer = nullptr;
 }

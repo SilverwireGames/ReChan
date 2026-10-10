@@ -274,6 +274,10 @@ u32 MakePspGeometryColour(float r, float g, float b);
 bool PatchPspPrimBufferColours(pddiPrimBuffer* buffer, const u32* colours, u32 count);
 // Restores the colours captured by the first PatchPspPrimBufferColours().
 bool RestorePspPrimBufferColours(pddiPrimBuffer* buffer, u32 count);
+// True while patched colours are in place (no restore or upload since).
+bool PspPrimBufferHasPatchedColours(const pddiPrimBuffer* buffer);
+// Copies the colour lane the GE reads (telemetry re-checks).
+bool ReadPspPrimBufferColours(const pddiPrimBuffer* buffer, u32* colours, u32 count);
 // Brackets the lit draw of a colour-patched buffer. The patch stays in place
 // after it (patching the same colours again is free); any other draw of that
 // buffer gets its base colours back first (pspContext::DrawPrimBuffer).

@@ -38,6 +38,9 @@ enum class RendererCounter : u32 {
     OverlayQuads, OverlayUs,
     // Static buffers drawn by calling their recorded GE list, and lists built.
     RecordedDrawCalls, RecordedDrawBuilds,
+    // Lit prop draws whose colours were reused, built, and reused colours that
+    // differed from a fresh build (re-checked every 64 reuses; must stay 0).
+    GeoLightReuses, GeoLightBuilds, GeoLightMismatches,
     Count
 };
 
