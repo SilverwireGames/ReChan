@@ -564,6 +564,85 @@ int main() {
         }
     }
 
+    {
+        // Fused packed upload (Begin/EndPackedUpload) must leave a buffer in
+        // exactly the state SetDynamicVertexData(..., uvIsIntegral = true)
+        // does: compact stream bytes, material keys/validity, runs and flags,
+        // across frames whose material lanes change (suit animation).
+        std::mt19937 rng(424242u);
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        for (int round = 0; round < 60; ++round) {
+            const u32 vertexCount = 3u + rng() % 90u;
+            const u32 indexCount = 3u * (1u + rng() % 40u);
+            pspPrimBuffer reference({PDDI_PRIM_TRIANGLES, kFormat, vertexCount, indexCount});
+            pspPrimBuffer fused({PDDI_PRIM_TRIANGLES, kFormat, vertexCount, indexCount});
+            std::vector<float> data(vertexCount * 10u);
+            const auto fill = [&](bool materialsOnly) {
+                for (u32 v = 0; v < vertexCount; ++v) {
+                    float* lane = &data[v * 10u];
+                    if (!materialsOnly) {
+                        for (int c = 0; c < 3; ++c) {
+                            lane[c] = static_cast<float>(static_cast<int>(rng() % 20001u) - 10000) / 7.0f;
+                        }
+                        for (int c = 3; c < 6; ++c) lane[c] = static_cast<float>(rng() % 256u) / 128.0f;
+                        lane[6] = static_cast<float>(rng() % 256u);
+                        lane[7] = static_cast<float>(rng() % 256u);
+                    }
+                    if (materialsOnly && rng() % 3u != 0u) continue;
+                    const u32 kind = rng() % 5u;
+                    lane[8] = kind == 0u ? -1.0f : static_cast<float>(rng() % 4u);
+                    lane[9] = kind == 1u ? 70000.0f : static_cast<float>(rng() % 3u);
+                }
+            };
+            fill(false);
+            reference.SetVertexData(data.data(), vertexCount);
+            fused.SetVertexData(data.data(), vertexCount);
+            std::vector<u16> idx(indexCount);
+            for (u16& index : idx) index = static_cast<u16>(rng() % vertexCount);
+            reference.SetIndices(idx.data(), indexCount);
+            fused.SetIndices(idx.data(), indexCount);
+            for (int frame = 0; frame < 4; ++frame) {
+                fill(frame % 2 == 1);
+                require(reference.SetDynamicVertexData(data.data(), vertexCount, true), "reference upload refused");
+                PspPackedVertex* out = fused.BeginPackedUpload(vertexCount);
+                if (!kPackedStreamConsumed) {
+                    // No compact stream on this variant: callers keep the
+                    // SetDynamicVertexData path.
+                    require(out == nullptr, "fused upload offered without a compact stream");
+                    break;
+                }
+                require(out != nullptr, "fused upload refused");
+                for (u32 v = 0; v < vertexCount; ++v) {
+                    const float* in = &data[v * 10u];
+                    out[v].u = static_cast<s16>(in[6]);
+                    out[v].v = static_cast<s16>(in[7]);
+                    out[v].color = MakeGeometryColor(in[3], in[4], in[5]);
+                    out[v].x = in[0];
+                    out[v].y = in[1];
+                    out[v].z = in[2];
+                }
+                fused.EndPackedUpload(&data[8], 10u, &data[9], 10u, vertexCount);
+                require(std::memcmp(reference.packedVertices.data(), fused.packedVertices.data(),
+                            sizeof(PspPackedVertex) * vertexCount) == 0
+                        && reference.materialKeys == fused.materialKeys
+                        && reference.materialValid == fused.materialValid
+                        && reference.materialRawBits == fused.materialRawBits
+                        && reference.packedVerticesValid == fused.packedVerticesValid
+                        && reference.floatStale == fused.floatStale
+                        && reference.materialRunsValid == fused.materialRunsValid,
+                    "fused packed upload differs from SetDynamicVertexData");
+                for (u32 start = 0; start + 2 < indexCount; start += 3) {
+                    bool va = false, vb = false;
+                    u32 ka = 0, kb = 0, ea = 0, eb = 0;
+                    require(reference.FindMaterialRun(start, &va, &ka, &ea)
+                            && fused.FindMaterialRun(start, &vb, &kb, &eb)
+                            && va == vb && ka == kb && ea == eb,
+                        "fused upload material runs differ");
+                }
+            }
+        }
+    }
+
     std::printf("PASS: draws=%d copies=%d cluts=%d syncs=%d peak_list=%zu signature=%016llx\n",
         summaryDraws, summaryCopies, summaryCluts, summarySyncs, summaryPeak,
         static_cast<unsigned long long>(signature));

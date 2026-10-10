@@ -83,6 +83,8 @@ struct PspModelFrameScratch {
     std::vector<u16> litScratch;
     std::vector<u8> litWritten;
     std::vector<f32> skinVertexData;
+    // CBA lane of a suit-animated skin for the fused packed upload.
+    std::vector<f32> skinCbaLane;
     std::vector<GeoRenderVertex> litGeoVertices;
     std::vector<u32> litGeoColours;
 };
@@ -218,6 +220,10 @@ static_assert(sizeof(SkinVertex) == PspVfpuSkin::kVertexStrideBytes
 // Untested until the first lit character draw compares both paths.
 enum class PspVfpuSkinMode : u8 { Untested, Enabled, Disabled };
 PspVfpuSkinMode g_pspVfpuSkinMode = PspVfpuSkinMode::Untested;
+// Fused upload equivalence check (Display): uploads still to compare, and
+// whether a mismatch turned the fused path off.
+u32 g_pspFusedSkinChecksLeft = 16;
+bool g_pspFusedSkinDisabled = false;
 
 } // namespace
 
@@ -286,6 +292,53 @@ void PspSkinVerticesVfpu(const PspSkinLoop& loop, u32 begin, u32 end, f32* out) 
         else {
             PspVfpuSkin::SkinUnlitVertex(sv, out);
         }
+    }
+}
+
+// Fused character upload (byte-colour skins): VFPU position plus integer
+// colour and UV written straight into the prim buffer's compact stream. Same
+// values as PspSkinVerticesVfpu<true> followed by SetDynamicVertexData's
+// compact-only path, without the 40-byte float vertex and the second pass:
+// - position: the same vhtfm4.q on the same joint matrix;
+// - colour: the scalar reference's integer chain (c = colour * 128 exactly,
+//   since PspSkinColoursAreBytes; lit m = min((c * light + 64) >> 7, 255)),
+//   then the GU byte MakeGeometryColor gives m / 128;
+// - UV: the same float to s16 conversion.
+void PspSkinPackedVfpu(const PspSkinLoop& loop, u32 count, PspPackedVertex* out) {
+    const SkinVertex* sv = loop.verts;
+    const Mat4* joints = loop.joints;
+    const u16* lit = loop.lit;
+    const u8* litMask = loop.litMask;
+    const u32 litLimit = loop.litLimit;
+    const auto guByte = [](u32 value) -> u32 {
+        return value >= 128u ? 255u : (value * 255u) >> 7;  // MakeGeometryColor(value / 128)
+    };
+    const auto litChannel = [](u32 base, u32 light) -> u32 {
+        const u32 value = (base * light + 64u) >> 7;
+        return value > 255u ? 255u : value;
+    };
+    u32 loadedJoint = 0xFFFFFFFFu;
+    for (u32 i = 0; i < count; i++, sv++, out++) {
+        const u32 joint = sv->jointIdx;
+        if (joint != loadedJoint) {
+            loadedJoint = joint;
+            PspVfpuSkin::LoadJoint(&joints[joint]);
+        }
+        PspVfpuSkin::SkinPosition(sv, &out->x);
+        u32 r = static_cast<u32>(sv->r * 128.0f);
+        u32 g = static_cast<u32>(sv->g * 128.0f);
+        u32 b = static_cast<u32>(sv->b * 128.0f);
+        const u32 sourceIndex = static_cast<u32>(sv->sourceIndex);
+        if (sourceIndex < litLimit && litMask[sourceIndex] != 0u) {
+            const u32 rg = lit[sourceIndex * 2u + 0u];
+            const u32 lb = lit[sourceIndex * 2u + 1u];
+            r = litChannel(r, rg & 0xFFu);
+            g = litChannel(g, (rg >> 8) & 0xFFu);
+            b = litChannel(b, lb & 0xFFu);
+        }
+        out->color = guByte(r) | (guByte(g) << 8) | (guByte(b) << 16) | 0xFF000000u;
+        out->u = static_cast<s16>(sv->u);
+        out->v = static_cast<s16>(sv->v);
     }
 }
 
@@ -1034,11 +1087,13 @@ static s32 ResolveSuitPartFrame(const CompositeAnimPartData* part, s32 frame, s3
     return partFrame;
 }
 
+// cbaLane: vertex 0's CBA value; vertex i's is cbaLane[i * cbaStride] (the
+// float vertex layout uses stride 10, the fused upload a compact lane).
 static void ApplyClutListSuitFrameToVerts(const ClutAnimData* clutAnim,
                                           s32 frame,
                                           const SkinData* skin,
-                                          std::vector<f32>* vertData) {
-    if (!clutAnim || !skin || !vertData || !clutAnim->frames || clutAnim->numFrames <= 0) {
+                                          f32* cbaLane, u32 cbaStride) {
+    if (!clutAnim || !skin || !cbaLane || !clutAnim->frames || clutAnim->numFrames <= 0) {
         return;
     }
 
@@ -1079,7 +1134,7 @@ static void ApplyClutListSuitFrameToVerts(const ClutAnimData* clutAnim,
                         break;
                     }
 
-                    (*vertData)[vertexIndex * 10u + 9u] = clutWord;
+                    cbaLane[vertexIndex * cbaStride] = clutWord;
                 }
 
                 matchedOffsets++;
@@ -1091,17 +1146,17 @@ static void ApplyClutListSuitFrameToVerts(const ClutAnimData* clutAnim,
     }
 
     for (u32 vertexIndex = 0; vertexIndex < skin->numVerts; vertexIndex++) {
-        (*vertData)[vertexIndex * 10u + 9u] = clutWord;
+        cbaLane[vertexIndex * cbaStride] = clutWord;
     }
 }
 
 static void ApplyCompositeSuitFrameToVerts(CompositeAnimData* compositeAnim,
                                            s32 frame,
                                            const SkinData* skin,
-                                           std::vector<f32>* vertData) {
+                                           f32* cbaLane, u32 cbaStride) {
     compositeAnim = ResolveCompositeAnimRootForSuit(compositeAnim);
 
-    if (!compositeAnim || !compositeAnim->parts || !skin || !vertData) {
+    if (!compositeAnim || !compositeAnim->parts || !skin || !cbaLane) {
         return;
     }
 
@@ -1116,12 +1171,12 @@ static void ApplyCompositeSuitFrameToVerts(CompositeAnimData* compositeAnim,
         if (entityType == kSuitEntityTypeCompositeAnim && part.compositeAnim) {
             resolvedCompositeParts++;
             const s32 partFrame = ResolveSuitPartFrame(&part, frame, static_cast<s32>(part.compositeAnim->field12));
-            ApplyCompositeSuitFrameToVerts(part.compositeAnim, partFrame, skin, vertData);
+            ApplyCompositeSuitFrameToVerts(part.compositeAnim, partFrame, skin, cbaLane, cbaStride);
         }
         else if (entityType == kSuitEntityTypeClutList && part.clutAnim) {
             resolvedClutParts++;
             const s32 partFrame = ResolveSuitPartFrame(&part, frame, part.clutAnim->numFrames);
-            ApplyClutListSuitFrameToVerts(part.clutAnim, partFrame, skin, vertData);
+            ApplyClutListSuitFrameToVerts(part.clutAnim, partFrame, skin, cbaLane, cbaStride);
         }
         else {
             unresolvedParts++;
@@ -1807,17 +1862,15 @@ void DrawableSTree::Display(u32 /*flags*/) {
             }
         }
 
-#if defined(RC_PLATFORM_PSP)
-        std::vector<f32>& vertData = g_pspModelFrameScratch.skinVertexData;
-        ResizeRetainedScratch(vertData, skin->numVerts * 10u);
-#if defined(PSP_SKIN_TRANSFORM_CACHE)
-        g_pspModelFrameScratch.transforms.Begin();
-#endif
-#else
-        std::vector<f32> vertData(skin->numVerts * 10);
-#endif
-#if defined(RC_PLATFORM_PSP)
-        {
+#if defined(RC_PLATFORM_PSP) && defined(RC_PSP_VFPU_SKIN) && !defined(PSP_DISABLE_FUSED_SKIN_UPLOAD)
+        // Characters (VFPU enabled, byte colours): skin straight into the
+        // buffer's compact stream; see PspSkinPackedVfpu. Anything else, and
+        // the self-test draw, keeps the float vertex path below.
+        PspPackedVertex* fusedVertices = (vfpuEnabled && !g_pspFusedSkinDisabled
+                                          && PspSkinColoursAreBytes(skin))
+            ? BeginPspPrimBufferPackedUpload(skinnedBuffer, skin->numVerts)
+            : nullptr;
+        if (fusedVertices) {
             const PspSkinLoop loop = {
                 skin->verts,
                 jointData,
@@ -1826,120 +1879,209 @@ void DrawableSTree::Display(u32 /*flags*/) {
                 (hasLitScratch && renderSource->primGeom)
                     ? static_cast<u32>(renderSource->primGeom->numVerts) : 0u,
             };
-#if defined(RC_PSP_VFPU_SKIN)
-            if (vfpuEnabled) {
-                if (PspSkinColoursAreBytes(skin)) {
-                    PspSkinVerticesVfpu<true>(loop, 0, skin->numVerts, vertData.data());
+            PspSkinPackedVfpu(loop, skin->numVerts, fusedVertices);
+            // Material lanes: tpage straight from the skin, CBA from the skin
+            // or from a compact copy the suit animation rewrites.
+            constexpr u32 kSkinVertexFloats = sizeof(SkinVertex) / sizeof(f32);
+            const f32* tpageLane = &skin->verts[0].tpage;
+            u32 tpageStride = kSkinVertexFloats;
+            const f32* cbaLane = &skin->verts[0].cba;
+            u32 cbaStride = kSkinVertexFloats;
+            CompositeAnimData* suit = renderSource ? renderSource->compositeAnim : nullptr;
+            if (suit) {
+                std::vector<f32>& suitCba = g_pspModelFrameScratch.skinCbaLane;
+                ResizeRetainedScratch(suitCba, skin->numVerts);
+                for (u32 i = 0; i < skin->numVerts; i++) {
+                    suitCba[i] = skin->verts[i].cba;
                 }
-                else {
-                    PspSkinVerticesVfpu<false>(loop, 0, skin->numVerts, vertData.data());
+                ApplyCompositeSuitFrameToVerts(suit, static_cast<s32>(suitIndex), skin,
+                                               suitCba.data(), 1u);
+                cbaLane = suitCba.data();
+                cbaStride = 1u;
+            }
+            // On-device equivalence check, like the VFPU self-test: the first
+            // uploads also run the float path and compare every byte. Any
+            // difference keeps that draw's reference result and turns the
+            // fused path off for the rest of the run.
+            if (g_pspFusedSkinChecksLeft > 0u) {
+                --g_pspFusedSkinChecksLeft;
+                std::vector<f32>& reference = g_pspModelFrameScratch.skinVertexData;
+                ResizeRetainedScratch(reference, skin->numVerts * 10u);
+                PspSkinVerticesVfpu<true>(loop, 0, skin->numVerts, reference.data());
+                ApplyCompositeSuitFrameToVerts(suit, static_cast<s32>(suitIndex), skin,
+                                               reference.data() + 9, 10u);
+                bool matched = true;
+                for (u32 i = 0; i < skin->numVerts && matched; i++) {
+                    const f32* in = reference.data() + i * 10u;
+                    PspPackedVertex expected;
+                    expected.u = static_cast<s16>(in[6]);
+                    expected.v = static_cast<s16>(in[7]);
+                    expected.color = MakePspGeometryColour(in[3], in[4], in[5]);
+                    expected.x = in[0];
+                    expected.y = in[1];
+                    expected.z = in[2];
+                    matched = std::memcmp(&expected, &fusedVertices[i], sizeof(expected)) == 0
+                        && std::memcmp(&in[8], tpageLane + i * tpageStride, sizeof(f32)) == 0
+                        && std::memcmp(&in[9], cbaLane + i * cbaStride, sizeof(f32)) == 0;
+                }
+                PspPerf::RecordFusedSkinCheck(matched);
+                if (!matched) {
+                    g_pspFusedSkinDisabled = true;
+                    for (u32 i = 0; i < skin->numVerts; i++) {
+                        const f32* in = reference.data() + i * 10u;
+                        fusedVertices[i].u = static_cast<s16>(in[6]);
+                        fusedVertices[i].v = static_cast<s16>(in[7]);
+                        fusedVertices[i].color = MakePspGeometryColour(in[3], in[4], in[5]);
+                        fusedVertices[i].x = in[0];
+                        fusedVertices[i].y = in[1];
+                        fusedVertices[i].z = in[2];
+                    }
+                    tpageLane = reference.data() + 8;
+                    tpageStride = 10u;
+                    cbaLane = reference.data() + 9;
+                    cbaStride = 10u;
                 }
             }
-            else
-#endif
-            {
-                PspSkinVerticesScalar(loop, 0, skin->numVerts, vertData.data());
-            }
-#if defined(RC_PSP_VFPU_SKIN)
-            if (vfpuSelfTest) {
-                const bool byteColours = PspSkinColoursAreBytes(skin);
-                PspVfpuSkinSelfTestVertices(vfpuTest, loop, skin->numVerts, vertData.data(),
-                                            byteColours);
-                const bool passed = vfpuTest.Passed();
-                g_pspVfpuSkinMode = passed ? PspVfpuSkinMode::Enabled : PspVfpuSkinMode::Disabled;
-                PspVfpuSkinSelfTestRecord& record = g_pspVfpuSkinSelfTestRecord;
-                const f32 positionMicros = vfpuTest.maxPositionDiff * 1.0e6f;
-                record.passed = passed ? 1u : 0u;
-                record.vertices = vfpuTest.vertices;
-                record.litSources = vfpuTest.litVertices;
-                record.byteColours = byteColours ? 1u : 0u;
-                record.maxPositionDiffMicro = (positionMicros >= 0.0f && positionMicros < 4.0e9f)
-                    ? static_cast<u32>(positionMicros) : 0xFFFFFFFFu;
-                record.positionFailures = vfpuTest.positionFailures;
-                record.colourDiff = vfpuTest.colourDiff;
-                record.lightDiff = vfpuTest.lightDiff;
-                record.attribMismatches = vfpuTest.attribMismatches;
-                record.magic = 0x56465055u;  // "VFPU": written last
-                LOG("[PSP VFPU skin] self-test %s: verts=%u litSources=%u byteColours=%u "
-                    "maxPosDiff=%uE-6 posFailures=%u colourDiff=%u lightDiff=%u attribMismatches=%u",
-                    record.passed ? "PASS (VFPU enabled)" : "FAIL (scalar kept)",
-                    record.vertices, record.litSources, record.byteColours,
-                    record.maxPositionDiffMicro, record.positionFailures, record.colourDiff,
-                    record.lightDiff, record.attribMismatches);
-            }
-#endif
+            EndPspPrimBufferPackedUpload(skinnedBuffer, tpageLane, tpageStride,
+                                         cbaLane, cbaStride, skin->numVerts);
         }
-#else
-        for (u32 i = 0; i < skin->numVerts; i++) {
-            const SkinVertex& sv = skin->verts[i];
-            const Mat4& m = jointMatrices[sv.jointIdx];
-            f32 wx, wy, wz;
-#if defined(RC_PLATFORM_PSP) && defined(PSP_SKIN_TRANSFORM_CACHE)
-            g_pspModelFrameScratch.transforms.Transform(
-                sv.sourceIndex, sv.jointIdx, m, sv.lx, sv.ly, sv.lz, wx, wy, wz);
-#else
-            Mat4TransformPoint(m, sv.lx, sv.ly, sv.lz, wx, wy, wz);
-#endif
-
-            f32 litR = sv.r;
-            f32 litG = sv.g;
-            f32 litB = sv.b;
-            if (hasLitScratch && renderSource->primGeom && sv.sourceIndex < renderSource->primGeom->numVerts
-                && litWritten[sv.sourceIndex] != 0u) {
-                const u32 sourceIndex = static_cast<u32>(sv.sourceIndex);
-                const u16 rg = litScratch[sourceIndex * 2u + 0u];
-                const u16 b = litScratch[sourceIndex * 2u + 1u];
-                const u32 lightR = static_cast<u32>(rg & 0xFFu);
-                const u32 lightG = static_cast<u32>((rg >> 8) & 0xFFu);
-                const u32 lightB = static_cast<u32>(b & 0xFFu);
-
-                u32 baseR = static_cast<u32>(sv.r * 128.0f + 0.5f);
-                u32 baseG = static_cast<u32>(sv.g * 128.0f + 0.5f);
-                u32 baseB = static_cast<u32>(sv.b * 128.0f + 0.5f);
-                if (baseR > 255u) baseR = 255u;
-                if (baseG > 255u) baseG = 255u;
-                if (baseB > 255u) baseB = 255u;
-
-                u32 modR = (baseR * lightR + 64u) >> 7;
-                u32 modG = (baseG * lightG + 64u) >> 7;
-                u32 modB = (baseB * lightB + 64u) >> 7;
-                if (modR > 255u) modR = 255u;
-                if (modG > 255u) modG = 255u;
-                if (modB > 255u) modB = 255u;
-
-                litR = static_cast<f32>(modR) / 128.0f;
-                litG = static_cast<f32>(modG) / 128.0f;
-                litB = static_cast<f32>(modB) / 128.0f;
-            }
-
-            vertData[i * 10 + 0] = wx;
-            vertData[i * 10 + 1] = wy;
-            vertData[i * 10 + 2] = wz;
-            vertData[i * 10 + 3] = litR;
-            vertData[i * 10 + 4] = litG;
-            vertData[i * 10 + 5] = litB;
-            vertData[i * 10 + 6] = sv.u;
-            vertData[i * 10 + 7] = sv.v;
-            vertData[i * 10 + 8] = sv.tpage;
-            vertData[i * 10 + 9] = sv.cba;
-        }
-#endif
-
-        ApplyCompositeSuitFrameToVerts(renderSource ? renderSource->compositeAnim : nullptr,
-                           static_cast<s32>(suitIndex),
-                           skin,
-                           &vertData);
-
-#if defined(RC_PLATFORM_PSP)
-        if (!UpdatePspPrimBufferDynamicVertices(skinnedBuffer,
-                                                vertData.data(), skin->numVerts,
-                                                true))
+        else
 #endif
         {
 #if defined(RC_PLATFORM_PSP)
-            // Keep the existing parser for an unexpected vertex format.
+            std::vector<f32>& vertData = g_pspModelFrameScratch.skinVertexData;
+            ResizeRetainedScratch(vertData, skin->numVerts * 10u);
+#if defined(PSP_SKIN_TRANSFORM_CACHE)
+            g_pspModelFrameScratch.transforms.Begin();
 #endif
-            skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
+#else
+            std::vector<f32> vertData(skin->numVerts * 10);
+#endif
+#if defined(RC_PLATFORM_PSP)
+            {
+                const PspSkinLoop loop = {
+                    skin->verts,
+                    jointData,
+                    litScratch.data(),
+                    litWritten.data(),
+                    (hasLitScratch && renderSource->primGeom)
+                        ? static_cast<u32>(renderSource->primGeom->numVerts) : 0u,
+                };
+#if defined(RC_PSP_VFPU_SKIN)
+                if (vfpuEnabled) {
+                    if (PspSkinColoursAreBytes(skin)) {
+                        PspSkinVerticesVfpu<true>(loop, 0, skin->numVerts, vertData.data());
+                    }
+                    else {
+                        PspSkinVerticesVfpu<false>(loop, 0, skin->numVerts, vertData.data());
+                    }
+                }
+                else
+#endif
+                {
+                    PspSkinVerticesScalar(loop, 0, skin->numVerts, vertData.data());
+                }
+#if defined(RC_PSP_VFPU_SKIN)
+                if (vfpuSelfTest) {
+                    const bool byteColours = PspSkinColoursAreBytes(skin);
+                    PspVfpuSkinSelfTestVertices(vfpuTest, loop, skin->numVerts, vertData.data(),
+                                                byteColours);
+                    const bool passed = vfpuTest.Passed();
+                    g_pspVfpuSkinMode = passed ? PspVfpuSkinMode::Enabled : PspVfpuSkinMode::Disabled;
+                    PspVfpuSkinSelfTestRecord& record = g_pspVfpuSkinSelfTestRecord;
+                    const f32 positionMicros = vfpuTest.maxPositionDiff * 1.0e6f;
+                    record.passed = passed ? 1u : 0u;
+                    record.vertices = vfpuTest.vertices;
+                    record.litSources = vfpuTest.litVertices;
+                    record.byteColours = byteColours ? 1u : 0u;
+                    record.maxPositionDiffMicro = (positionMicros >= 0.0f && positionMicros < 4.0e9f)
+                        ? static_cast<u32>(positionMicros) : 0xFFFFFFFFu;
+                    record.positionFailures = vfpuTest.positionFailures;
+                    record.colourDiff = vfpuTest.colourDiff;
+                    record.lightDiff = vfpuTest.lightDiff;
+                    record.attribMismatches = vfpuTest.attribMismatches;
+                    record.magic = 0x56465055u;  // "VFPU": written last
+                    LOG("[PSP VFPU skin] self-test %s: verts=%u litSources=%u byteColours=%u "
+                        "maxPosDiff=%uE-6 posFailures=%u colourDiff=%u lightDiff=%u attribMismatches=%u",
+                        record.passed ? "PASS (VFPU enabled)" : "FAIL (scalar kept)",
+                        record.vertices, record.litSources, record.byteColours,
+                        record.maxPositionDiffMicro, record.positionFailures, record.colourDiff,
+                        record.lightDiff, record.attribMismatches);
+                }
+#endif
+            }
+#else
+            for (u32 i = 0; i < skin->numVerts; i++) {
+                const SkinVertex& sv = skin->verts[i];
+                const Mat4& m = jointMatrices[sv.jointIdx];
+                f32 wx, wy, wz;
+#if defined(RC_PLATFORM_PSP) && defined(PSP_SKIN_TRANSFORM_CACHE)
+                g_pspModelFrameScratch.transforms.Transform(
+                    sv.sourceIndex, sv.jointIdx, m, sv.lx, sv.ly, sv.lz, wx, wy, wz);
+#else
+                Mat4TransformPoint(m, sv.lx, sv.ly, sv.lz, wx, wy, wz);
+#endif
+
+                f32 litR = sv.r;
+                f32 litG = sv.g;
+                f32 litB = sv.b;
+                if (hasLitScratch && renderSource->primGeom && sv.sourceIndex < renderSource->primGeom->numVerts
+                    && litWritten[sv.sourceIndex] != 0u) {
+                    const u32 sourceIndex = static_cast<u32>(sv.sourceIndex);
+                    const u16 rg = litScratch[sourceIndex * 2u + 0u];
+                    const u16 b = litScratch[sourceIndex * 2u + 1u];
+                    const u32 lightR = static_cast<u32>(rg & 0xFFu);
+                    const u32 lightG = static_cast<u32>((rg >> 8) & 0xFFu);
+                    const u32 lightB = static_cast<u32>(b & 0xFFu);
+
+                    u32 baseR = static_cast<u32>(sv.r * 128.0f + 0.5f);
+                    u32 baseG = static_cast<u32>(sv.g * 128.0f + 0.5f);
+                    u32 baseB = static_cast<u32>(sv.b * 128.0f + 0.5f);
+                    if (baseR > 255u) baseR = 255u;
+                    if (baseG > 255u) baseG = 255u;
+                    if (baseB > 255u) baseB = 255u;
+
+                    u32 modR = (baseR * lightR + 64u) >> 7;
+                    u32 modG = (baseG * lightG + 64u) >> 7;
+                    u32 modB = (baseB * lightB + 64u) >> 7;
+                    if (modR > 255u) modR = 255u;
+                    if (modG > 255u) modG = 255u;
+                    if (modB > 255u) modB = 255u;
+
+                    litR = static_cast<f32>(modR) / 128.0f;
+                    litG = static_cast<f32>(modG) / 128.0f;
+                    litB = static_cast<f32>(modB) / 128.0f;
+                }
+
+                vertData[i * 10 + 0] = wx;
+                vertData[i * 10 + 1] = wy;
+                vertData[i * 10 + 2] = wz;
+                vertData[i * 10 + 3] = litR;
+                vertData[i * 10 + 4] = litG;
+                vertData[i * 10 + 5] = litB;
+                vertData[i * 10 + 6] = sv.u;
+                vertData[i * 10 + 7] = sv.v;
+                vertData[i * 10 + 8] = sv.tpage;
+                vertData[i * 10 + 9] = sv.cba;
+            }
+#endif
+
+            ApplyCompositeSuitFrameToVerts(renderSource ? renderSource->compositeAnim : nullptr,
+                               static_cast<s32>(suitIndex),
+                               skin,
+                               vertData.data() + 9, 10u);
+
+#if defined(RC_PLATFORM_PSP)
+            if (!UpdatePspPrimBufferDynamicVertices(skinnedBuffer,
+                                                    vertData.data(), skin->numVerts,
+                                                    true))
+#endif
+            {
+#if defined(RC_PLATFORM_PSP)
+                // Keep the existing parser for an unexpected vertex format.
+#endif
+                skinnedBuffer->SetVertexData(vertData.data(), skin->numVerts);
+            }
         }
         const bool skinBlendApplied = applySkinBlendState(skin);
         skinTimer.Stop();

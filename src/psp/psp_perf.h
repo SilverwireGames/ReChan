@@ -142,6 +142,9 @@ void WriteReport();
 void WriteReportTo(const char* path, u32 scenario = 0, s32 level = -1);
 // Free-form number written as scenario_note= (e.g. enemies gathered).
 void SetScenarioNote(u32 note);
+// On-device equivalence check of the fused character upload (model.cpp):
+// reported as fused_skin_checks= / fused_skin_mismatches=.
+void RecordFusedSkinCheck(bool matched);
 // Transition-only breadcrumb. Unlike frame telemetry, this performs I/O only
 // at level/benchmark state boundaries and is safe to inspect over PSPLINK.
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex);

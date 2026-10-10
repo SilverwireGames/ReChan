@@ -140,6 +140,8 @@ void ResetHandlerMetrics() {
 
 int g_mainThreadId = -1;  // SceUID of the thread that called Reset()
 u32 g_scenarioNote = 0;
+u32 g_fusedSkinChecks = 0;
+u32 g_fusedSkinMismatches = 0;
 
 // The slowest frames since the measurement started, with what they spent the
 // time on, plus slowdown counts over the whole session (not just the window).
@@ -696,11 +698,13 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         const std::size_t length = std::strlen(report);
         std::snprintf(report + length, sizeof(report) - length,
             "session_frames=%lu\nframes_over_33ms=%lu\nframes_over_50ms=%lu\n"
-            "session_io_ms=%lu\n",
+            "session_io_ms=%lu\nfused_skin_checks=%lu\nfused_skin_mismatches=%lu\n",
             static_cast<unsigned long>(g_sessionFrames),
             static_cast<unsigned long>(g_framesOver33Ms),
             static_cast<unsigned long>(g_framesOver50Ms),
-            static_cast<unsigned long>(g_sessionIoUs / 1000u));
+            static_cast<unsigned long>(g_sessionIoUs / 1000u),
+            static_cast<unsigned long>(g_fusedSkinChecks),
+            static_cast<unsigned long>(g_fusedSkinMismatches));
     }
     {
         std::array<WorstFrame, kWorstFrames> sorted = g_worstFrames;
@@ -765,6 +769,11 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
 
 void SetScenarioNote(u32 note) {
     g_scenarioNote = note;
+}
+
+void RecordFusedSkinCheck(bool matched) {
+    ++g_fusedSkinChecks;
+    if (!matched) ++g_fusedSkinMismatches;
 }
 
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex) {
@@ -890,6 +899,7 @@ void WriteReport() {}
 void WriteReportTo(const char*, u32, s32) {}
 void WriteState(const char*, s32, s32, s32) {}
 void SetScenarioNote(u32) {}
+void RecordFusedSkinCheck(bool) {}
 void GetSnapshot(Snapshot* out) { if (out) *out = {}; }
 void Trace(const char*) {}
 

@@ -518,6 +518,23 @@ inline void SkinLitByteVertex(const void* sv, float* out, std::uint32_t lightR,
         : "memory");
 }
 
+// Position only, for the fused packed upload: out[0..2] = joint *
+// (lx, ly, lz, 1), the same vhtfm4.q as the full kernels (identical floats).
+// `out` needs 4-byte alignment only.
+inline void SkinPosition(const void* sv, float* out) {
+    __asm__ volatile(
+        "lv.s    S100, 0(%[sv])\n"
+        "lv.s    S101, 4(%[sv])\n"
+        "lv.s    S102, 8(%[sv])\n"
+        "vhtfm4.q C110, E000, C100\n"
+        "sv.s    S110, 0(%[out])\n"
+        "sv.s    S111, 4(%[out])\n"
+        "sv.s    S112, 8(%[out])\n"
+        :
+        : [sv] "r"(sv), [out] "r"(out)
+        : "memory");
+}
+
 // Unlit vertex: transformed position, base colour and attributes copied.
 inline void SkinUnlitVertex(const void* sv, float* out) {
     __asm__ volatile(

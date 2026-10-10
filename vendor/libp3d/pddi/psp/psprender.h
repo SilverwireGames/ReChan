@@ -95,6 +95,14 @@ public:
     void PreferStagedIndexedVertices() { preferStagedIndexedVertices = true; }
     bool SetDynamicVertexData(const void* data, u32 count,
                               bool uvIsIntegral = false);
+    // Fused dynamic upload: the caller writes the compact stream in place, then
+    // EndPackedUpload applies the material lanes. Together they leave the
+    // buffer exactly as SetDynamicVertexData(..., uvIsIntegral = true) would on
+    // its compact-only path. Begin returns nullptr when that path is not
+    // available (the caller then falls back to SetDynamicVertexData).
+    PspPackedVertex* BeginPackedUpload(u32 count);
+    void EndPackedUpload(const float* tpage, u32 tpageStride,
+                         const float* cba, u32 cbaStride, u32 count);
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour,
@@ -148,6 +156,10 @@ private:
     std::vector<MaterialRun> materialRuns;
     bool materialRunsValid = false;
     void BuildMaterialRuns();
+    // Applies tpage/CBA lanes (float bits, as the dynamic upload layout).
+    bool UpdateDynamicMaterials(const float* tpage, u32 tpageStride,
+                                const float* cba, u32 cbaStride, u32 count);
+    bool packedUploadStaged = false;
     // True when the compact stream is current and the float stream is not.
     bool floatStale = false;
     // Colour patch state (PatchColours). Base colours are captured lazily on
@@ -186,6 +198,13 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
                                         const void* data, u32 count,
                                         bool uvIsIntegral);
+// Fused form of UpdatePspPrimBufferDynamicVertices(..., uvIsIntegral = true)
+// for callers that can produce the compact stream directly (PSP character
+// skinning): write `count` vertices to the returned array, then call End with
+// the tpage/CBA lanes. Begin returns nullptr when the buffer cannot take it.
+PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, u32 count);
+void EndPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, const float* tpage, u32 tpageStride,
+                                  const float* cba, u32 cbaStride, u32 count);
 // GU vertex colour for PSX fixed-point channels (packet byte / 128), exactly
 // as the buffer upload paths convert them.
 u32 MakePspGeometryColour(float r, float g, float b);

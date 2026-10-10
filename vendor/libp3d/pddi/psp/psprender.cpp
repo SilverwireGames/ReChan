@@ -569,6 +569,44 @@ void pspPrimBuffer::MarkDirectSubmission() {
     directSubmissionSerial = g_submissionSerial;
 }
 
+bool pspPrimBuffer::UpdateDynamicMaterials(const float* tpage, u32 tpageStride,
+                                           const float* cba, u32 cbaStride, u32 count) {
+    if (materialRawBits.size() != count) {
+        materialRawBits.assign(count, 0u);
+        materialRawBitsValid = false;
+    }
+    const bool reuseMaterialKeys = materialRawBitsValid;
+    bool materialChanged = false;
+    for (u32 i = 0; i < count; ++i) {
+        const float* tpageLane = tpage + static_cast<std::size_t>(i) * tpageStride;
+        const float* cbaLane = cba + static_cast<std::size_t>(i) * cbaStride;
+        // Suit animation rewrites few material lanes; skip the finite/range
+        // validation and key packing when the raw bits are unchanged.
+        u32 tpageBits = 0;
+        u32 cbaBits = 0;
+        std::memcpy(&tpageBits, tpageLane, sizeof(tpageBits));
+        std::memcpy(&cbaBits, cbaLane, sizeof(cbaBits));
+        const u64 rawMaterial = (static_cast<u64>(tpageBits) << 32) | cbaBits;
+        if (!reuseMaterialKeys || materialRawBits[i] != rawMaterial) {
+            materialRawBits[i] = rawMaterial;
+            materialChanged = true;
+            const float tpageValue = *tpageLane;
+            const float cbaValue = *cbaLane;
+            const bool materialIsValid = std::isfinite(tpageValue) && tpageValue >= 0.0f
+                && tpageValue <= 65535.0f && std::isfinite(cbaValue) && cbaValue >= 0.0f
+                && cbaValue <= 65535.0f;
+            materialValid[i] = materialIsValid ? 1u : 0u;
+            materialKeys[i] = materialIsValid
+                ? (static_cast<u32>(static_cast<s32>(tpageValue)) << 16)
+                    | static_cast<u32>(static_cast<s32>(cbaValue))
+                : 0u;
+        }
+    }
+    materialRawBitsValid = true;
+    if (materialChanged) materialRunsValid = false;
+    return materialChanged;
+}
+
 bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
                                          bool uvIsIntegral) {
     PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
@@ -588,12 +626,7 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
     const bool sourceWillBeStaged = UsesStagedIndexedVertices();
     PrepareForMutation();
     const float* source = static_cast<const float*>(data);
-    if (materialRawBits.size() != count) {
-        materialRawBits.assign(count, 0u);
-        materialRawBitsValid = false;
-    }
-    const bool reuseMaterialKeys = materialRawBitsValid;
-    bool materialChanged = false;
+    UpdateDynamicMaterials(source + 8, 10u, source + 9, 10u, count);
     // List-memory builds submit page geometry through the compact stream
     // only. With integral UVs, write just that stream and rebuild the float
     // copy on demand (vramHandle == 0 draws). Other builds never read the
@@ -602,28 +635,6 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
     bool packedUvValid = kPackedStreamConsumed && packedVerticesValid;
     for (u32 i = 0; i < count; ++i) {
         const float* input = source + static_cast<std::size_t>(i) * 10u;
-        // Suit animation rewrites few material lanes; skip the finite/range
-        // validation and key packing when the raw bits are unchanged.
-        u32 tpageBits = 0;
-        u32 cbaBits = 0;
-        std::memcpy(&tpageBits, input + 8, sizeof(tpageBits));
-        std::memcpy(&cbaBits, input + 9, sizeof(cbaBits));
-        const u64 rawMaterial = (static_cast<u64>(tpageBits) << 32) | cbaBits;
-        if (!reuseMaterialKeys || materialRawBits[i] != rawMaterial) {
-            materialRawBits[i] = rawMaterial;
-            materialChanged = true;
-            const float tpage = input[8];
-            const float cba = input[9];
-            const bool materialIsValid = std::isfinite(tpage) && tpage >= 0.0f
-                && tpage <= 65535.0f && std::isfinite(cba) && cba >= 0.0f
-                && cba <= 65535.0f;
-            materialValid[i] = materialIsValid ? 1u : 0u;
-            materialKeys[i] = materialIsValid
-                ? (static_cast<u32>(static_cast<s32>(tpage)) << 16)
-                    | static_cast<u32>(static_cast<s32>(cba))
-                : 0u;
-        }
-
         const u32 color = MakeGeometryColor(input[3], input[4], input[5]);
         if (packedOnly) {
             // Same values as the generic path below; see uvIsIntegral.
@@ -672,8 +683,6 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
         packed.y = target.y;
         packed.z = target.z;
     }
-    materialRawBitsValid = true;
-    if (materialChanged) materialRunsValid = false;
     packedVerticesValid = packedOnly || packedUvValid;
     floatStale = packedOnly;
     // Colours were rewritten: a pending colour patch no longer applies.
@@ -689,6 +698,34 @@ bool pspPrimBuffer::SetDynamicVertexData(const void* data, u32 count,
         }
     }
     return true;
+}
+
+PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count) {
+    constexpr u32 kDynamicFormat = PDDI_V_POSITION | PDDI_V_COLOUR
+        | PDDI_V_UV | PDDI_V_TEXINFO;
+    // SetDynamicVertexData's compact-only path (uvIsIntegral) and nothing else.
+    if (!kPackedStreamConsumed || !packedVerticesValid
+        || count != vertices.size() || vertexFormat != kDynamicFormat) {
+        return nullptr;
+    }
+    PreferStagedIndexedVertices();  // as UpdatePspPrimBufferDynamicVertices
+    packedUploadStaged = UsesStagedIndexedVertices();
+    PrepareForMutation();
+    return packedVertices.data();
+}
+
+void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
+                                    const float* cba, u32 cbaStride, u32 count) {
+    PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
+    UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
+    packedVerticesValid = true;
+    floatStale = true;
+    baseColoursValid = false;
+    colourPatchActive = false;
+    if (!packedUploadStaged) {
+        WritebackDcacheRange(packedVertices.data(),
+            sizeof(PspPackedVertex) * packedVertices.size());
+    }
 }
 
 void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
@@ -926,6 +963,17 @@ void pspPrimBuffer::RevalidateIndices() {
 void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* base) {
     if (!base) return;
     static_cast<pspPrimBuffer*>(base)->PreferStagedIndexedVertices();
+}
+
+PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* base, u32 count) {
+    if (!base) return nullptr;
+    return static_cast<pspPrimBuffer*>(base)->BeginPackedUpload(count);
+}
+
+void EndPspPrimBufferPackedUpload(pddiPrimBuffer* base, const float* tpage, u32 tpageStride,
+                                  const float* cba, u32 cbaStride, u32 count) {
+    if (!base) return;
+    static_cast<pspPrimBuffer*>(base)->EndPackedUpload(tpage, tpageStride, cba, cbaStride, count);
 }
 
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,
