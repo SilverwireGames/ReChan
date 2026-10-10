@@ -1240,6 +1240,10 @@ struct PspSuitLane {
     u32 laneId = 0;  // 0: empty slot
     u32 lastUse = 0;
     std::vector<f32> cba;
+    // Material keys of (skin tpage, cba), for buffers shared by instances
+    // wearing different suits (BuildPspMaterialKeys).
+    std::vector<u32> keys;
+    std::vector<u8> keyValid;
 };
 PspSuitLane g_pspSuitLanes[8];
 u32 g_pspSuitLaneClock = 0;
@@ -1281,6 +1285,11 @@ const PspSuitLane& AcquirePspSuitLane(CompositeAnimData* suit, u32 suitIndex,
     }
     PspPerf::CountRenderer(PspPerf::RendererCounter::SuitLaneBuilds);
     BuildPspSuitLane(suit, suitIndex, skin, victim->cba);
+    ResizeRetainedScratch(victim->keys, skin->numVerts);
+    ResizeRetainedScratch(victim->keyValid, skin->numVerts);
+    BuildPspMaterialKeys(&skin->verts[0].tpage, sizeof(SkinVertex) / sizeof(f32),
+                         victim->cba.data(), 1u, skin->numVerts,
+                         victim->keys.data(), victim->keyValid.data());
     victim->skinId = skin->pspInstanceId;
     victim->suit = suit;
     victim->suitIndex = suitIndex;
@@ -2059,12 +2068,16 @@ void DrawableSTree::Display(u32 /*flags*/) {
             u32 cbaStride = kSkinVertexFloats;
             CompositeAnimData* suit = renderSource ? renderSource->compositeAnim : nullptr;
             u32 suitLaneId = 0;
+            const u32* suitKeys = nullptr;
+            const u8* suitKeyValid = nullptr;
             if (suit) {
                 PspPerf::ScopeTimer suitTimer(PspPerf::RendererCounter::SkinSuitUs);
                 const PspSuitLane& suitLane = AcquirePspSuitLane(suit, suitIndex, skin);
                 cbaLane = suitLane.cba.data();
                 cbaStride = 1u;
                 suitLaneId = suitLane.laneId;
+                suitKeys = suitLane.keys.data();
+                suitKeyValid = suitLane.keyValid.data();
             }
             // On-device equivalence check, like the VFPU self-test: the first
             // uploads also run the float path and compare every byte. Any
@@ -2113,11 +2126,15 @@ void DrawableSTree::Display(u32 /*flags*/) {
             // immutable under their id: the buffer may skip re-comparing them.
             // A check mismatch above switched to the reference lanes (no id).
             u32 laneSource = 0;
+            const bool suitLanes = tpageLane == &skin->verts[0].tpage
+                && cbaLane != &skin->verts[0].cba && suitLaneId != 0u;
             if (tpageLane == &skin->verts[0].tpage) {
                 laneSource = cbaLane == &skin->verts[0].cba ? skin->pspInstanceId : suitLaneId;
             }
             EndPspPrimBufferPackedUpload(skinnedBuffer, tpageLane, tpageStride,
-                                         cbaLane, cbaStride, skin->numVerts, laneSource);
+                                         cbaLane, cbaStride, skin->numVerts, laneSource,
+                                         suitLanes ? suitKeys : nullptr,
+                                         suitLanes ? suitKeyValid : nullptr);
         }
         else
 #endif

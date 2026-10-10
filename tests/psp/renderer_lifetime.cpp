@@ -745,6 +745,86 @@ int main() {
     }
 
     if (kPackedStreamConsumed) {
+        // Precomputed lane keys (suit lanes shared by several instances of a
+        // model): alternating sources copy BuildPspMaterialKeys results and
+        // must leave the keys, validity and runs SetDynamicVertexData leaves.
+        std::mt19937 rng(8642u);
+        constexpr u32 kFormat = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+        for (int round = 0; round < 40; ++round) {
+            const u32 vertexCount = 3u + rng() % 80u;
+            const u32 indexCount = 3u * (1u + rng() % 40u);
+            pspPrimBuffer reference({PDDI_PRIM_TRIANGLES, kFormat, vertexCount, indexCount});
+            pspPrimBuffer shared({PDDI_PRIM_TRIANGLES, kFormat, vertexCount, indexCount});
+            std::vector<float> base(vertexCount * 10u);
+            for (u32 v = 0; v < vertexCount; ++v) {
+                float* lane = &base[v * 10u];
+                for (int c = 0; c < 6; ++c) lane[c] = static_cast<float>(rng() % 200u) / 64.0f;
+                lane[6] = static_cast<float>(rng() % 256u);
+                lane[7] = static_cast<float>(rng() % 256u);
+                lane[8] = rng() % 7u == 0u ? -1.0f : static_cast<float>(rng() % 4u);
+                lane[9] = static_cast<float>(rng() % 3u);
+            }
+            // Three "suits": CBA lanes over the same skin tpage lane.
+            std::vector<float> suits[3];
+            std::vector<u32> keys[3];
+            std::vector<u8> valid[3];
+            for (u32 s = 0; s < 3u; ++s) {
+                suits[s].resize(vertexCount);
+                for (u32 v = 0; v < vertexCount; ++v) {
+                    suits[s][v] = rng() % 3u == 0u ? static_cast<float>(rng() % 5u) : base[v * 10u + 9u];
+                    if (rng() % 31u == 0u) suits[s][v] = 70000.0f;
+                }
+                keys[s].resize(vertexCount);
+                valid[s].resize(vertexCount);
+                BuildPspMaterialKeys(&base[8], 10u, suits[s].data(), 1u, vertexCount,
+                                     keys[s].data(), valid[s].data());
+            }
+            reference.SetVertexData(base.data(), vertexCount);
+            shared.SetVertexData(base.data(), vertexCount);
+            std::vector<u16> idx(indexCount);
+            for (u16& index : idx) index = static_cast<u16>(rng() % vertexCount);
+            reference.SetIndices(idx.data(), indexCount);
+            shared.SetIndices(idx.data(), indexCount);
+            for (int frame = 0; frame < 8; ++frame) {
+                const u32 s = rng() % 3u;
+                std::vector<float> data = base;
+                for (u32 v = 0; v < vertexCount; ++v) data[v * 10u + 9u] = suits[s][v];
+                require(reference.SetDynamicVertexData(data.data(), vertexCount, true), "reference upload refused");
+                PspPackedVertex* out = shared.BeginPackedUpload(vertexCount);
+                require(out != nullptr, "fused upload refused");
+                for (u32 v = 0; v < vertexCount; ++v) {
+                    const float* in = &data[v * 10u];
+                    out[v] = {static_cast<s16>(in[6]), static_cast<s16>(in[7]),
+                              MakeGeometryColor(in[3], in[4], in[5]), in[0], in[1], in[2]};
+                }
+                shared.EndPackedUpload(&base[8], 10u, suits[s].data(), 1u, vertexCount, 100u + s,
+                                       keys[s].data(), valid[s].data());
+                require(reference.materialKeys == shared.materialKeys
+                        && reference.materialValid == shared.materialValid,
+                    "precomputed lane keys differ from SetDynamicVertexData");
+                for (u32 start = 0; start + 2 < indexCount; start += 3) {
+                    bool va = false, vb = false;
+                    u32 ka = 0, kb = 0, ea = 0, eb = 0;
+                    require(reference.FindMaterialRun(start, &va, &ka, &ea)
+                            && shared.FindMaterialRun(start, &vb, &kb, &eb)
+                            && va == vb && ka == kb && ea == eb,
+                        "precomputed lane material runs differ");
+                }
+            }
+            // A later upload without precomputed keys converts the lanes again.
+            std::vector<float> data = base;
+            require(reference.SetDynamicVertexData(data.data(), vertexCount, true), "reference upload refused");
+            PspPackedVertex* out = shared.BeginPackedUpload(vertexCount);
+            require(out != nullptr, "fused upload refused");
+            for (u32 v = 0; v < vertexCount; ++v) out[v] = {};
+            shared.EndPackedUpload(&base[8], 10u, &base[9], 10u, vertexCount, 0u);
+            require(reference.materialKeys == shared.materialKeys
+                    && reference.materialValid == shared.materialValid,
+                "lane update after precomputed keys differs");
+        }
+    }
+
+    if (kPackedStreamConsumed) {
         // laneSource: repeating an immutable source skips the material pass
         // without changing the result; another material writer in between
         // (SetDynamicVertexData) must force the full comparison again.

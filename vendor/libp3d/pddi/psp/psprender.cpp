@@ -685,6 +685,26 @@ void pspPrimBuffer::MarkDirectSubmission() {
     directSubmissionSerial = g_submissionSerial;
 }
 
+// One vertex's page material: tpage/CBA must be finite and within 0..65535.
+static bool PackMaterialKey(float tpageValue, float cbaValue, u32* key) {
+    const bool materialIsValid = std::isfinite(tpageValue) && tpageValue >= 0.0f
+        && tpageValue <= 65535.0f && std::isfinite(cbaValue) && cbaValue >= 0.0f
+        && cbaValue <= 65535.0f;
+    *key = materialIsValid
+        ? (static_cast<u32>(static_cast<s32>(tpageValue)) << 16)
+            | static_cast<u32>(static_cast<s32>(cbaValue))
+        : 0u;
+    return materialIsValid;
+}
+
+void BuildPspMaterialKeys(const float* tpage, u32 tpageStride, const float* cba, u32 cbaStride,
+                          u32 count, u32* keys, u8* valid) {
+    for (u32 i = 0; i < count; ++i) {
+        valid[i] = PackMaterialKey(tpage[static_cast<std::size_t>(i) * tpageStride],
+                                   cba[static_cast<std::size_t>(i) * cbaStride], &keys[i]) ? 1u : 0u;
+    }
+}
+
 bool pspPrimBuffer::UpdateDynamicMaterials(const float* tpage, u32 tpageStride,
                                            const float* cba, u32 cbaStride, u32 count) {
     if (materialRawBits.size() != count) {
@@ -706,16 +726,7 @@ bool pspPrimBuffer::UpdateDynamicMaterials(const float* tpage, u32 tpageStride,
         if (!reuseMaterialKeys || materialRawBits[i] != rawMaterial) {
             materialRawBits[i] = rawMaterial;
             materialChanged = true;
-            const float tpageValue = *tpageLane;
-            const float cbaValue = *cbaLane;
-            const bool materialIsValid = std::isfinite(tpageValue) && tpageValue >= 0.0f
-                && tpageValue <= 65535.0f && std::isfinite(cbaValue) && cbaValue >= 0.0f
-                && cbaValue <= 65535.0f;
-            materialValid[i] = materialIsValid ? 1u : 0u;
-            materialKeys[i] = materialIsValid
-                ? (static_cast<u32>(static_cast<s32>(tpageValue)) << 16)
-                    | static_cast<u32>(static_cast<s32>(cbaValue))
-                : 0u;
+            materialValid[i] = PackMaterialKey(*tpageLane, *cbaLane, &materialKeys[i]) ? 1u : 0u;
         }
     }
     materialRawBitsValid = true;
@@ -833,7 +844,8 @@ PspPackedVertex* pspPrimBuffer::BeginPackedUpload(u32 count) {
 
 void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
                                     const float* cba, u32 cbaStride, u32 count,
-                                    u32 laneSource) {
+                                    u32 laneSource, const u32* laneKeys,
+                                    const u8* laneValid) {
     PspPerf::ScopeTimer packTimer(PspPerf::RendererCounter::VertexPackUs);
     const bool lanesHeld = laneSource != 0u && laneSource == packedLaneSource
         && materialRawBitsValid && materialRawBits.size() == count
@@ -843,7 +855,24 @@ void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
     PspPerf::CountRenderer(lanesHeld ? PspPerf::RendererCounter::PackedLaneHolds
                                      : PspPerf::RendererCounter::PackedLaneCompares);
     if (!lanesHeld) {
-        UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
+        if (laneKeys && laneValid && laneSource != 0u && materialKeys.size() == count
+            && materialValid.size() == count) {
+            // Precomputed lanes (another instance's suit on this shared
+            // buffer): the same keys UpdateDynamicMaterials would produce,
+            // compared and copied as arrays.
+            if (std::memcmp(materialKeys.data(), laneKeys, count * sizeof(u32)) != 0
+                || std::memcmp(materialValid.data(), laneValid, count) != 0) {
+                std::memcpy(materialKeys.data(), laneKeys, count * sizeof(u32));
+                std::memcpy(materialValid.data(), laneValid, count);
+                materialRunsValid = false;
+            }
+            // The raw bits no longer describe the keys; a later lane update
+            // without precomputed keys converts every vertex.
+            materialRawBitsValid = false;
+        }
+        else {
+            UpdateDynamicMaterials(tpage, tpageStride, cba, cbaStride, count);
+        }
         packedLaneSource = laneSource;
         packedLaneTpage = tpage;
         packedLaneCba = cba;
@@ -939,14 +968,8 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
                 packedOk = false;
             }
         }
-        const bool materialIsValid = hasTexInfo
-            && std::isfinite(tpage) && tpage >= 0.0f && tpage <= 65535.0f
-            && std::isfinite(cba) && cba >= 0.0f && cba <= 65535.0f;
-        materialValid[i] = materialIsValid ? 1u : 0u;
-        materialKeys[i] = materialIsValid
-            ? (static_cast<u32>(static_cast<s32>(tpage)) << 16)
-                | static_cast<u32>(static_cast<s32>(cba))
-            : 0u;
+        // Without TEXINFO, tpage stays -1: no page material.
+        materialValid[i] = PackMaterialKey(tpage, cba, &materialKeys[i]) ? 1u : 0u;
     }
     WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
     if (packedOk) {
@@ -1141,10 +1164,10 @@ PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* base, u32 count)
 
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* base, const float* tpage, u32 tpageStride,
                                   const float* cba, u32 cbaStride, u32 count,
-                                  u32 laneSource) {
+                                  u32 laneSource, const u32* laneKeys, const u8* laneValid) {
     if (!base) return;
     static_cast<pspPrimBuffer*>(base)->EndPackedUpload(tpage, tpageStride, cba, cbaStride, count,
-                                                       laneSource);
+                                                       laneSource, laneKeys, laneValid);
 }
 
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* base,

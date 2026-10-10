@@ -104,9 +104,12 @@ public:
     // laneSource != 0 promises the lanes are immutable memory identified by
     // that value: repeating the last upload's source and lanes skips the
     // per-vertex material comparison (it would find nothing to change).
+    // laneKeys/laneValid, when given, are BuildPspMaterialKeys of these lanes:
+    // a different source then copies them instead of re-reading the lanes.
     void EndPackedUpload(const float* tpage, u32 tpageStride,
                          const float* cba, u32 cbaStride, u32 count,
-                         u32 laneSource = 0);
+                         u32 laneSource = 0, const u32* laneKeys = nullptr,
+                         const u8* laneValid = nullptr);
     bool PatchDynamicAttributes(const u8* rawData, u32 rawSize,
                                 const u32* uvOffsets, const u32* colourOffsets,
                                 u32 count, bool updateUv, bool updateColour,
@@ -257,18 +260,23 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
                                         const void* data, u32 count,
                                         bool uvIsIntegral);
-// Fused form of UpdatePspPrimBufferDynamicVertices(..., uvIsIntegral = true)
-// for callers that can produce the compact stream directly (PSP character
-// skinning): write `count` vertices to the returned array, then call End with
-// the tpage/CBA lanes. Begin returns nullptr when the buffer cannot take it.
 #if defined(PSP_BENCH_COMBAT)
 // Restarts the scripted combat input (benchmark scenario start).
 void ResetPspBenchCombatInput();
 #endif
+// Fused form of UpdatePspPrimBufferDynamicVertices(..., uvIsIntegral = true)
+// for callers that can produce the compact stream directly (PSP character
+// skinning): write `count` vertices to the returned array, then call End with
+// the tpage/CBA lanes. Begin returns nullptr when the buffer cannot take it.
 PspPackedVertex* BeginPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, u32 count);
 void EndPspPrimBufferPackedUpload(pddiPrimBuffer* buffer, const float* tpage, u32 tpageStride,
                                   const float* cba, u32 cbaStride, u32 count,
-                                  u32 laneSource = 0);
+                                  u32 laneSource = 0, const u32* laneKeys = nullptr,
+                                  const u8* laneValid = nullptr);
+// Material keys and validity of `count` vertices' tpage/CBA lanes, exactly as
+// the upload paths derive them (for lanes uploaded repeatedly).
+void BuildPspMaterialKeys(const float* tpage, u32 tpageStride, const float* cba, u32 cbaStride,
+                          u32 count, u32* keys, u8* valid);
 // GU vertex colour for PSX fixed-point channels (packet byte / 128), exactly
 // as the buffer upload paths convert them.
 u32 MakePspGeometryColour(float r, float g, float b);
