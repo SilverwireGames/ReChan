@@ -985,6 +985,8 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
         && count == vertices.size() && UploadColoursOnly(static_cast<const float*>(data), count)) {
         return;
     }
+    PspPerf::CountRenderer(lastVertexInputValid ? PspPerf::RendererCounter::VertexUploadsChanged
+                                                : PspPerf::RendererCounter::VertexUploadsUnkept);
     if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
         stagedIndexedVertices = true;
         stagedIndexedSerial = g_submissionSerial;

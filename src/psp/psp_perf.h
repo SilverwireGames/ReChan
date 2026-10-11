@@ -61,6 +61,9 @@ enum class RendererCounter : u32 {
     GeoLightUs, ModelShadowUs,
     // SetVertexData calls that only changed the colour lanes (colour pass).
     VertexColourUploads,
+    // Full SetVertexData uploads: without a kept input to compare with, and
+    // with one that differed outside the colour lanes.
+    VertexUploadsUnkept, VertexUploadsChanged,
     Count
 };
 
