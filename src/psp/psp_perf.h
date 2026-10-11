@@ -199,6 +199,11 @@ void RecordFusedSkinCheck(bool matched);
 // at level/benchmark state boundaries and is safe to inspect over PSPLINK.
 void WriteState(const char* state, s32 levelId, s32 levelIndex, s32 targetIndex);
 void GetSnapshot(Snapshot* out);
+#if defined(RC_PLATFORM_PSP)
 void Trace(const char* message);
+#else
+// Desktop builds share the load-trace points; they compile to nothing.
+inline void Trace(const char*) {}
+#endif
 
 } // namespace PspPerf

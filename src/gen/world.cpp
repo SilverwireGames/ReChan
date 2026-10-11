@@ -49,9 +49,7 @@
 #include "pddi/pddidev.h"
 
 #include "extra/shadowcsm.h"
-#if defined(RC_PLATFORM_PSP)
 #include "psp/psp_perf.h"
-#endif
 
 static void UploadRawTextureToWorldVRAM(s16 x, s16 y, s16 w, s16 h, const u8* raw) {
     if (!g_game || !g_game->GetWorld()) {

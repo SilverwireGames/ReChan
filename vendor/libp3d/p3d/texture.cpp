@@ -11,8 +11,9 @@
 #include "p3d/fileio.h"
 #include "pddi/pddidev.h"
 #include "pddi/pdditex.h"
-#include "pc/log.h"
 #if defined(RC_PLATFORM_PSP)
+// Only the PSP paths log; the desktop libp3d build has no src/ include path.
+#include "pc/log.h"
 #include "pddi/psp/psprender.h"
 #endif
 
