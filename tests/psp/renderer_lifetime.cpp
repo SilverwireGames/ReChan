@@ -320,6 +320,11 @@ int main() {
     std::vector<u32> rgba(16 * 16, 0xffffffff);
     texture->SetData(16, 16, 32, 8, rgba.data());
     std::vector<pddiBatchVertex> overlay(9000);
+    // Glyph quads: distinct corner UVs keep them on the sprite path.
+    for (size_t quad = 0; quad + 6 <= overlay.size(); quad += 6) {
+        overlay[quad + 1].u = 1.0f;
+        overlay[quad + 1].v = 1.0f;
+    }
     ctx.BeginFrame();
     ctx.SetBlendMode(PDDI_BLEND_NONE);
     // Native background reuses PSX pages even with coloured index zero.
@@ -342,6 +347,25 @@ int main() {
     for (int i = 0; i < 80; ++i) ctx.DrawQuadBatch(texture.get(), PDDI_BLEND_ALPHA, overlay.data(), overlay.size());
     require(FakeGe::textureFunction == GU_TFX_MODULATE,
         "font atlas must respect glyph tint, black outlines and fade alpha");
+    {
+        // A colour fill batched with text samples one atlas texel: it stays
+        // a textured triangle pair with exact 8888 colours, after the glyph
+        // sprites and in the same texture state.
+        pddiBatchVertex mixed[12] = {};
+        mixed[1].u = 1.0f;
+        mixed[1].v = 1.0f;
+        for (int i = 6; i < 12; ++i) {
+            mixed[i] = { 2.5f + i, 4.0f, 0.5f, 0.5f, 132, 7, 201, 99 };
+        }
+        const int drawsBefore = FakeGe::draws;
+        ctx.DrawQuadBatch(texture.get(), PDDI_BLEND_ALPHA, mixed, 12);
+        require(FakeGe::draws - drawsBefore == 2, "mixed batch: one sprite run and one fill run");
+        require(FakeGe::lastDrawTextured && FakeGe::lastStride == sizeof(PspVertex),
+            "fill run must stay textured triangles");
+        const auto* fill = static_cast<const PspVertex*>(FakeGe::lastVertices);
+        require(fill[0].color == MakeColor(pddiColour(132, 7, 201, 99)) && fill[5].x == 2.5f + 11,
+            "fill run keeps 8888 colours and float positions");
+    }
     // A strip-ordered HUD rectangle must cover each interior sample once:
     // the old fan diagonal overlapped one half and left the other uncovered.
     ctx.DrawGouraudQuad(0, 0, 1, 1, 0, 1, 20, 0, 1, 1, 0, 1,

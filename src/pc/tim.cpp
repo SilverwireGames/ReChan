@@ -217,7 +217,9 @@ static constexpr f32 kTwoPi = 6.28318530718f;
 static s32 s_overlayBatchDepth = 0;
 static Mat4 s_overlayBatchPrevProj;
 #if defined(RC_PLATFORM_PSP)
-static constexpr size_t kPspOverlayVertexReserve = 8192;
+// A multiple of 3: every primitive queues whole triangles from a multiple-of-3
+// count, so the overflow flush below never splits one.
+static constexpr size_t kPspOverlayVertexReserve = 8190;
 static std::vector<pddiBatchVertex> s_pendingPrimitiveVerts = [] {
     std::vector<pddiBatchVertex> vertices;
     // Allocate the steady-state overlay arena before the first frame.  If a
@@ -231,6 +233,11 @@ static std::vector<pddiBatchVertex> s_pendingPrimitiveVerts;
 #endif
 static tTexture* s_pendingPrimitiveTex = nullptr;
 static bool s_pendingPrimitiveActive = false;
+#if defined(RC_PLATFORM_PSP)
+static tTexture* s_solidTexelTex = nullptr;
+static f32 s_solidTexelU = 0.0f;
+static f32 s_solidTexelV = 0.0f;
+#endif
 
 static void FlushPendingPrimitiveBatch();
 
@@ -744,8 +751,28 @@ void ScreenDraw::DrawFilledCircle(f32 centerX, f32 centerY,
                      r, g, b, a);
 }
 
+#if defined(RC_PLATFORM_PSP)
+void ScreenDraw::SetSolidTexel(tTexture* tex, f32 u, f32 v) {
+    if (s_pendingPrimitiveActive && s_pendingPrimitiveTex == s_solidTexelTex && s_solidTexelTex != tex) {
+        FlushPendingPrimitiveBatch();
+    }
+    s_solidTexelTex = tex;
+    s_solidTexelU = u;
+    s_solidTexelV = v;
+}
+#endif
+
 void ScreenDraw::DrawColoredRect(f32 x, f32 y, f32 w, f32 h,
                                  u8 r, u8 g, u8 b, u8 a) {
+#if defined(RC_PLATFORM_PSP)
+    if (s_overlayBatchDepth > 0 && s_solidTexelTex) {
+        EnsureShader();
+        QueueBatchedQuad(s_solidTexelTex, x, y, w, h,
+                         s_solidTexelU, s_solidTexelV, s_solidTexelU, s_solidTexelV,
+                         r, g, b, a);
+        return;
+    }
+#endif
     if (s_overlayBatchDepth > 0) {
         EnsureShader();
         QueueBatchedQuad(nullptr, x, y, w, h,
@@ -775,14 +802,17 @@ void ScreenDraw::DrawGouraudQuad(f32 x0, f32 y0, u8 r0, u8 g0, u8 b0, u8 a0,
         // the immediate path builds (0 1 2, 1 3 2) and the same colours (a
         // byte survives the /255 float round trip below), one draw instead of
         // one per quad.
+        // With a registered solid texel the fill joins the current text batch.
         EnsureShader();
-        EnsurePrimitiveBatchTexture(nullptr);
-        QueueBatchedVertex(x0, y0, 0.0f, 0.0f, r0, g0, b0, a0);
-        QueueBatchedVertex(x1, y1, 0.0f, 0.0f, r1, g1, b1, a1);
-        QueueBatchedVertex(x2, y2, 0.0f, 0.0f, r2, g2, b2, a2);
-        QueueBatchedVertex(x1, y1, 0.0f, 0.0f, r1, g1, b1, a1);
-        QueueBatchedVertex(x3, y3, 0.0f, 0.0f, r3, g3, b3, a3);
-        QueueBatchedVertex(x2, y2, 0.0f, 0.0f, r2, g2, b2, a2);
+        EnsurePrimitiveBatchTexture(s_solidTexelTex);
+        const f32 u = s_solidTexelU;
+        const f32 v = s_solidTexelV;
+        QueueBatchedVertex(x0, y0, u, v, r0, g0, b0, a0);
+        QueueBatchedVertex(x1, y1, u, v, r1, g1, b1, a1);
+        QueueBatchedVertex(x2, y2, u, v, r2, g2, b2, a2);
+        QueueBatchedVertex(x1, y1, u, v, r1, g1, b1, a1);
+        QueueBatchedVertex(x3, y3, u, v, r3, g3, b3, a3);
+        QueueBatchedVertex(x2, y2, u, v, r2, g2, b2, a2);
         return;
     }
 #endif

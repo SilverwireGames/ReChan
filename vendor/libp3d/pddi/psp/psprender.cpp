@@ -2768,45 +2768,75 @@ void pspContext::DrawQuadBatch(pddiTexture* tex, pddiBlendMode blend,
     // expanding every glyph into two triangles; keep the generic triangle
     // path for all other overlays and for circles.
     if (nativeTexture && nativeTexture->GetAlphaDepth() >= 8 && (vertCount % 6) == 0) {
-        const s32 spriteVertexCount = vertCount / 3;
-        PspSpriteVertex* sprites = static_cast<PspSpriteVertex*>(
-            AllocateListMemory(sizeof(PspSpriteVertex) * spriteVertexCount));
-        if (!sprites) return;
-        for (s32 i = 0, out = 0; i < vertCount; i += 6, out += 2) {
-            const PspVertex topLeft = convert(source[i + 5]);
-            const PspVertex bottomRight = convert(source[i + 1]);
-            sprites[out] = {
-                ToSpriteTexel(topLeft.u), ToSpriteTexel(topLeft.v),
-                MakeColor4444(topLeft.color),
-                ToSpriteCoord(topLeft.x), ToSpriteCoord(topLeft.y), 0
-            };
-            sprites[out + 1] = {
-                ToSpriteTexel(bottomRight.u), ToSpriteTexel(bottomRight.v),
-                MakeColor4444(bottomRight.color),
-                ToSpriteCoord(bottomRight.x), ToSpriteCoord(bottomRight.y), 0
-            };
-        }
-#if !defined(NDEBUG)
-        static unsigned int spriteBatchLogCount = 0;
-        if (spriteBatchLogCount < 4) {
-            ++spriteBatchLogCount;
-            LOG("[PSP GU] native sprite batch #%u sprites=%ld uv=%u,%u..%u,%u xy=%d,%d..%d,%d",
-                spriteBatchLogCount,
-                static_cast<long>(spriteVertexCount / 2),
-                static_cast<unsigned>(sprites[0].u), static_cast<unsigned>(sprites[0].v),
-                static_cast<unsigned>(sprites[1].u), static_cast<unsigned>(sprites[1].v),
-                static_cast<int>(sprites[0].x), static_cast<int>(sprites[0].y),
-                static_cast<int>(sprites[1].x), static_cast<int>(sprites[1].y));
-        }
-#endif
         ConfigureTexture(nativeTexture, false);
-        // Use the direct GU submission used by the PSPSDK 2D sprite sample.
-        // The GUM wrapper is for transformed geometry; this path already
-        // contains final screen-space coordinates.
-        GuDrawArray(GU_SPRITES,
-                       GU_TEXTURE_16BIT | GU_COLOR_4444 | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
-                       spriteVertexCount, nullptr, sprites);
-        PspPerf::RecordDrawSubmission(static_cast<u32>(spriteVertexCount));
+        // Colour fills batched with the text sample one texel of the atlas
+        // (ScreenDraw::SetSolidTexel). They keep the triangle path, with its
+        // 8888 colours, float positions and per-vertex (gouraud) colours, in
+        // the same texture state: only the glyph runs become sprites.
+        const auto isFill = [](const pddiBatchVertex* quad) {
+            return quad[1].u == quad[5].u && quad[1].v == quad[5].v;
+        };
+        for (s32 runStart = 0; runStart < vertCount; ) {
+            const bool fill = isFill(source + runStart);
+            s32 runEnd = runStart + 6;
+            while (runEnd < vertCount && isFill(source + runEnd) == fill) {
+                runEnd += 6;
+            }
+            const s32 runCount = runEnd - runStart;
+            if (fill) {
+                PspVertex* triangles = static_cast<PspVertex*>(
+                    AllocateListMemory(sizeof(PspVertex) * runCount));
+                if (!triangles) return;
+                for (s32 i = 0; i < runCount; ++i) {
+                    triangles[i] = convert(source[runStart + i]);
+                }
+                GuDrawArray(GU_TRIANGLES,
+                            GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                            runCount, nullptr, triangles);
+                PspPerf::RecordDrawSubmission(static_cast<u32>(runCount));
+            }
+            else {
+                const s32 spriteVertexCount = runCount / 3;
+                PspSpriteVertex* sprites = static_cast<PspSpriteVertex*>(
+                    AllocateListMemory(sizeof(PspSpriteVertex) * spriteVertexCount));
+                if (!sprites) return;
+                for (s32 i = runStart, out = 0; i < runEnd; i += 6, out += 2) {
+                    const PspVertex topLeft = convert(source[i + 5]);
+                    const PspVertex bottomRight = convert(source[i + 1]);
+                    sprites[out] = {
+                        ToSpriteTexel(topLeft.u), ToSpriteTexel(topLeft.v),
+                        MakeColor4444(topLeft.color),
+                        ToSpriteCoord(topLeft.x), ToSpriteCoord(topLeft.y), 0
+                    };
+                    sprites[out + 1] = {
+                        ToSpriteTexel(bottomRight.u), ToSpriteTexel(bottomRight.v),
+                        MakeColor4444(bottomRight.color),
+                        ToSpriteCoord(bottomRight.x), ToSpriteCoord(bottomRight.y), 0
+                    };
+                }
+#if !defined(NDEBUG)
+                static unsigned int spriteBatchLogCount = 0;
+                if (spriteBatchLogCount < 4) {
+                    ++spriteBatchLogCount;
+                    LOG("[PSP GU] native sprite batch #%u sprites=%ld uv=%u,%u..%u,%u xy=%d,%d..%d,%d",
+                        spriteBatchLogCount,
+                        static_cast<long>(spriteVertexCount / 2),
+                        static_cast<unsigned>(sprites[0].u), static_cast<unsigned>(sprites[0].v),
+                        static_cast<unsigned>(sprites[1].u), static_cast<unsigned>(sprites[1].v),
+                        static_cast<int>(sprites[0].x), static_cast<int>(sprites[0].y),
+                        static_cast<int>(sprites[1].x), static_cast<int>(sprites[1].y));
+                }
+#endif
+                // Use the direct GU submission used by the PSPSDK 2D sprite sample.
+                // The GUM wrapper is for transformed geometry; this path already
+                // contains final screen-space coordinates.
+                GuDrawArray(GU_SPRITES,
+                               GU_TEXTURE_16BIT | GU_COLOR_4444 | GU_VERTEX_16BIT | GU_TRANSFORM_2D,
+                               spriteVertexCount, nullptr, sprites);
+                PspPerf::RecordDrawSubmission(static_cast<u32>(spriteVertexCount));
+            }
+            runStart = runEnd;
+        }
         // The next submission may be 3D and can use a different texture
         // source.  Do not let the page-binding fast path inherit this 2D
         // state when the caller does not rebuild the full GU state first.

@@ -70,7 +70,13 @@ public:
     void Shutdown();
 
     TextFontHandle LoadFont(const TextFontDesc& desc);
+    // Resolves a font name, honouring aliases set with SetFontAlias.
     TextFontHandle FindFont(const char* name) const;
+    // Adds an exact-size rasterisation of a loaded font (see ITextBackend::AddStrike).
+    bool AddFontStrike(const char* name, s32 pixelHeight, bool bakedOutline);
+    // Makes `name` resolve to the loaded font `target`; a null or unloaded
+    // target removes the alias, so `name` resolves to its own font again.
+    void SetFontAlias(const char* name, const char* target);
 
     void ResetState();
     void PushState();
@@ -111,12 +117,19 @@ private:
         std::vector<u8> fileData = {};
     };
 
+    struct FontAlias {
+        std::string name = {};
+        TextFontHandle handle = 0;
+    };
+
     static bool ReadWholeFile(const char* path, std::vector<u8>& outData);
     const LoadedFont* FindLoadedFont(TextFontHandle handle) const;
+    TextFontHandle FindRegisteredFont(const char* name) const;
 
     TextRenderState m_state = {};
     std::vector<TextRenderState> m_stateStack = {};
     std::vector<LoadedFont> m_fonts = {};
+    std::vector<FontAlias> m_aliases = {};
     ITextBackend* m_backend = nullptr;
     TextFontHandle m_nextFontHandle = 1;
     bool m_warnedNoBackend = false;

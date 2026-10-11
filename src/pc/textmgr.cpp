@@ -18,6 +18,7 @@ void TextManager::Init() {
     ResetState();
     m_stateStack.clear();
     m_fonts.clear();
+    m_aliases.clear();
     m_nextFontHandle = 1;
     m_warnedNoBackend = false;
 
@@ -39,6 +40,7 @@ void TextManager::Shutdown() {
 
     m_stateStack.clear();
     m_fonts.clear();
+    m_aliases.clear();
     ResetState();
     m_warnedNoBackend = false;
 }
@@ -49,7 +51,7 @@ TextFontHandle TextManager::LoadFont(const TextFontDesc& desc) {
         return 0;
     }
 
-    if (TextFontHandle existing = FindFont(desc.name)) {
+    if (TextFontHandle existing = FindRegisteredFont(desc.name)) {
         return existing;
     }
 
@@ -82,7 +84,55 @@ TextFontHandle TextManager::LoadFont(const TextFontDesc& desc) {
     return font.handle;
 }
 
+bool TextManager::AddFontStrike(const char* name, s32 pixelHeight, bool bakedOutline) {
+    const TextFontHandle handle = FindRegisteredFont(name);
+    if (!handle || !m_backend) {
+        return false;
+    }
+    return m_backend->AddStrike(handle, pixelHeight, bakedOutline);
+}
+
+void TextManager::SetFontAlias(const char* name, const char* target) {
+    if (!name || !name[0]) {
+        return;
+    }
+
+    const TextFontHandle handle = FindRegisteredFont(target);
+    for (s32 i = 0; i < (s32)m_aliases.size(); i++) {
+        if (m_aliases[(size_t)i].name == name) {
+            if (handle) {
+                m_aliases[(size_t)i].handle = handle;
+            }
+            else {
+                m_aliases.erase(m_aliases.begin() + i);
+            }
+            return;
+        }
+    }
+
+    if (handle) {
+        FontAlias alias = {};
+        alias.name = name;
+        alias.handle = handle;
+        m_aliases.push_back(alias);
+    }
+}
+
 TextFontHandle TextManager::FindFont(const char* name) const {
+    if (!name || !name[0]) {
+        return 0;
+    }
+
+    for (s32 i = 0; i < (s32)m_aliases.size(); i++) {
+        if (m_aliases[(size_t)i].name == name) {
+            return m_aliases[(size_t)i].handle;
+        }
+    }
+
+    return FindRegisteredFont(name);
+}
+
+TextFontHandle TextManager::FindRegisteredFont(const char* name) const {
     if (!name || !name[0]) {
         return 0;
     }

@@ -35,6 +35,14 @@ namespace ScreenDraw {
     void BeginBatch(f32 canvasW = 0.0f, f32 canvasH = 0.0f);
     void EndBatch();
 
+#if defined(RC_PLATFORM_PSP)
+    // Registers an opaque white texel of `tex` at (u, v); null clears it.
+    // Batched colour fills are then drawn as `tex` sampled there, which is
+    // the same colour, so fills and the text drawn from `tex` share one
+    // batch instead of flushing at every switch between them.
+    void SetSolidTexel(tTexture* tex, f32 u, f32 v);
+#endif
+
     // RAII helper: opens a batch for the lifetime of the scope.
     // Safe for functions with multiple return paths.
     struct Batch {
