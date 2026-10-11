@@ -22,17 +22,25 @@ fi
 mkdir -p "$output_root/data"
 cp psp/EBOOT.PBP "$output_root/EBOOT.PBP"
 
-# The source tree may also contain the raw ISO, desktop launchers, profiling
-# reports and the original movie payloads.  None of those are part of the
-# native PSP runtime path.
+# The source tree may also contain the raw ISO, desktop launchers and
+# profiling reports.  None of those are part of the native PSP runtime path.
+# The .STR movies (~350 MB) stream from the Memory Stick; PSP_SKIP_MOVIES=1
+# leaves them out for a smaller card, and the game then skips each movie.
 # The repository keeps bin/pc as a compatibility symlink into res/pc.  Follow
 # it while staging so the standalone memstick does not contain a dangling
 # ../res link.
 # Keep empty runtime directories: the PSP asset gate checks fe/ and tim/
-# even when their desktop-only contents (such as movies) are excluded.
+# even when their contents are excluded.
+movie_filter=""
+if [ "${PSP_SKIP_MOVIES:-0}" = "1" ]; then
+    movie_filter="--exclude=/fe/movies/***"
+fi
+# Only the .STR files: the movie folder may also hold desktop-only formats.
 rsync -aL \
     --exclude='/discimage/***' \
-    --exclude='/fe/movies/***' \
+    ${movie_filter:+"$movie_filter"} \
+    --include='/fe/movies/*.str' --include='/fe/movies/*.STR' \
+    --exclude='/fe/movies/*' \
     --exclude='/PSP_LOG.TXT' \
     --exclude='/PSP_PERF.TXT' \
     --exclude='/PSP_TRACE.TXT' \

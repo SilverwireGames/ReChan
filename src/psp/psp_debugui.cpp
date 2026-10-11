@@ -169,6 +169,10 @@ static s32 Lerp(s32 from, s32 to, u32 numerator, u32 denominator) {
 } // namespace
 #endif
 
+#if defined(PSP_MOVIE_QA)
+#include "gen/game.h"
+#endif
+
 #if defined(PSP_MENU_QA)
 #if !defined(PSP_PERF_TELEMETRY)
 #error "PSP_MENU_QA writes its captures through the telemetry build (usb-debug)"
@@ -266,6 +270,27 @@ void UpdateMenuQa(Game* game) {
         s_menuQaNextFrame = s_menuQaFrame + (shot.holdFrames ? shot.holdFrames : kMenuQaHoldFrames);
     }
     ++s_menuQaStep;
+#else
+    (void)game;
+#endif
+}
+#endif
+
+#if defined(RC_PLATFORM_PSP)
+void UpdateMovieQa(Game* game) {
+#if defined(PSP_MOVIE_QA)
+    // Every movie the game plays, shortest first; missing files are skipped
+    // by PlayMovie. Not skippable, so the run is the same each time.
+    static const char* const kMovies[] = {
+        "Mdwy320m.str", "radi.str", "dolby.str", "demo.str", "factory.str",
+        "victory.str", "prolog.str", "credits.str", "making.str",
+    };
+    static u32 s_frame = 0;
+    static bool s_done = false;
+    if (s_done || !game || game->GetState() != GameState::TitleLoop) return;
+    if (++s_frame < 240) return;
+    s_done = true;
+    for (const char* movie : kMovies) game->PlayMovie(movie, 0, 0);
 #else
     (void)game;
 #endif

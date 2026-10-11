@@ -42,10 +42,12 @@ SOURCES += $(ROOT)/src/psp/psp_audio.cpp \
 	$(ROOT)/src/psp/psp_fileio.cpp \
 	$(ROOT)/src/psp/psp_funcprof.cpp \
 	$(ROOT)/src/psp/psp_log.cpp \
+	$(ROOT)/src/psp/psp_movieplayer.cpp \
 	$(ROOT)/src/psp/psp_perf.cpp \
 	$(ROOT)/src/psp/psp_psxdiscextractor.cpp \
 	$(ROOT)/src/psp/psp_qa.cpp \
 	$(ROOT)/src/psp/psp_settings.cpp \
+	$(ROOT)/src/psp/psp_strdecode.cpp \
 	$(ROOT)/vendor/libp3d/pddi/psp/psprender.cpp \
 	$(ROOT)/psp/psp_module.cpp
 
@@ -60,6 +62,7 @@ SOURCES := $(filter-out \
 	$(ROOT)/src/pc/log.cpp \
 	$(ROOT)/src/pc/miniaudio_impl.cpp \
 	$(ROOT)/src/pc/settings.cpp \
+	$(ROOT)/src/radmovie/movieplayer.cpp \
 	$(ROOT)/src/extra/assetexporter.cpp \
 	$(ROOT)/src/extra/assetexporter_ui.cpp \
 	$(ROOT)/src/extra/autoupdater.cpp \

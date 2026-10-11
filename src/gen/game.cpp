@@ -2689,6 +2689,36 @@ void Game::PlayMovie(const char* name, s32 skippable, s32 unloadLevel) {
 
     // PSX: Play(0x80014534) with skip callback (0x80039330) if skippable
     // PC: blocking frame loop
+#if defined(RC_PLATFORM_PSP)
+    // PSP: the player paces itself on its audio clock, so this loop runs
+    // once per display refresh (the swap waits for it) and never spins: the
+    // movie's reader thread needs the CPU in between. Start or Cross skips,
+    // but only once pressed again after the movie began, so the press that
+    // started it does not end it.
+    {
+        bool skipArmed = false;
+        while (!player->IsFinished()) {
+            if (skippable && p3d::input && g_actionInput && g_inputManager) {
+                p3d::input->ServiceInput();
+                g_actionInput->Update(p3d::input);
+                g_inputManager->ServiceHostPads(g_actionInput, true);
+                g_inputManager->Step();
+                const bool pressed = (g_inputManager->GetControlVal(0) & (PsxPad::Start | PsxPad::Cross)) != 0;
+                if (pressed && skipArmed) {
+                    LOG("[Game] PlayMovie: skipped");
+                    break;
+                }
+                if (!pressed) skipArmed = true;
+            }
+
+            player->AdvanceFrame();
+
+            g_display->BeginFrame();
+            player->Render();
+            g_display->EndFrame();
+        }
+    }
+#else
     {
         f64 prevFrame = Time::GetTimeInSeconds();
         f32 targetDt = 1.0f / player->GetFrameRate();
@@ -2727,6 +2757,7 @@ void Game::PlayMovie(const char* name, s32 skippable, s32 unloadLevel) {
             g_display->EndFrame();
         }
     }
+#endif
 
     // PSX: destructor 0x8001434C with param 3
     delete player;

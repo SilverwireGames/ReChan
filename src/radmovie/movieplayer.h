@@ -13,6 +13,36 @@ struct MovieSubtitleEntry {
     std::string text;
 };
 
+#if defined(RC_PLATFORM_PSP)
+// PSP MoviePlayer (src/psp/psp_movieplayer.cpp): streams the .STR file from
+// the Memory Stick instead of loading it, decodes audio as it plays on its
+// own hardware channel and paces video on that audio clock.
+class MoviePlayer {
+public:
+    MoviePlayer();
+    ~MoviePlayer();
+
+    bool Open(const char* path);
+    void Close();
+
+    // Feeds the audio, then decodes the frame that is due, skipping frames
+    // that are already late. Call once per display refresh. Returns false
+    // when the movie has ended or was never opened.
+    bool AdvanceFrame();
+
+    // Draws the current frame (4:3, pillarboxed) and its subtitle.
+    void Render();
+
+    bool IsFinished() const;
+    bool IsOpen() const;
+    f32 GetFrameRate() const;
+
+    struct Impl;
+
+private:
+    Impl* impl = nullptr;
+};
+#else
 // MoviePlayer - plays PSX .STR files with video and audio
 class MoviePlayer {
 public:
@@ -165,3 +195,4 @@ private:
 
     bool finished = false;
 };
+#endif

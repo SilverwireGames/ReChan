@@ -347,6 +347,11 @@ public:
 
     void SetData(int w, int h, int bppIn, int alphaDepthIn, const void* rgba) override;
     void SetNative4444Data(int w, int h, const u16* source);
+    // RGB565 pixels the caller writes in place (movie frames): waits for the
+    // GE to release the texture and returns its storage, GetStorageWidth()
+    // pixels per row, (re)allocated for w x h. The texture samples as 5650
+    // from then on.
+    u16* BeginNative5650Write(int w, int h);
     void SetFilterMode(pddiFilterMode mode) override { filterMode = mode; }
     void Bind(int unit) override;
 
@@ -367,6 +372,7 @@ private:
     u16* pixels = nullptr;
     std::size_t allocatedBytes = 0;
     bool dirty = true;
+    bool rgb565 = false;
 };
 
 class pspContext;

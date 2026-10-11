@@ -1474,6 +1474,7 @@ pspTexture::~pspTexture() {
 
 void pspTexture::SetData(int w, int h, int bppIn, int alphaDepthIn, const void* rgba) {
     if (pixels && g_activeContext) g_activeContext->FlushList();
+    rgb565 = false;
     width = std::max(w, 1);
     height = std::max(h, 1);
     bpp = bppIn;
@@ -1532,6 +1533,7 @@ void pspTexture::SetData(int w, int h, int bppIn, int alphaDepthIn, const void* 
 
 void pspTexture::SetNative4444Data(int w, int h, const u16* source) {
     if (pixels && g_activeContext) g_activeContext->FlushList();
+    rgb565 = false;
     width = std::max(w, 1);
     height = std::max(h, 1);
     bpp = 16;
@@ -1567,6 +1569,21 @@ void pspTexture::SetNative4444Data(int w, int h, const u16* source) {
     dirty = true;
 }
 
+u16* pspTexture::BeginNative5650Write(int w, int h) {
+    if (pixels && g_activeContext) g_activeContext->FlushList();
+    w = std::max(w, 1);
+    h = std::max(h, 1);
+    if (!pixels || w != width || h != height || !rgb565) {
+        SetNative4444Data(w, h, nullptr);
+        if (!pixels) return nullptr;
+        bpp = 16;
+        alphaDepth = 0;
+        rgb565 = true;
+    }
+    dirty = true;
+    return pixels;
+}
+
 void pspTexture::Bind(int) {
     if (!pixels) {
         GuDisable(GU_TEXTURE_2D);
@@ -1577,14 +1594,14 @@ void pspTexture::Bind(int) {
             static_cast<std::size_t>(storageWidth) * storageHeight * sizeof(u16));
         dirty = false;
     }
-    GuTexMode(GU_PSM_4444, 0, 0, 0);
+    GuTexMode(rgb565 ? GU_PSM_5650 : GU_PSM_4444, 0, 0, 0);
     sceGuTexImage(0, storageWidth, storageHeight, storageWidth, pixels);
     // The atlas RGB channels are white and its alpha channel is glyph
     // coverage.  Keep the texture's alpha authoritative; the vertex colour
     // still controls the final blend colour for the regular 2D path.
     // Font atlases are white with coverage in alpha. Multiply by the glyph
     // colour/alpha so outlines, tint and popup/legal fades remain effective.
-    GuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+    GuTexFunc(GU_TFX_MODULATE, rgb565 ? GU_TCC_RGB : GU_TCC_RGBA);
     sceGuTexEnvColor(0x00000000);
     GuTexOffset(0.0f, 0.0f);
     GuAmbientColor(0xffffffff);
