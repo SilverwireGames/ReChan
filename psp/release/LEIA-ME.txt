@@ -1,0 +1,58 @@
+ReChan PSP Edition {{VERSION}}
+==============================
+
+Port não oficial e gratuito de Jackie Chan Stuntmaster (PlayStation) para o
+PSP, baseado no ReChan. Este pacote NÃO contém nenhum arquivo do jogo: o PSP
+extrai o que precisa da imagem do seu próprio disco.
+
+REQUISITOS
+- PSP-2000, PSP-3000 ou PSP Go com custom firmware ou HEN que rode homebrew.
+  Testado no PSP-3000. O PSP-1000 não tem memória suficiente.
+- Imagem do disco americano (NTSC-U, SLUS-00684), de preferência .bin.
+  Do par .bin/.cue copie só o .bin. Uma .iso com 2048 bytes por setor não
+  guarda os vídeos; a versão PAL e o EBOOT.PBP de PS1 não servem.
+- Cerca de 1,3 GB livres no Memory Stick durante a instalação e 600 MB depois.
+
+INSTALAÇÃO
+1. No PSP, abra Ajustes > Conexão USB e ligue o cabo no computador.
+2. Copie a pasta RECHAN deste pacote para PSP/GAME/ no Memory Stick.
+3. Copie a imagem do disco para PSP/GAME/RECHAN/discimage/.
+4. Saia do modo USB e abra Jogo > Memory Stick > Re:Chain PSP Edition.
+5. Na tela "Arquivos do Jogo", escolha Extrair Arquivos. Leva alguns
+   minutos: deixe o PSP na tomada e não feche o jogo. Se a extração for
+   interrompida, ela recomeça na próxima vez que o jogo abrir.
+6. Escolha o idioma e o estilo do HUD (Moderno ou Clássico).
+
+Depois da extração, apague a imagem em discimage/ para liberar espaço.
+A pasta pode ter outro nome (por exemplo PSP/GAME/RECHANBETA).
+
+ATUALIZAR
+Copie a pasta RECHAN da versão nova por cima da antiga. Os arquivos
+extraídos, os saves e as configurações continuam lá.
+
+PROBLEMAS CONHECIDOS
+- Em cenas cheias pode haver quedas pontuais abaixo de 60 FPS.
+- No estilo Clássico os menus usam a fonte do ReChan: a fonte original não
+  é distribuída.
+- As legendas em inglês, espanhol, francês, alemão e italiano foram
+  traduzidas das legendas em português e podem não acompanhar o áudio
+  palavra por palavra.
+- PSP Go ainda não testado.
+
+Problemas e sugestões: https://github.com/luckvice/ReChanMetal/issues
+
+CRÉDITOS
+_AG (@gennariarmando) - criador do ReChan: engenharia reversa,
+                        reimplementação do jogo e versão para PC.
+GNK (@GABRIELNNK)     - tradução para português, legendas dos vídeos,
+                        carregar e salvar pelos menus e correções na
+                        colisão das portas.
+Lucas Soares (@luckvice) - versão Metal para macOS e o port PSP Edition.
+
+AVISO LEGAL
+O ReChan é um projeto não oficial, gratuito e sem fins comerciais. Não tem
+relação com os desenvolvedores, a distribuidora ou os detentores dos
+direitos de Jackie Chan Stuntmaster. Nenhum arquivo do jogo original
+(imagens de disco, executáveis, vídeos, músicas, vozes, texturas, modelos ou
+fases) é incluído. Jackie Chan Stuntmaster e as marcas relacionadas
+pertencem aos seus respectivos donos.

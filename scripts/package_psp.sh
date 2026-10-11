@@ -106,11 +106,14 @@ for name in background jackie jcslogo loading_bar game_over; do
         "$psp_frontend/${name}.ptex" 480 272
 done
 
-# "PSP EDITION 1.0.0" badge: authored at 408x52, packed at 102x13 (bottom-left of
-# the title screen). Keeping the 4x source only in the PC tree avoids runtime scaling.
-generate_ptex \
-    "$output_root/data/pc/textures/frontend/psp_edition.png" \
-    "$psp_frontend/psp_edition.ptex" 102 13
+# "PSP EDITION ..." badge (scripts/make_psp_edition_badge.py): authored at 4x,
+# packed at a quarter of its size (bottom-left of the title screen). Keeping
+# the 4x source only in the PC tree avoids runtime scaling.
+edition_png="$output_root/data/pc/textures/frontend/psp_edition.png"
+edition_size=$(ffprobe -v error -select_streams v:0 \
+    -show_entries stream=width,height -of csv=p=0 "$edition_png")
+generate_ptex "$edition_png" "$psp_frontend/psp_edition.ptex" \
+    $(( ${edition_size%,*} / 4 )) $(( ${edition_size#*,} / 4 ))
 
 # Every image used by the custom frontend/HUD is also prepared beside its
 # original PC path.  LoadFromImagePath() transparently replaces .png with

@@ -4594,10 +4594,11 @@ bool feCustomMenuMgr::DrawTitleScreen() {
     }
 
 #if defined(RC_PLATFORM_PSP)
-    // "PSP EDITION 1.0.0" badge: small, bottom-left, inside the 8px safe area of the 480x272 screen.
+    // "PSP EDITION ..." badge: small, bottom-left, inside the 8px safe area of the 480x272 screen.
+    // The package stores it at its on-screen size.
     if (m_titleScreenEditionTexture) {
-        const f32 editionW = 102.0f;
-        const f32 editionH = 13.0f;
+        const f32 editionW = (f32)m_titleScreenEditionTexture->GetWidth();
+        const f32 editionH = (f32)m_titleScreenEditionTexture->GetHeight();
         ScreenDraw::DrawQuad(m_titleScreenEditionTexture, 8.0f,
                              SCREEN_HEIGHT - editionH - 8.0f, editionW, editionH,
                              0.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, titleFadeAlpha);

@@ -1,7 +1,10 @@
 TARGET = rechan
 BUILD_MODE ?= release
 
-PSP_EBOOT_TITLE = Re:Chain
+# Release name shown in the XMB; the title-screen badge is drawn by
+# scripts/make_psp_edition_badge.py.
+RECHAN_PSP_VERSION ?= Beta 1
+PSP_EBOOT_TITLE = Re:Chain PSP Edition $(RECHAN_PSP_VERSION)
 EXTRA_TARGETS = EBOOT.PBP
 # MEMSIZE=1 in PARAM.SFO: PSP-2000/3000/Go (and PPSSPP) give the game the
 # extended user partition (~52 MB instead of ~24 MB); PSP-1000 keeps the small
