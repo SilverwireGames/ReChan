@@ -33,10 +33,6 @@ private:
     tTexture* m_redDragonTex = nullptr;
     tTexture* m_goldDragonTex = nullptr;
     tTexture* m_greyDragonTex = nullptr;
-    tTexture* m_bowlTex = nullptr;
-    tTexture* m_milkTex = nullptr;
-    tTexture* m_noodleTex = nullptr;
-    tTexture* m_ornamentTex = nullptr;
     tTexture* m_clockTex = nullptr;
 
     bool m_assetsLoadTried = false;

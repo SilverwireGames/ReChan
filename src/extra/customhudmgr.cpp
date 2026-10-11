@@ -39,10 +39,6 @@ static const char* kTakeTexturePath = "pc/textures/collectibles/take.png";
 static const char* kRedDragonTexturePath = "pc/textures/collectibles/red_dragon.png";
 static const char* kGoldDragonTexturePath = "pc/textures/collectibles/gold_dragon.png";
 static const char* kGreyDragonTexturePath = "pc/textures/collectibles/grey_dragon.png";
-static const char* kBowlTexturePath = "pc/textures/collectibles/bowl.png";
-static const char* kMilkTexturePath = "pc/textures/collectibles/milk.png";
-static const char* kNoodleTexturePath = "pc/textures/collectibles/noodlebox.png";
-static const char* kOrnamentTexturePath = "pc/textures/frontend/menu_ornament.png";
 static const char* kClockTexturePath = "pc/textures/frontend/clock.png";
 
 #if defined(RC_PLATFORM_PSP)
@@ -1430,10 +1426,6 @@ void CustomHudMgr::EnsureAssetsLoaded() {
     m_redDragonTex = tTexture::LoadFromImagePath(kRedDragonTexturePath);
     m_goldDragonTex = tTexture::LoadFromImagePath(kGoldDragonTexturePath);
     m_greyDragonTex = tTexture::LoadFromImagePath(kGreyDragonTexturePath);
-    m_bowlTex = tTexture::LoadFromImagePath(kBowlTexturePath);
-    m_milkTex = tTexture::LoadFromImagePath(kMilkTexturePath);
-    m_noodleTex = tTexture::LoadFromImagePath(kNoodleTexturePath);
-    m_ornamentTex = tTexture::LoadFromImagePath(kOrnamentTexturePath);
     m_clockTex = tTexture::LoadFromImagePath(kClockTexturePath);
 
     if (m_takeTex && m_takeTex->GetTexture()) {
@@ -1447,18 +1439,6 @@ void CustomHudMgr::EnsureAssetsLoaded() {
     }
     if (m_greyDragonTex && m_greyDragonTex->GetTexture()) {
         m_greyDragonTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-    }
-    if (m_bowlTex && m_bowlTex->GetTexture()) {
-        m_bowlTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-    }
-    if (m_milkTex && m_milkTex->GetTexture()) {
-        m_milkTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-    }
-    if (m_noodleTex && m_noodleTex->GetTexture()) {
-        m_noodleTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
-    }
-    if (m_ornamentTex && m_ornamentTex->GetTexture()) {
-        m_ornamentTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
     }
     if (m_clockTex && m_clockTex->GetTexture()) {
         m_clockTex->GetTexture()->SetFilterMode(PDDI_FILTER_BILINEAR);
@@ -1512,22 +1492,6 @@ void CustomHudMgr::Shutdown() {
     if (m_greyDragonTex) {
         m_greyDragonTex->Release();
         m_greyDragonTex = nullptr;
-    }
-    if (m_bowlTex) {
-        m_bowlTex->Release();
-        m_bowlTex = nullptr;
-    }
-    if (m_milkTex) {
-        m_milkTex->Release();
-        m_milkTex = nullptr;
-    }
-    if (m_noodleTex) {
-        m_noodleTex->Release();
-        m_noodleTex = nullptr;
-    }
-    if (m_ornamentTex) {
-        m_ornamentTex->Release();
-        m_ornamentTex = nullptr;
     }
     if (m_clockTex) {
         m_clockTex->Release();
