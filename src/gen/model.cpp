@@ -1502,6 +1502,7 @@ static bool PatchLitGeoColours(OriginalGeo* geo, std::vector<u32>& litColours) {
         return true;
     }
     geo->pspLightKeyValid = false;
+    PspPerf::ScopeTimer lightTimer(PspPerf::RendererCounter::GeoLightUs);
     if (!BuildLitGeoColours(geo, litColours)
         || !PatchPspPrimBufferColours(geo->meshBuffer, litColours.data(), geo->dynamicVertCount)) {
         return false;
@@ -2639,6 +2640,9 @@ void Model::Show(u32 /*flags*/) {
 
 // PSX: DrawShadow__5ModelUl (MODEL.CPP:1898, 0x80072400)
 void Model::DrawShadow(u32 /*flags*/) {
+#if defined(RC_PLATFORM_PSP)
+    PspPerf::ScopeTimer shadowTimer(PspPerf::RendererCounter::ModelShadowUs);
+#endif
     MARKFUNCTION(0x80072400);
 
     Shadow* shadow = GetModelShadow(this);

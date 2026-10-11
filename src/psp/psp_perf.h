@@ -56,6 +56,9 @@ enum class RendererCounter : u32 {
     VertexUploadSkips,
     // Page binds whose texture the GE samples from RAM (no eDRAM slot).
     RamPageBinds,
+    // Prop lighting builds (BuildLitGeoColours + colour patch) and the model
+    // shadow placement/queueing (Model::DrawShadow), inside EntMoveUs etc.
+    GeoLightUs, ModelShadowUs,
     Count
 };
 
