@@ -81,11 +81,16 @@ int main() {
     pspDisplay display;
     require(display.InitDisplay(pddiDisplayInit{}), "display init");
     require(g_staticVram.initialized && !g_staticVram.frameBuffer, "offset zero is valid");
+    // Page slots: T4 32 KiB, T8 64 KiB, RGBA16 128 KiB each.
+    constexpr u32 kSlotBytes = PSP_VRAM_T4_SLOTS * 32768u + PSP_VRAM_T8_SLOTS * 65536u
+        + PSP_VRAM_RGBA16_SLOTS * 131072u;
 #if defined(PSP_TRIPLE_BUFFER)
-    // Three RGB565 colour buffers free one 32-bit buffer's worth of eDRAM.
-    require(g_staticVram.allocatedBytes == 2048000 - 512 * 272 * 2, "bounded eDRAM layout");
+    // Three RGB565 colour buffers, depth and the page slots: 1.5 MiB by default.
+    require(g_staticVram.allocatedBytes == 3u * 512u * 272u * 2u + 512u * 272u * 2u + kSlotBytes
+            && g_staticVram.allocatedBytes <= 1572864u, "bounded eDRAM layout");
 #else
-    require(g_staticVram.allocatedBytes == 2048000, "bounded eDRAM layout");
+    require(g_staticVram.allocatedBytes == 2u * 512u * 272u * 4u + 512u * 272u * 2u + kSlotBytes,
+        "bounded eDRAM layout");
 #endif
     auto context = std::make_unique<pspContext>(&display);
     auto& ctx = *context;

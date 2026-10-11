@@ -311,11 +311,14 @@ struct StaticPageSlot {
 #if !defined(PSP_VRAM_T4_SLOTS)
 #define PSP_VRAM_T4_SLOTS 4
 #endif
+// 3 T8 and 1 RGBA16 slot keep the eDRAM at 1.5 MiB (with the three 5650
+// buffers and depth): on the benchmark the second RGBA16 slot was never used
+// and the fourth T8 one saved half a RAM-sampled bind per frame in one scene.
 #if !defined(PSP_VRAM_T8_SLOTS)
-#define PSP_VRAM_T8_SLOTS 4
+#define PSP_VRAM_T8_SLOTS 3
 #endif
 #if !defined(PSP_VRAM_RGBA16_SLOTS)
-#define PSP_VRAM_RGBA16_SLOTS 2
+#define PSP_VRAM_RGBA16_SLOTS 1
 #endif
 
 struct StaticPspVram {
