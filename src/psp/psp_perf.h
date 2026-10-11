@@ -59,6 +59,8 @@ enum class RendererCounter : u32 {
     // Prop lighting builds (BuildLitGeoColours + colour patch) and the model
     // shadow placement/queueing (Model::DrawShadow), inside EntMoveUs etc.
     GeoLightUs, ModelShadowUs,
+    // SetVertexData calls that only changed the colour lanes (colour pass).
+    VertexColourUploads,
     Count
 };
 

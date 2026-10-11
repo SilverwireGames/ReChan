@@ -75,6 +75,9 @@ public:
     void SetVertexData(const void* data, u32 count) override;
     // Floats per vertex of the SetVertexData layout for this buffer's format.
     std::size_t VertexInputStride() const;
+    // SetVertexData of an input that differs from the kept one only in its
+    // colour lanes: writes just the colours (false: take the full upload).
+    bool UploadColoursOnly(const float* source, u32 count);
     void SetIndices(const u16* indices, u32 count) override;
     u32 GetIndexCount() const override { return static_cast<u32>(indices.size()); }
     u32 GetVertexCount() const override { return static_cast<u32>(vertices.size()); }

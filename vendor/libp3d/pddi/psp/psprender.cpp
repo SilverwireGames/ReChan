@@ -918,6 +918,50 @@ void pspPrimBuffer::EndPackedUpload(const float* tpage, u32 tpageStride,
     }
 }
 
+bool pspPrimBuffer::UploadColoursOnly(const float* source, u32 count) {
+    // While the kept input is valid the buffer holds exactly what
+    // SetVertexData(lastVertexInput) left (every other writer invalidates
+    // it). An input equal to it, bit for bit, outside the colour lanes would
+    // make the full upload rewrite only the colours: do just that.
+    if ((vertexFormat & PDDI_V_COLOUR) == 0) return false;
+    const std::size_t stride = VertexInputStride();
+    const std::size_t colourLane = (vertexFormat & PDDI_V_POSITION) ? 3u : 0u;
+    const std::size_t tail = stride - colourLane - 3u;
+    const float* last = lastVertexInput.data();
+    for (u32 i = 0; i < count; ++i) {
+        const float* a = source + static_cast<std::size_t>(i) * stride;
+        const float* b = last + static_cast<std::size_t>(i) * stride;
+        if ((colourLane != 0u && std::memcmp(a, b, colourLane * sizeof(float)) != 0)
+            || (tail != 0u && std::memcmp(a + colourLane + 3u, b + colourLane + 3u,
+                                          tail * sizeof(float)) != 0)) {
+            return false;
+        }
+    }
+    if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {
+        stagedIndexedVertices = true;
+        stagedIndexedSerial = g_submissionSerial;
+        preferStagedIndexedVertices = true;
+    }
+    PrepareForMutation();
+    // As the full upload leaves them (the float stream was current: nothing
+    // since the kept upload made it stale).
+    baseColoursValid = false;
+    colourPatchActive = false;
+    for (u32 i = 0; i < count; ++i) {
+        const float* input = source + static_cast<std::size_t>(i) * stride + colourLane;
+        const u32 color = MakeGeometryColor(input[0], input[1], input[2]);
+        vertices[i].color = color;
+        if (packedVerticesValid) packedVertices[i].color = color;
+    }
+    WritebackDcacheRange(vertices.data(), sizeof(PspVertex) * vertices.size());
+    if (packedVerticesValid) {
+        WritebackDcacheRange(packedVertices.data(), packedVertices.size() * sizeof(PspPackedVertex));
+    }
+    std::memcpy(lastVertexInput.data(), source, lastVertexInput.size() * sizeof(float));
+    PspPerf::CountRenderer(PspPerf::RendererCounter::VertexColourUploads);
+    return true;
+}
+
 std::size_t pspPrimBuffer::VertexInputStride() const {
     return ((vertexFormat & PDDI_V_POSITION) ? 3u : 0u)
         + ((vertexFormat & PDDI_V_COLOUR) ? 3u : 0u)
@@ -935,6 +979,10 @@ void pspPrimBuffer::SetVertexData(const void* data, u32 count) {
         // re-send unchanged frames): nothing would change, and its recorded
         // draw stays valid.
         PspPerf::CountRenderer(PspPerf::RendererCounter::VertexUploadSkips);
+        return;
+    }
+    if (lastVertexInputValid && lastVertexInput.size() == inputFloats
+        && count == vertices.size() && UploadColoursOnly(static_cast<const float*>(data), count)) {
         return;
     }
     if (directSubmissionSerial != 0 && directSubmissionSerial == g_submissionSerial) {

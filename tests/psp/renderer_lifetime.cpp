@@ -651,6 +651,37 @@ int main() {
         data[3u * 10u + 3u] = 1.5f;  // one colour changes
         buffer.SetVertexData(data.data(), kCount);
         require(buffer.GetVertices()[3].color != expected.color, "changed upload was skipped");
+        // Colour-only uploads (the kept input differs only in colour lanes)
+        // must leave exactly what a full upload of the same input leaves.
+        std::mt19937 rng(1357u);
+        for (int round = 0; round < 50; ++round) {
+            for (u32 v = 0; v < kCount; ++v) {
+                for (int c = 3; c < 6; ++c) {
+                    if (rng() % 2u) data[v * 10u + c] = static_cast<float>(rng() % 300u) / 128.0f;
+                }
+            }
+            const bool otherLane = rng() % 5u == 0u;
+            if (otherLane) data[(rng() % kCount) * 10u + (rng() % 3u)] += 1.0f;  // a position moves
+            const u32 before = buffer.GetContentSerial();
+            buffer.SetVertexData(data.data(), kCount);
+            pspPrimBuffer fresh({PDDI_PRIM_TRIANGLES, kFormat, kCount, 6});
+            fresh.SetVertexData(data.data(), kCount);
+            require(std::memcmp(buffer.vertices.data(), fresh.vertices.data(), sizeof(PspVertex) * kCount) == 0
+                    && buffer.packedVerticesValid == fresh.packedVerticesValid
+                    && (!fresh.packedVerticesValid
+                        || std::memcmp(buffer.packedVertices.data(), fresh.packedVertices.data(),
+                               sizeof(PspPackedVertex) * kCount) == 0)
+                    && buffer.materialKeys == fresh.materialKeys
+                    && buffer.materialValid == fresh.materialValid
+                    && buffer.floatStale == fresh.floatStale
+                    && buffer.baseColoursValid == fresh.baseColoursValid
+                    && buffer.colourPatchActive == fresh.colourPatchActive
+                    && buffer.GetContentSerial() != before,
+                "colour-only upload differs from a full upload");
+            if (round % 7 == 3) {
+                require(buffer.PatchColours(lit.data(), kCount), "colour patch refused");
+            }
+        }
     }
 
     {
