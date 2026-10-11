@@ -1067,6 +1067,11 @@ bool Game::gsIntroState(Game* game) {
                     if (g_sound) {
                         g_sound->SetupSound();
                     }
+                    // AI::InternalOpen() parsed scr/behave.txt at the same point and found
+                    // nothing, which leaves every enemy without attacks until a restart.
+                    if (g_ai && g_ai->behaviourList.IsEmpty()) {
+                        g_ai->ParseBehaviourAttribScript();
+                    }
                 }
             }
             return true;
