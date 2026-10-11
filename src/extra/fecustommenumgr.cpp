@@ -1,5 +1,6 @@
 #include "gen/common.h"
 #include "fecustommenumgr.h"
+#include "extra/customhudmgr.h"
 #include <cstdlib>
 #include <chrono>
 #include <thread>
@@ -149,13 +150,32 @@ static constexpr u32 HASH_LEVEL_EXECUTE = 0x893DA6B2;
 static constexpr u32 HASH_LOCATION_OVERLAY = 42519405;
 static constexpr u32 HASH_TEXT_LEVELNAME = 0x39AA5899;
 
+#if defined(RC_PLATFORM_PSP)
+// Text sizes in screen pixels on the 272-line screen: the font strikes
+// registered for the PSP (18/14px menu face, 12/14px Roboto) draw 1:1.
+#define MENU_TEXT_PX(px) ((f32)(px) * DEFAULT_SCREEN_HEIGHT / (32.0f * 272.0f))
+static constexpr f32 DEF_MENU_TITLE_SCALE = MENU_TEXT_PX(18);
+static constexpr f32 DEF_MENU_TEXT_SCALE = MENU_TEXT_PX(18);
+static constexpr f32 DEF_MENU_WINDOW_TITLE_SCALE = MENU_TEXT_PX(18);
+static constexpr f32 DEF_MENU_PROMPT_SCALE = MENU_TEXT_PX(14);
+// The diagram's labels sit ~8px apart at its buttons.
+static constexpr f32 DEF_CONTROLLER_ACTION_SCALE = MENU_TEXT_PX(10);
+// Window titles are outlined so they draw from the baked-outline strike;
+// the ring is invisible on the black title inset.
+static constexpr bool DEF_WINDOW_TITLE_OUTLINE = true;
+// Dialog popups grow with the 18px text.
+static constexpr f32 DEF_POPUP_WIDTH_SCALE = 1.2f;
+#else
 static constexpr f32 DEF_MENU_TITLE_SCALE = 0.34f;
 static constexpr f32 DEF_MENU_TEXT_SCALE = 0.4f;
 static constexpr f32 DEF_MENU_WINDOW_TITLE_SCALE = 0.4f;
-static constexpr f32 DEF_REDEFINE_KEY_TEXT_SCALE = 0.3f;
 static constexpr f32 DEF_MENU_PROMPT_SCALE = 0.3f;
-static constexpr f32 DEF_MENU_DRAGON_COUNT_SCALE = 0.5f;
 static constexpr f32 DEF_CONTROLLER_ACTION_SCALE = 0.2f;
+static constexpr bool DEF_WINDOW_TITLE_OUTLINE = false;
+static constexpr f32 DEF_POPUP_WIDTH_SCALE = 1.0f;
+#endif
+static constexpr f32 DEF_REDEFINE_KEY_TEXT_SCALE = 0.3f;
+static constexpr f32 DEF_MENU_DRAGON_COUNT_SCALE = 0.5f;
 
 static f32 GetSaveDisplayRowOffset(s32 displayIndex) {
     return (f32)(displayIndex * DEF_SAVE_ROW_H
@@ -749,6 +769,9 @@ void feCustomMenuMgr::BuildPages() {
         List("FE_DSH", EntryBinding_DisplayShadowQuality, 1, 0, 4),
 #endif
         List("FE_LNG", EntryBinding_Language, 1, 0, (s32)NumLanguages - 1),
+#if defined(RC_PLATFORM_PSP)
+        List("FE_HUDS", EntryBinding_HudStyle, 1, 0, (s32)HudStyle_Count - 1),
+#endif
         Button("FE_BCK", EntryEvent_Back),
                });
 
@@ -3030,6 +3053,12 @@ void feCustomMenuMgr::Adjust(s32 dir) {
             return;
         }
 
+        if (e->binding == EntryBinding_HudStyle) {
+            const s32 v = WrapStepValue(GetBoundValue(*e), e->step, e->lo, e->hi, dir);
+            ApplyValue(*e, v);
+            return;
+        }
+
         if (e->binding == EntryBinding_ControllerPromptStyle) {
             const s32 current = GetBoundValue(*e);
             const s32 v = WrapStepValue(current, e->step, e->lo, e->hi, dir);
@@ -3092,6 +3121,7 @@ s32 feCustomMenuMgr::GetBoundValue(const Entry& e) const {
         case EntryBinding_PlayerConfig: return g_inputManager ? (s32)g_inputManager->GetPlayerConfig() : 0;
         case EntryBinding_ControllerPromptStyle: return ControllerPromptManager::GetStyle();
         case EntryBinding_Language: return (s32)g_customText.GetLanguage();
+        case EntryBinding_HudStyle: return (s32)GetHudStyle();
         case EntryBinding_DisplayResolution: return g_display ? g_display->GetResolutionIndex() : 0;
         case EntryBinding_DisplayScreenMode: return g_display ? g_display->GetScreenMode() : Display::GetDefaultScreenMode();
         case EntryBinding_DisplayVsync: return g_display ? g_display->GetVsync() : Display::GetDefaultVsync();
@@ -3186,6 +3216,9 @@ void feCustomMenuMgr::ApplyValue(const Entry& e, s32 v) {
             v = (s32)LangEnglish;
         }
         g_customText.SetLanguage((GameLanguage)v);
+    }
+    else if (e.binding == EntryBinding_HudStyle) {
+        SetHudStyle(v);
     }
     else if (e.binding == EntryBinding_ControllerPromptStyle) {
         if (ControllerPromptManager::SetStyle(v)) {
@@ -3584,7 +3617,7 @@ PageDef& feCustomMenuMgr::AddPopup(PopupKind id, const char* title, const char* 
     def.parentEntry = 0;
     def.isPause = false;
     def.autoFrameH = (frameH == -1);
-    def.frameW = (frameW == -1) ? DEF_WINDOW_W : frameW;
+    def.frameW = (frameW == -1) ? DEF_WINDOW_W : (s32)((f32)frameW * DEF_POPUP_WIDTH_SCALE);
     def.frameH = def.autoFrameH ? DEF_WINDOW_H : frameH;
     def.entriesOffsetX = 0;
     def.entriesOffsetY = 0;
@@ -4821,8 +4854,13 @@ void feCustomMenuMgr::DrawMenuWindow(s32 x, s32 y, s32 w, s32 h, const char* tit
         g_textManager->SetLineSpacing(0);
         g_textManager->SetPromptsEnabled(true);
         g_textManager->SetShadow(false);
-        g_textManager->SetOutline(false);
+        g_textManager->SetOutline(DEF_WINDOW_TITLE_OUTLINE);
+#if defined(RC_PLATFORM_PSP)
+        // Centre the line box in the inset (the PC offset assumed 12px text).
+        const s32 titleTextY = y + titleInsetY + (titleInsetH - (s32)(32.0f * DEF_MENU_WINDOW_TITLE_SCALE)) / 2;
+#else
         const s32 titleTextY = y + titleInsetH / 2;
+#endif
         const f32 titleX = SCALE_AND_CENTER_X((f32)DEF_WINDOW_CENTER_X);
         const f32 titleY = SCREEN_SCALE_Y((f32)titleTextY);
         g_textManager->SetColor(DEF_TITLE_TEXT_R, DEF_TITLE_TEXT_G, DEF_TITLE_TEXT_B, ScaleAlphaU8(255, alpha01));
@@ -4881,8 +4919,13 @@ void feCustomMenuMgr::DrawPopupWindow(s32 x, s32 y, s32 w, s32 h, const char* ti
         g_textManager->SetLineSpacing(0);
         g_textManager->SetPromptsEnabled(true);
         g_textManager->SetShadow(false);
-        g_textManager->SetOutline(false);
+        g_textManager->SetOutline(DEF_WINDOW_TITLE_OUTLINE);
+#if defined(RC_PLATFORM_PSP)
+        // Centre the line box in the inset (the PC offset assumed 12px text).
+        const s32 titleTextY = y + titleInsetY + (titleInsetH - (s32)(32.0f * DEF_MENU_WINDOW_TITLE_SCALE)) / 2;
+#else
         const s32 titleTextY = y + titleInsetH / 2;
+#endif
         const f32 titleX = SCALE_AND_CENTER_X((f32)DEF_WINDOW_CENTER_X);
         const f32 titleY = SCREEN_SCALE_Y((f32)titleTextY);
         g_textManager->SetColor(DEF_TITLE_TEXT_R, DEF_TITLE_TEXT_G, DEF_TITLE_TEXT_B, ScaleAlphaU8(255, alpha01));
@@ -5034,14 +5077,63 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
     const f32 tableRight = (f32)(panelX + panelW - 20);
     const f32 tableW = tableRight - tableLeft;
     const f32 badgeX = tableLeft + 4.0f;
+#if defined(RC_PLATFORM_PSP)
+    // Fits "AUTO" at 14px.
+    const f32 badgeW = 50.0f;
+#else
     const f32 badgeW = 38.0f;
+#endif
     const f32 contentX = badgeX + badgeW + 8.0f;
-    const s32 manualTop = panelY + 48;
+#if defined(RC_PLATFORM_PSP)
+    // 12-14px Roboto strikes in 40-unit rows: zone line on top, stat cards
+    // and date below it, so nothing overlaps at the larger sizes.
+    constexpr f32 kHeaderScale = MENU_TEXT_PX(12);
+    constexpr f32 kBadgeScale = MENU_TEXT_PX(14);
+    constexpr f32 kZoneLabelScale = MENU_TEXT_PX(12);
+    constexpr f32 kZoneNameScale = MENU_TEXT_PX(14);
+    constexpr f32 kStatScale = MENU_TEXT_PX(12);
+    constexpr f32 kRangeScale = MENU_TEXT_PX(12);
+    constexpr f32 kBadgeH = 32.0f;
+    constexpr f32 kBadgeTextY = 13.0f;
+    constexpr f32 kZoneLabelY = 3.0f;
+    constexpr f32 kZoneNameY = 2.0f;
+    constexpr f32 kStatCardY = 19.0f;
+    constexpr f32 kStatCardW = 56.0f;
+    constexpr f32 kStatCardH = 18.0f;
+    constexpr f32 kStatStep = 64.0f;
+    constexpr f32 kStatIconY = 21.0f;
+    constexpr f32 kStatIconSize = 14.0f;
+    constexpr f32 kStatTextX = 20.0f;
+    constexpr f32 kStatTextY = 22.0f;
+    constexpr f32 kDateY = 22.0f;
+    const s32 backTop = panelY + 184;
+#else
+    constexpr f32 kHeaderScale = 0.25f;
+    constexpr f32 kBadgeScale = 0.24f;
+    constexpr f32 kZoneLabelScale = 0.18f;
+    constexpr f32 kZoneNameScale = 0.23f;
+    constexpr f32 kStatScale = 0.21f;
+    constexpr f32 kRangeScale = 0.22f;
+    constexpr f32 kBadgeH = 22.0f;
+    constexpr f32 kBadgeTextY = 10.0f;
+    constexpr f32 kZoneLabelY = 3.0f;
+    constexpr f32 kZoneNameY = 2.0f;
+    constexpr f32 kStatCardY = 10.0f;
+    constexpr f32 kStatCardW = 48.0f;
+    constexpr f32 kStatCardH = 16.0f;
+    constexpr f32 kStatStep = 58.0f;
+    constexpr f32 kStatIconY = 12.0f;
+    constexpr f32 kStatIconSize = 12.0f;
+    constexpr f32 kStatTextX = 18.0f;
+    constexpr f32 kStatTextY = 15.0f;
+    constexpr f32 kDateY = 20.0f;
     const s32 backTop = panelY + 188;
+#endif
+    const s32 manualTop = panelY + 48;
     const s32 backIndex = SAVEGAME_VISIBLE_SLOT_COUNT;
     const bool autosaveDisabled = m_currPage == MenuPage_SaveSlots;
 
-    g_textManager->SetScale(SCREEN_SCALE_Y(0.25f), SCREEN_SCALE_Y(0.25f));
+    g_textManager->SetScale(SCREEN_SCALE_Y(kHeaderScale), SCREEN_SCALE_Y(kHeaderScale));
     g_textManager->SetWrapWidth(0.0f);
     g_textManager->SetLineSpacing(0);
     g_textManager->SetPromptsEnabled(true);
@@ -5061,7 +5153,7 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
     auto drawSlotRow = [&](s32 slotIndex, f32 rowTop, bool alternate, bool disabled) {
         const SaveGameSlotInfo& info = m_saveSlots[slotIndex];
         const bool selected = m_cursor == slotIndex && !disabled;
-        g_textManager->SetScale(SCREEN_SCALE_Y(0.24f), SCREEN_SCALE_Y(0.24f));
+        g_textManager->SetScale(SCREEN_SCALE_Y(kBadgeScale), SCREEN_SCALE_Y(kBadgeScale));
         if (alternate) {
             DrawRect(tableLeft, rowTop, tableW, (f32)DEF_SAVE_ROW_H - 2.0f, 78, 39, 8, 155);
         }
@@ -5089,23 +5181,23 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
         const u8 primaryR = disabled ? muted : (selected ? selectedColor.GetRed8() : 255);
         const u8 primaryG = disabled ? muted : (selected ? selectedColor.GetGreen8() : 188);
         const u8 primaryB = disabled ? muted : (selected ? selectedColor.GetBlue8() : 64);
-        DrawRect(badgeX, rowTop + 4.0f, badgeW, 22.0f,
+        DrawRect(badgeX, rowTop + 4.0f, badgeW, kBadgeH,
                  disabled ? 28 : (selected ? selectedColor.GetRed8() : 92),
                  disabled ? 28 : (selected ? selectedColor.GetGreen8() : 28),
                  disabled ? 30 : (selected ? selectedColor.GetBlue8() : 5), 230);
-        DrawUniformBorderRectPSX(badgeX, rowTop + 4.0f, badgeW, 22.0f, GetMenuBorderPx(),
+        DrawUniformBorderRectPSX(badgeX, rowTop + 4.0f, badgeW, kBadgeH, GetMenuBorderPx(),
                                  disabled ? 65 : 160, disabled ? 65 : 63, disabled ? 65 : 8, 235);
 
         g_textManager->SetAlignment(TextAlign_Center);
         g_textManager->SetColor(primaryR, primaryG, primaryB);
         g_textManager->PrintString(slotText, SCALE_AND_CENTER_X(badgeX + badgeW * 0.5f),
-                                   SCREEN_SCALE_Y(rowTop + 10.0f));
+                                   SCREEN_SCALE_Y(rowTop + kBadgeTextY));
 
         if (!info.occupied) {
             g_textManager->SetAlignment(TextAlign_Left);
             g_textManager->SetColor(muted, muted, muted);
             g_textManager->PrintString(Localize("FE_SVEMPTY"), SCALE_AND_CENTER_X(contentX),
-                                       SCREEN_SCALE_Y(rowTop + 10.0f));
+                                       SCREEN_SCALE_Y(rowTop + kBadgeTextY));
             return;
         }
 
@@ -5136,17 +5228,17 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
         auto drawStatIcon = [&](tTexture* texture, f32 iconX) {
             if (!texture) return;
             ScreenDraw::DrawQuad(texture,
-                                 SCALE_AND_CENTER_X(iconX), SCREEN_SCALE_Y(rowTop + 12.0f),
-                                 SCREEN_SCALE_Y(12.0f), SCREEN_SCALE_Y(12.0f),
+                                 SCALE_AND_CENTER_X(iconX), SCREEN_SCALE_Y(rowTop + kStatIconY),
+                                 SCREEN_SCALE_Y(kStatIconSize), SCREEN_SCALE_Y(kStatIconSize),
                                  0.0f, 0.0f, 1.0f, 1.0f,
                                  iconTint, iconTint, iconTint, disabled ? 150 : 255);
         };
         const f32 livesIconX = contentX;
-        const f32 redIconX = contentX + 58.0f;
-        const f32 goldIconX = contentX + 116.0f;
-        const f32 statCardY = rowTop + 10.0f;
-        const f32 statCardW = 48.0f;
-        const f32 statCardH = 16.0f;
+        const f32 redIconX = contentX + kStatStep;
+        const f32 goldIconX = contentX + kStatStep * 2.0f;
+        const f32 statCardY = rowTop + kStatCardY;
+        const f32 statCardW = kStatCardW;
+        const f32 statCardH = kStatCardH;
         auto drawStatCard = [&](f32 iconX) {
             const f32 cardX = iconX - 4.0f;
             DrawRect(cardX, statCardY, statCardW, statCardH, 0, 0, 0, disabled ? 70 : 130);
@@ -5164,33 +5256,33 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
         const u8 body = disabled ? muted : 218;
         char destinationLabel[48] = {};
         snprintf(destinationLabel, sizeof(destinationLabel), "%s:", Localize("FE_SVC_ZONE"));
-        g_textManager->SetScale(SCREEN_SCALE_Y(0.18f), SCREEN_SCALE_Y(0.18f));
+        g_textManager->SetScale(SCREEN_SCALE_Y(kZoneLabelScale), SCREEN_SCALE_Y(kZoneLabelScale));
         g_textManager->SetAlignment(TextAlign_Left);
         g_textManager->SetColor(disabled ? muted : 174, disabled ? muted : 124, disabled ? muted : 58);
-        g_textManager->PrintString(destinationLabel, SCALE_AND_CENTER_X(contentX - 4.0f), SCREEN_SCALE_Y(rowTop + 3.0f));
+        g_textManager->PrintString(destinationLabel, SCALE_AND_CENTER_X(contentX - 4.0f), SCREEN_SCALE_Y(rowTop + kZoneLabelY));
         const f32 labelScaleX = SCREEN_SCALE_X(1.0f);
         const f32 labelWidth = labelScaleX > 0.0f
             ? g_textManager->MeasureString(destinationLabel).width / labelScaleX
             : 0.0f;
-        g_textManager->SetScale(SCREEN_SCALE_Y(0.23f), SCREEN_SCALE_Y(0.23f));
+        g_textManager->SetScale(SCREEN_SCALE_Y(kZoneNameScale), SCREEN_SCALE_Y(kZoneNameScale));
         g_textManager->SetColor(disabled ? muted : 255, disabled ? muted : 190, disabled ? muted : 72);
-        g_textManager->PrintString(zoneName, SCALE_AND_CENTER_X(contentX + labelWidth + 2.0f), SCREEN_SCALE_Y(rowTop + 2.0f));
+        g_textManager->PrintString(zoneName, SCALE_AND_CENTER_X(contentX + labelWidth + 2.0f), SCREEN_SCALE_Y(rowTop + kZoneNameY));
 
-        g_textManager->SetScale(SCREEN_SCALE_Y(0.21f), SCREEN_SCALE_Y(0.21f));
+        g_textManager->SetScale(SCREEN_SCALE_Y(kStatScale), SCREEN_SCALE_Y(kStatScale));
         g_textManager->SetAlignment(TextAlign_Left);
         g_textManager->SetColor(disabled ? muted : 236, disabled ? muted : 236, disabled ? muted : 210);
-        g_textManager->PrintString(livesText, SCALE_AND_CENTER_X(livesIconX + 18.0f), SCREEN_SCALE_Y(rowTop + 15.0f));
+        g_textManager->PrintString(livesText, SCALE_AND_CENTER_X(livesIconX + kStatTextX), SCREEN_SCALE_Y(rowTop + kStatTextY));
         g_textManager->SetColor(disabled ? muted : 242, disabled ? muted : 88, disabled ? muted : 62);
-        g_textManager->PrintString(redText, SCALE_AND_CENTER_X(redIconX + 18.0f), SCREEN_SCALE_Y(rowTop + 15.0f));
+        g_textManager->PrintString(redText, SCALE_AND_CENTER_X(redIconX + kStatTextX), SCREEN_SCALE_Y(rowTop + kStatTextY));
         g_textManager->SetColor(disabled ? muted : 255, disabled ? muted : 201, disabled ? muted : 40);
-        g_textManager->PrintString(goldText, SCALE_AND_CENTER_X(goldIconX + 18.0f), SCREEN_SCALE_Y(rowTop + 15.0f));
+        g_textManager->PrintString(goldText, SCALE_AND_CENTER_X(goldIconX + kStatTextX), SCREEN_SCALE_Y(rowTop + kStatTextY));
         g_textManager->SetAlignment(TextAlign_Right);
         g_textManager->SetColor(body, body, body);
         g_textManager->PrintString(info.dateText[0] ? info.dateText : "--", SCALE_AND_CENTER_X(tableRight - 8.0f),
-                                   SCREEN_SCALE_Y(rowTop + 20.0f));
+                                   SCREEN_SCALE_Y(rowTop + kDateY));
     };
 
-    g_textManager->SetScale(SCREEN_SCALE_Y(0.24f), SCREEN_SCALE_Y(0.24f));
+    g_textManager->SetScale(SCREEN_SCALE_Y(kBadgeScale), SCREEN_SCALE_Y(kBadgeScale));
     g_textManager->SetShadow(true, 1.0f, 1.0f, 0, 0, 0, 210);
     const f32 viewportH = (f32)(DEF_SAVE_VISIBLE_ROWS * DEF_SAVE_ROW_H + DEF_SAVE_AUTOSAVE_GAP);
     SetVerticalScissorPSX((f32)manualTop, viewportH);
@@ -5216,7 +5308,7 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
     char rangeText[24] = {};
     snprintf(rangeText, sizeof(rangeText), "%d-%d / %d", m_saveSlotScrollTop + 1,
              m_saveSlotScrollTop + DEF_SAVE_VISIBLE_ROWS, SAVEGAME_VISIBLE_SLOT_COUNT);
-    g_textManager->SetScale(SCREEN_SCALE_Y(0.22f), SCREEN_SCALE_Y(0.22f));
+    g_textManager->SetScale(SCREEN_SCALE_Y(kRangeScale), SCREEN_SCALE_Y(kRangeScale));
     g_textManager->SetShadow(false);
     g_textManager->SetAlignment(TextAlign_Right);
     g_textManager->SetColor(185, 124, 50);
@@ -5227,7 +5319,11 @@ void feCustomMenuMgr::RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s3
                   SAVEGAME_VISIBLE_SLOT_COUNT, DEF_SAVE_VISIBLE_ROWS, m_saveSlotScrollVisual);
 
     if (g_textManager->SetFontByName(DEF_MENU_FONT_NAME)) {
+#if defined(RC_PLATFORM_PSP)
+        g_textManager->SetScale(SCREEN_SCALE_Y(DEF_MENU_TEXT_SCALE), SCREEN_SCALE_Y(DEF_MENU_TEXT_SCALE));
+#else
         g_textManager->SetScale(SCREEN_SCALE_Y(0.36f), SCREEN_SCALE_Y(0.36f));
+#endif
         g_textManager->SetShadow(false);
         g_textManager->SetOutline(true);
         g_textManager->SetAlignment(TextAlign_Center);
@@ -5700,6 +5796,20 @@ void feCustomMenuMgr::RenderCurrentPage() {
                                             selected ? selectedColor.GetGreen8() : normalColor.GetGreen8(),
                                             selected ? selectedColor.GetBlue8() : normalColor.GetBlue8());
                     g_textManager->PrintString(cfgText, valueScreenX, rowScreenY);
+                }
+                else if (item.binding == EntryBinding_HudStyle) {
+                    const char* styleText = Localize(
+                        (GetBoundValue(item) == HudStyle_Classic) ? "FE_HUDC" : "FE_HUDM");
+
+                    if (!styleText) {
+                        continue;
+                    }
+
+                    g_textManager->SetAlignment(TextAlign_Right);
+                    g_textManager->SetColor(selected ? selectedColor.GetRed8() : normalColor.GetRed8(),
+                                            selected ? selectedColor.GetGreen8() : normalColor.GetGreen8(),
+                                            selected ? selectedColor.GetBlue8() : normalColor.GetBlue8());
+                    g_textManager->PrintString(styleText, valueScreenX, rowScreenY);
                 }
                 else if (item.binding == EntryBinding_Language) {
                     const char* langToken = GetLanguageDisplayToken(GetBoundValue(item));

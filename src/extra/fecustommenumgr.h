@@ -91,6 +91,7 @@ enum EntryBinding : u8 {
     EntryBinding_PlayerConfig,
     EntryBinding_ControllerPromptStyle,
     EntryBinding_Language,
+    EntryBinding_HudStyle,
     EntryBinding_DisplayResolution,
     EntryBinding_DisplayScreenMode,
     EntryBinding_DisplayVsync,
@@ -142,7 +143,14 @@ enum EntryEvent : u8 {
 #define MAX_ENTRIES_PER_MENU (12)
 #define MAX_CUSTOM_MENU_TOKEN (16)
 
+#if defined(RC_PLATFORM_PSP)
+// PSP menu profile: the 4:3 layout spans ~362 of the 480 pixels at 1.13x its
+// height, so windows are wider and rows/bars taller to carry 18px entries
+// and titles and 14px hints (exact font strikes; see ApplyHudStyleFonts).
+#define DEF_WINDOW_W 420
+#else
 #define DEF_WINDOW_W 340
+#endif
 #define DEF_WINDOW_H 108
 
 #define DEF_MENU_FONT_NAME ("Menu")
@@ -150,14 +158,24 @@ enum EntryEvent : u8 {
 // Layout tuning for auto-sized custom FE windows.
 #define DEF_WINDOW_CENTER_X 256
 #define DEF_WINDOW_CENTER_Y 114
+#if defined(RC_PLATFORM_PSP)
+#define DEF_ROW_STEP 19
+#define DEF_TITLE_BAR_H 32
+#define DEF_BOTTOM_BAR_H 19
+#else
 #define DEF_ROW_STEP 16
 #define DEF_TITLE_BAR_H 30
 #define DEF_BOTTOM_BAR_H 16
+#endif
 #define DEF_BORDER_W 1
 #define DEF_CONTENT_PAD 4
 #define DEF_CONTENT_TOP_PAD 4
 #define DEF_CONTENT_BOTTOM_PAD 4
+#if defined(RC_PLATFORM_PSP)
+#define DEF_ROW_TEXT_H 16
+#else
 #define DEF_ROW_TEXT_H 12
+#endif
 #define DEF_INFO_ROW_EXTRA (0)
 
 #define DEF_LABEL_X_PAD 18
@@ -167,7 +185,11 @@ enum EntryEvent : u8 {
 
 #define DEF_TITLE_INSET_X 48
 #define DEF_TITLE_INSET_Y 6
+#if defined(RC_PLATFORM_PSP)
+#define DEF_TITLE_INSET_H 22
+#else
 #define DEF_TITLE_INSET_H 20
+#endif
 
 #define DEF_HELP_Y_PAD 3
 #define DEF_HELP_LEFT_X_OFF (-28)
@@ -203,8 +225,14 @@ enum EntryEvent : u8 {
 #define DEF_KEYBIND_X_PAD 18
 
 // Save/load/delete table tuning.
+#if defined(RC_PLATFORM_PSP)
+// Taller rows for 12-14px slot text; three slots visible at a time.
+#define DEF_SAVE_VISIBLE_ROWS 3
+#define DEF_SAVE_ROW_H 40
+#else
 #define DEF_SAVE_VISIBLE_ROWS 4
 #define DEF_SAVE_ROW_H 32
+#endif
 #define DEF_SAVE_AUTOSAVE_GAP 12
 #define DEF_SAVE_TABLE_SIDE_PAD 12
 

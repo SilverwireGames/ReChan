@@ -133,6 +133,15 @@ Opzioni
 [FE_LNG]
 Lingua:
 
+[FE_HUDS]
+HUD:
+
+[FE_HUDM]
+Moderno
+
+[FE_HUDC]
+Classico
+
 [FE_LGEN]
 Inglese
 

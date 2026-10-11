@@ -12,6 +12,8 @@ public:
     ~CustomHudMgr();
 
     void Render(const HUD& hud);
+    // Port-only overlays (autosave) drawn over the classic section HUD.
+    void RenderClassicOverlays();
     void Shutdown();
     void OnLevelLoad();
     void OnLevelUnload();
@@ -72,6 +74,10 @@ private:
 
     s32 m_prevHitCount = 0;
     f32 m_hitTextShakeTimer = 0.0f;
+    // Last screen position of the hit counter over the enemy being hit.
+    f32 m_hitsAnchorX = 0.0f;
+    f32 m_hitsAnchorY = 0.0f;
+    bool m_hitsAnchorValid = false;
 
     f32 m_levelZoneToastTimer = -1.0f;
     f32 m_levelZoneReleaseTimer = -1.0f;
@@ -118,9 +124,25 @@ private:
     void DrawInventoryCard(const HUD& hud);
     void DrawHitsCard(const HUD& hud);
     void DrawDestinationBanner(const HUD& hud) const;
+    void DrawHubPromptBar() const;
     void DrawTallyOverlay(const HUD& hud);
     void DrawAutosaveOverlay() const;
     void DrawLevelZoneOverlay(const HUD& hud);
 };
 
 extern CustomHudMgr g_customHudMgr;
+
+// Gameplay HUD presentation. The PSP lets the player choose; desktop always
+// draws the PC HUD.
+enum HudStyle : s32 {
+    HudStyle_Modern = 0,
+    HudStyle_Classic,
+    HudStyle_Count,
+};
+
+HudStyle GetHudStyle();
+// Classic also sets the menu typeface to the original-looking AdLib when
+// that font is present in the local data tree (it is never distributed).
+void SetHudStyle(s32 style);
+// True when the PC HUD, not the original section HUD, is on screen.
+bool IsCustomHudActive();

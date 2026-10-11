@@ -28,6 +28,12 @@
 static const char* kHudBodyFontName = "Menu";
 static const char* kHudTitleFontName = "HUDTitle";
 static const char* kHudTitleFontPath = "pc/fonts/Europa Grotesk SH DemBol.ttf";
+#if defined(RC_PLATFORM_PSP)
+// The original game's typeface. It is commercial, so it is only read from
+// the user's local data tree and never packaged with the port.
+static const char* kClassicFontName = "Classic";
+static const char* kClassicFontPath = "fonts/AdLib.ttf";
+#endif
 
 static const char* kTakeTexturePath = "pc/textures/collectibles/take.png";
 static const char* kRedDragonTexturePath = "pc/textures/collectibles/red_dragon.png";
@@ -38,6 +44,22 @@ static const char* kMilkTexturePath = "pc/textures/collectibles/milk.png";
 static const char* kNoodleTexturePath = "pc/textures/collectibles/noodlebox.png";
 static const char* kOrnamentTexturePath = "pc/textures/frontend/menu_ornament.png";
 static const char* kClockTexturePath = "pc/textures/frontend/clock.png";
+
+#if defined(RC_PLATFORM_PSP)
+// PSP layout profile. The HUD is authored in a 512x240 design space; on the
+// 480x272 screen the PC sizes shrink text to 7-11 pixels, so the PSP lays
+// the HUD out in screen pixels. Text sizes name the font strikes registered
+// in EnsureFontsLoaded and ApplyHudStyleFonts, which then draw exactly 1:1
+// with a baked outline.
+#define HUD_PX_X(px) ((f32)(px) * DEFAULT_SCREEN_WIDTH / 480.0f)
+#define HUD_PX_Y(px) ((f32)(px) * DEFAULT_SCREEN_HEIGHT / 272.0f)
+#define HUD_TEXT_PX(px) ((f32)(px) * DEFAULT_SCREEN_HEIGHT / (32.0f * 272.0f))
+static const s32 kHudBodyStrikePx[] = { 14, 18 };
+static const s32 kHudTitleStrikePx[] = { 16 };
+static const s32 kMenuHintStrikePx = 14;
+static const s32 kLegalStrikePx[] = { 12, 14 };
+static const char* kLegalFontName = "Legal";
+#endif
 
 // Menu-matched palette for destination banner styling.
 static const u8 kMenuFrameR = 130;
@@ -52,6 +74,51 @@ static const u8 kMenuTextNormG = 222;
 static const u8 kMenuTextNormB = 222;
 static const u8 kDestBannerFillA = 160;
 
+// Destination banner (hub), autosave and level/zone text.
+#if defined(RC_PLATFORM_PSP)
+static const f32 kDestBannerW = HUD_PX_X(236);
+static const f32 kDestBannerH = HUD_PX_Y(50);
+static const f32 kDestBannerY = HUD_PX_Y(6);
+static const f32 kDestTitleScale = HUD_TEXT_PX(16);
+static const f32 kDestTitleY = HUD_PX_Y(5);
+static const f32 kDestSubtitleY = HUD_PX_Y(28);
+static const f32 kDestSmallScale = HUD_TEXT_PX(14);
+static const bool kDestSmallOutline = true;
+static const f32 kDestTravelY = HUD_PX_Y(2);
+static const f32 kDestLevelNameScale = HUD_TEXT_PX(16);
+static const f32 kDestLevelNameY = HUD_PX_Y(16);
+static const f32 kDestStatusY = HUD_PX_Y(33);
+static const f32 kAutosaveTextScale = HUD_TEXT_PX(14);
+// The original HUD shows "Press START to open the main menu" in the hub,
+// in the destination-select title overlay; the PC HUD replaces that overlay.
+static const bool kShowHubPrompt = true;
+static const u32 kHubPromptTextHash = 0xC131692Du;
+static const f32 kHubPromptScale = HUD_TEXT_PX(14);
+static const f32 kHubPromptBarH = HUD_PX_Y(22);
+static const f32 kHubPromptBottomMargin = HUD_PX_Y(10);
+static const f32 kHubPromptPadX = HUD_PX_X(14);
+#else
+static const f32 kDestBannerW = 214.0f;
+static const f32 kDestBannerH = 32.0f;
+static const f32 kDestBannerY = 8.0f;
+static const f32 kDestTitleScale = 0.35f;
+static const f32 kDestTitleY = 5.0f;
+static const f32 kDestSubtitleY = 20.0f;
+static const f32 kDestSmallScale = 0.20f;
+static const bool kDestSmallOutline = false;
+static const f32 kDestTravelY = 4.0f;
+static const f32 kDestLevelNameScale = 0.37f;
+static const f32 kDestLevelNameY = 12.0f;
+static const f32 kDestStatusY = 24.0f;
+static const f32 kAutosaveTextScale = 0.30f;
+static const bool kShowHubPrompt = false;
+static const u32 kHubPromptTextHash = 0xC131692Du;
+static const f32 kHubPromptScale = 0.30f;
+static const f32 kHubPromptBarH = 18.0f;
+static const f32 kHubPromptBottomMargin = 10.0f;
+static const f32 kHubPromptPadX = 14.0f;
+#endif
+
 // Health timing tuning.
 static const f32 kHealthDamageHoldSeconds = 0.55f;
 static const f32 kHealthDamageCatchupRate = 0.75f;
@@ -59,6 +126,11 @@ static const f32 kHealthHealLerpRate = 2.8f;
 static const f32 kHealthDamageLerpRate = 6.5f;
 static const f32 kHealthDamageTriggerEpsilon = 0.001f;
 static const f32 kHealthDeltaSeamOverlapPx = 0.65f;
+#if defined(RC_PLATFORM_PSP)
+// Below this the PSP bar turns red and pulses.
+static const f32 kHealthLowRatio = 0.30f;
+static const f32 kHealthLowPulseRate = 9.0f;
+#endif
 
 // Health shake tuning (screen-space pixels).
 static const f32 kHealthShakeDurationSeconds = 0.22f;
@@ -71,6 +143,15 @@ static const f32 kPlayerHealthShakePhaseY = 1.5707963f;
 static const f32 kEnemyHealthShakePhaseY = 1.0471976f;
 
 // Player health card layout.
+#if defined(RC_PLATFORM_PSP)
+static const f32 kPlayerHealthNameX = HUD_PX_X(12);
+static const f32 kPlayerHealthNameY = HUD_PX_Y(5);
+static const f32 kPlayerHealthBarX = HUD_PX_X(12);
+static const f32 kPlayerHealthBarY = HUD_PX_Y(21);
+static const f32 kPlayerHealthBarW = HUD_PX_X(132);
+static const f32 kPlayerHealthBarH = HUD_PX_Y(10);
+static const f32 kPlayerHealthNameScale = HUD_TEXT_PX(14);
+#else
 static const f32 kPlayerHealthNameX = 14.0f;
 static const f32 kPlayerHealthNameY = 8.0f;
 static const f32 kPlayerHealthBarX = 14.0f;
@@ -78,13 +159,59 @@ static const f32 kPlayerHealthBarY = 16.0f;
 static const f32 kPlayerHealthBarW = 80.0f;
 static const f32 kPlayerHealthBarH = 8.0f;
 static const f32 kPlayerHealthNameScale = 0.24f;
+#endif
 
 // Enemy/boss health card layout.
+#if defined(RC_PLATFORM_PSP)
+// World height of the bar anchor: just above an enemy's head (about 565
+// units tall), so the bar stays with its owner under the PSP's high camera.
+static const s32 kEnemyHealthAnchorHeight = 640;
+static const f32 kEnemyHealthBarWFromScreenH = 56.0f / 272.0f;
+static const f32 kEnemyHealthBarHFromScreenH = 6.0f / 272.0f;
+static const f32 kEnemyHealthBarYOffsetFromScreenH = 8.0f / 272.0f;
+static const f32 kEnemyHealthLabelYOffsetFromScreenH = 16.0f / 272.0f;
+static const f32 kEnemyHealthLabelScale = HUD_TEXT_PX(14);
+#else
+static const s32 kEnemyHealthAnchorHeight = 1100;
 static const f32 kEnemyHealthBarWFromScreenH = 0.076f;
 static const f32 kEnemyHealthBarHFromScreenH = 0.016f;
 static const f32 kEnemyHealthBarYOffsetFromScreenH = 0.072f;
 static const f32 kEnemyHealthLabelYOffsetFromScreenH = 0.024f;
 static const f32 kEnemyHealthLabelScale = 0.20f;
+#endif
+
+// Inventory strip (dragons, takes, timer) along the top-right edge.
+#if defined(RC_PLATFORM_PSP)
+static const f32 kInventoryIconSize = HUD_PX_Y(20);
+static const f32 kInventoryTopY = HUD_PX_Y(5);
+static const f32 kInventorySlotW = HUD_PX_Y(46);
+static const f32 kInventoryTimerW = HUD_PX_Y(46);
+static const f32 kInventoryRightEdge = DEFAULT_SCREEN_WIDTH - HUD_PX_X(8);
+static const f32 kInventoryTextScale = HUD_TEXT_PX(16);
+#else
+static const f32 kInventoryIconSize = 16.0f;
+static const f32 kInventoryTopY = 7.0f;
+static const f32 kInventorySlotW = 31.0f;
+static const f32 kInventoryTimerW = 28.0f;
+static const f32 kInventoryRightEdge = DEFAULT_SCREEN_WIDTH - 6.0f;
+static const f32 kInventoryTextScale = 0.30f;
+#endif
+
+// Hit counter.
+#if defined(RC_PLATFORM_PSP)
+// Shown above the enemy being hit, over its health bar.
+static const bool kHitsAnchorOnFoe = true;
+static const f32 kHitsTextScale = HUD_TEXT_PX(16);
+static const f32 kHitsMinTopY = HUD_PX_Y(40);
+static const f32 kHitsEdgeMarginX = HUD_PX_X(44);
+static const f32 kHitsBarGapFromScreenH = 2.0f / 272.0f;
+#else
+static const bool kHitsAnchorOnFoe = false;
+static const f32 kHitsTextScale = 0.28f;
+static const f32 kHitsMinTopY = 0.0f;
+static const f32 kHitsEdgeMarginX = 0.0f;
+static const f32 kHitsBarGapFromScreenH = 0.0f;
+#endif
 
 // Shared health bar colors.
 static const u8 kHealthBarBgR = 58;
@@ -145,8 +272,14 @@ static const f32 kInventoryGoldShakePhaseY = 2.3561945f;
 static const f32 kInventoryLivesShakePhaseX = 3.1415926f;
 static const f32 kInventoryLivesShakePhaseY = 0.7853982f;
 static const f32 kInventoryTextShakePhaseOffsetX = 0.35f;
+#if defined(RC_PLATFORM_PSP)
+static const f32 kInventoryTextGapFromIcon = HUD_PX_Y(3);
+// Europa 16px: digit centre sits 6.9px below the top of the line box.
+static const f32 kInventoryTextCenterToPrintYOffset = HUD_PX_Y(6.9f);
+#else
 static const f32 kInventoryTextGapFromIcon = 1.0f;
 static const f32 kInventoryTextCenterToPrintYOffset = 5.0f;
+#endif
 static const f32 kHudGlobalFadeSpeed = 6.0f;
 
 // Hit combo text shake on increase.
@@ -164,6 +297,26 @@ static const char* kLevelZoneLevelFallbackToken = "FE_LVL";
 static const char* kLevelZoneZoneFallbackToken = "FE_ZONE";
 
 // Tally layout and style tuning.
+#if defined(RC_PLATFORM_PSP)
+static const f32 kTallyPanelX = 16.0f;
+static const f32 kTallyPanelY = 12.0f;
+static const f32 kTallyPanelW = 256.0f;
+static const f32 kTallyPanelH = 158.0f;
+static const f32 kTallyRowH = 17.0f;
+static const f32 kTallyRowSpacing = 19.0f;
+static const f32 kTallyHeaderTextScale = HUD_TEXT_PX(18);
+static const f32 kTallyLabelScale = HUD_TEXT_PX(14);
+static const f32 kTallyValueScale = HUD_TEXT_PX(16);
+static const f32 kTallyValueBoxW = 80.0f;
+static const f32 kTallyDragonRowsYOffset = 8.0f;
+static const f32 kTallyHeaderBoxH = 21.0f;
+static const f32 kTallyHeaderTextY = 8.0f;
+static const f32 kTallyRowsStartY = 34.0f;
+static const f32 kTallyIconSize = 15.0f;
+// Outlined labels draw from the baked-outline strikes and read better.
+static const bool kTallyLabelOutline = true;
+static const f32 kTallyMovieBonusTextScale = HUD_TEXT_PX(18);
+#else
 static const f32 kTallyPanelX = 20.0f;
 static const f32 kTallyPanelY = 20.0f;
 static const f32 kTallyPanelW = 198.0f;
@@ -175,6 +328,13 @@ static const f32 kTallyLabelScale = 0.34f;
 static const f32 kTallyValueScale = 0.34f;
 static const f32 kTallyValueBoxW = 60.0f;
 static const f32 kTallyDragonRowsYOffset = 8.0f;
+static const f32 kTallyHeaderBoxH = 18.0f;
+static const f32 kTallyHeaderTextY = 9.0f;
+static const f32 kTallyRowsStartY = 32.0f;
+static const f32 kTallyIconSize = 14.0f;
+static const bool kTallyLabelOutline = false;
+static const f32 kTallyMovieBonusTextScale = 0.30f;
+#endif
 static const f32 kTallyGoldBonusTextScale = 0.30f;
 static const f32 kTallyGoldBonusScreenX = DEFAULT_SCREEN_WIDTH * 0.5f;
 static const f32 kTallyGoldBonusScreenY = DEFAULT_SCREEN_HEIGHT * 0.5f;
@@ -190,7 +350,11 @@ static const f32 kTallyMovieBonusStartScaleMul = 6.0f;
 static const f32 kTallyMovieBonusFadeInPortion = 0.14f;
 static const f32 kTallyMovieBonusSettleLiftPx = 12.0f;
 static const f32 kTallyMovieBonusScreenX = DEFAULT_SCREEN_WIDTH * 0.5f;
+#if defined(RC_PLATFORM_PSP)
+static const f32 kTallyMovieBonusScreenY = 182.0f;
+#else
 static const f32 kTallyMovieBonusScreenY = 178.0f;
+#endif
 static const f32 kTallyMovieBonusShakeAmpX = 2.2f;
 static const f32 kTallyMovieBonusShakeAmpY = 1.6f;
 static const f32 kTallyMovieBonusShakeFreqX = 5.3f;
@@ -246,9 +410,14 @@ static const f32 kTallyRDragonRevealDelaySeconds = 0.50f;
 static const f32 kTallyGoldLeadInSeconds = 1.0f;
 static const f32 kTallyGoldBonusAnimSeconds = 1.20f;
 static const f32 kTallyGoldBonusAnimFrequency = 20.0f;
+#if defined(RC_PLATFORM_PSP)
+static const f32 kTallyContinuePromptScale = HUD_TEXT_PX(14);
+static const f32 kTallyContinuePromptY = 212.0f;
+#else
 static const f32 kTallyContinuePromptScale = 0.34f;
-static const f32 kTallyContinuePromptX = DEFAULT_SCREEN_WIDTH * 0.5f;
 static const f32 kTallyContinuePromptY = 206.0f;
+#endif
+static const f32 kTallyContinuePromptX = DEFAULT_SCREEN_WIDTH * 0.5f;
 static const char* kTallyContinuePromptToken = "FE_TLC";
 static const char* kTallyHeaderToken = "FE_TLHD";
 static const char* kTallyFightLabelToken = "FE_TLFG";
@@ -400,7 +569,7 @@ static void UpdateDelayedHealthRatio(f32 targetRatio,
     }
 }
 
-static void DrawHealthDamageDelta(f32 x,
+[[maybe_unused]] static void DrawHealthDamageDelta(f32 x,
                                   f32 y,
                                   f32 w,
                                   f32 h,
@@ -873,7 +1042,7 @@ static void DrawPulsingIconQuad(tTexture* tex,
     DrawPulsingIconQuadAtScreenX(tex, HudX(x), y, baseSize, pulseAmount, shakeX, shakeY);
 }
 
-static void DrawProgressBar(f32 x, f32 y, f32 w, f32 h, f32 progress) {
+[[maybe_unused]] static void DrawProgressBar(f32 x, f32 y, f32 w, f32 h, f32 progress) {
     const f32 ratio = Clamp01(progress);
     DrawScreenFilledRect(x, y, w, h, kHealthBarBgR, kHealthBarBgG, kHealthBarBgB, kHealthBarBgA);
 
@@ -901,6 +1070,61 @@ static void DrawProgressBar(f32 x, f32 y, f32 w, f32 h, f32 progress) {
                           kHealthBarOutlineA,
                           kHealthBarOutlineThicknessPx);
 }
+
+#if defined(RC_PLATFORM_PSP)
+// PSP health bar: dark rim and track, a glossy gold fill that turns red and
+// pulses when health is low, the delayed-damage trail, and quarter ticks on
+// the player bar. Whole-pixel geometry keeps the 1px details crisp at 480x272.
+static void DrawModernHealthBar(f32 x, f32 y, f32 w, f32 h,
+                                f32 ratio, f32 delayedRatio, bool quarterTicks) {
+    x = std::floor(x + 0.5f);
+    y = std::floor(y + 0.5f);
+    w = std::floor(w + 0.5f);
+    h = std::floor(h + 0.5f);
+    if (w < 4.0f || h < 2.0f) {
+        return;
+    }
+
+    const f32 live = Clamp01(ratio);
+    const f32 delayed = Clamp01(delayedRatio);
+    const f32 fillW = std::floor(w * live + 0.5f);
+
+    DrawScreenFilledRect(x - 1.0f, y - 1.0f, w + 2.0f, h + 2.0f, 0, 0, 0, 200);
+    DrawScreenFilledRect(x, y, w, h, 46, 14, 6, 230);
+
+    const f32 trailW = std::floor(w * delayed + 0.5f) - fillW;
+    if (trailW > 0.0f) {
+        DrawScreenFilledRect(x + fillW, y, trailW, h, 240, 72, 48, 230);
+    }
+
+    if (fillW > 0.0f) {
+        u8 topR = 255, topG = 230, topB = 80;
+        u8 botR = 214, botG = 120, botB = 0;
+        if (live < kHealthLowRatio) {
+            const f32 pulse = 0.5f + 0.5f * (f32)std::sin(HudAnimSeconds() * kHealthLowPulseRate);
+            topR = 255;
+            topG = (u8)(80.0f + 70.0f * pulse);
+            topB = (u8)(50.0f + 30.0f * pulse);
+            botR = (u8)(160.0f + 40.0f * pulse);
+            botG = 20;
+            botB = 10;
+        }
+        const u8 a = ApplyHudAlphaU8(255);
+        ScreenDraw::DrawGouraudQuad(
+            x, y, topR, topG, topB, a,
+            x + fillW, y, topR, topG, topB, a,
+            x, y + h, botR, botG, botB, a,
+            x + fillW, y + h, botR, botG, botB, a);
+        DrawScreenFilledRect(x, y, fillW, 1.0f, 255, 255, 255, 110);
+    }
+
+    if (quarterTicks) {
+        for (s32 i = 1; i < 4; i++) {
+            DrawScreenFilledRect(x + std::floor(w * (f32)i * 0.25f), y, 1.0f, h, 0, 0, 0, 90);
+        }
+    }
+}
+#endif
 
 static bool ProjectThingToScreen(const Thing* thing, s32 yOffset, f32* outX, f32* outY) {
     if (!thing || !outX || !outY || !g_display) {
@@ -1026,10 +1250,10 @@ static void DrawTallyRow(f32 x,
                     kTallyRowOutlineR, kTallyRowOutlineG, kTallyRowOutlineB, kTallyRowOutlineA, 1.0f);
 
     if (icon) {
-        DrawIconQuad(icon, x + 2.0f, y + 1.0f, 14.0f);
+        DrawIconQuad(icon, x + 2.0f, y + 1.0f, kTallyIconSize);
     }
 
-    const f32 labelX = x + (icon ? 20.0f : 2.0f);
+    const f32 labelX = x + (icon ? kTallyIconSize + 6.0f : 2.0f);
 
     if (BeginHudText(kHudBodyFontName,
         kTallyLabelScale,
@@ -1038,7 +1262,7 @@ static void DrawTallyRow(f32 x,
         kTallyLabelG,
         kTallyLabelB,
         255,
-        false,
+        kTallyLabelOutline,
         false)) {
         g_textManager->PrintString(label ? label : "",
                                    HudX(labelX),
@@ -1054,6 +1278,70 @@ static void DrawTallyRow(f32 x,
 }
 
 CustomHudMgr g_customHudMgr;
+
+#if defined(RC_PLATFORM_PSP)
+static HudStyle s_hudStyle = HudStyle_Modern;
+
+// Points the menu/body face at the style's typeface and gives it the
+// exact-size strikes, so menus draw crisp from the title screen on.
+static void ApplyHudStyleFonts() {
+    if (!g_textManager) {
+        return;
+    }
+
+    const char* bodyFont = kHudBodyFontName;
+    if (s_hudStyle == HudStyle_Classic) {
+        static bool classicFontTried = false;
+        if (!classicFontTried) {
+            classicFontTried = true;
+            TextFontDesc desc = {};
+            desc.name = kClassicFontName;
+            desc.path = kClassicFontPath;
+            desc.pixelHeight = 48;
+            g_textManager->LoadFont(desc);
+        }
+        // Without the font the alias is cleared and menus keep their own face.
+        g_textManager->SetFontAlias(kHudBodyFontName, kClassicFontName);
+        bodyFont = kClassicFontName;
+    }
+    else {
+        g_textManager->SetFontAlias(kHudBodyFontName, nullptr);
+    }
+
+    for (s32 px : kHudBodyStrikePx) {
+        g_textManager->AddFontStrike(bodyFont, px, true);
+    }
+    // Plain (unoutlined) small text: menu hint bars and the save-slot table.
+    g_textManager->AddFontStrike(bodyFont, kMenuHintStrikePx, false);
+    for (s32 px : kLegalStrikePx) {
+        g_textManager->AddFontStrike(kLegalFontName, px, false);
+    }
+}
+#endif
+
+HudStyle GetHudStyle() {
+#if defined(RC_PLATFORM_PSP)
+    return s_hudStyle;
+#else
+    return HudStyle_Modern;
+#endif
+}
+
+void SetHudStyle(s32 style) {
+#if defined(RC_PLATFORM_PSP)
+    if (style < 0 || style >= HudStyle_Count) {
+        style = HudStyle_Modern;
+    }
+    s_hudStyle = (HudStyle)style;
+    ApplyHudStyleFonts();
+#else
+    (void)style;
+#endif
+}
+
+bool IsCustomHudActive() {
+    return GetHudStyle() == HudStyle_Modern;
+}
 
 CustomHudMgr::CustomHudMgr() {}
 
@@ -1103,6 +1391,8 @@ void CustomHudMgr::RestartDebugTallyPreview() {
 void CustomHudMgr::OnLevelLoad() {
     m_levelLoaded = true;
     m_levelZonePendingAutoShow = true;
+    // Build the HUD fonts behind the loading screen, not on the first frame.
+    EnsureFontsLoaded();
 }
 
 void CustomHudMgr::OnLevelUnload() {
@@ -1119,6 +1409,7 @@ void CustomHudMgr::OnLevelUnload() {
     m_foeDamageHoldTimer = 0.0f;
     m_foeHealthShakeTimer = 0.0f;
     m_hitTextShakeTimer = 0.0f;
+    m_hitsAnchorValid = false;
     m_tallyGradeDelayTimer = -1.0f;
     m_tallyGradeVisible = false;
     m_tallyRDragonDelayTimer = -1.0f;
@@ -1192,6 +1483,15 @@ void CustomHudMgr::EnsureFontsLoaded() {
         desc.pixelHeight = 52;
         g_textManager->LoadFont(desc);
     }
+
+#if defined(RC_PLATFORM_PSP)
+    // Exact-size rasterisations for the PSP layout: HUD text draws 1:1 with
+    // a baked outline (one quad per glyph) instead of minifying 52px atlases.
+    // The body face gets its strikes with the HUD style (ApplyHudStyleFonts).
+    for (s32 px : kHudTitleStrikePx) {
+        g_textManager->AddFontStrike(kHudTitleFontName, px, true);
+    }
+#endif
 }
 
 void CustomHudMgr::Shutdown() {
@@ -1259,6 +1559,7 @@ void CustomHudMgr::Shutdown() {
 
     m_prevHitCount = 0;
     m_hitTextShakeTimer = 0.0f;
+    m_hitsAnchorValid = false;
 
     m_tallyVisible = false;
     m_tallyFightDisplay = 0;
@@ -1373,6 +1674,18 @@ void CustomHudMgr::Render(const HUD& hud) {
     }
 }
 
+void CustomHudMgr::RenderClassicOverlays() {
+    ScreenDraw::Batch uiBatch;
+    SetHudDrawAlpha(1.0f);
+    if (g_textManager) {
+        g_textManager->PushState();
+    }
+    DrawAutosaveOverlay();
+    if (g_textManager) {
+        g_textManager->PopState();
+    }
+}
+
 void CustomHudMgr::DrawAutosaveOverlay() const {
     if (!g_game || (!g_game->IsAutosaveSpinnerVisible() && !g_game->IsAutosaveFailureVisible())) {
         return;
@@ -1381,7 +1694,7 @@ void CustomHudMgr::DrawAutosaveOverlay() const {
     if (g_game->IsAutosaveFailureVisible()) {
         const char* text = g_customText.GetString("FE_AUTO_FAIL");
         if (!text) text = "Auto save failed.";
-        if (BeginHudText(kHudBodyFontName, 0.30f, TextAlign_Right,
+        if (BeginHudText(kHudBodyFontName, kAutosaveTextScale, TextAlign_Right,
             255, 224, 160, 255, true, true)) {
             g_textManager->PrintString(text, HudX(DEFAULT_SCREEN_WIDTH - 14.0f), HudY(DEFAULT_SCREEN_HEIGHT - 24.0f));
         }
@@ -1562,6 +1875,7 @@ void CustomHudMgr::DrawGameplayHud(const HUD& hud) {
     else {
         m_hitTextShakeTimer = 0.0f;
         m_prevHitCount = (hud.hits.hitCount > 0) ? hud.hits.hitCount : 0;
+        m_hitsAnchorValid = false;
     }
 }
 
@@ -1605,6 +1919,9 @@ void CustomHudMgr::DrawPlayerHealthCard(const HUD& hud) {
     const f32 drawW = HudW(kPlayerHealthBarW);
     const f32 drawH = HudH(kPlayerHealthBarH);
 
+#if defined(RC_PLATFORM_PSP)
+    DrawModernHealthBar(drawX, drawY, drawW, drawH, m_playerHealthRatio, m_playerHealthDamageRatio, true);
+#else
     DrawProgressBar(drawX, drawY, drawW, drawH, m_playerHealthRatio);
     DrawHealthDamageDelta(drawX,
                           drawY,
@@ -1620,6 +1937,7 @@ void CustomHudMgr::DrawPlayerHealthCard(const HUD& hud) {
                           kHealthDamageDeltaTopG,
                           kHealthDamageDeltaTopB,
                           kHealthDamageDeltaTopA);
+#endif
 
     if (hud.playerHealth.flashAlpha > 0) {
         const f32 fillW = drawW * Clamp01(m_playerHealthRatio);
@@ -1647,7 +1965,7 @@ static void DrawOneEnemyHealthCard(const hdHealth& health,
 
     f32 screenX = 0.0f;
     f32 screenY = 0.0f;
-    if (!ProjectThingToScreen(target, 1100, &screenX, &screenY)) {
+    if (!ProjectThingToScreen(target, kEnemyHealthAnchorHeight, &screenX, &screenY)) {
         return;
     }
 
@@ -1696,6 +2014,9 @@ static void DrawOneEnemyHealthCard(const hdHealth& health,
         }
     }
 
+#if defined(RC_PLATFORM_PSP)
+    DrawModernHealthBar(barX, barY, barW, barH, *healthRatio, *healthDamageRatio, false);
+#else
     DrawProgressBar(barX, barY, barW, barH, *healthRatio);
     DrawHealthDamageDelta(barX,
                           barY,
@@ -1711,6 +2032,7 @@ static void DrawOneEnemyHealthCard(const hdHealth& health,
                           kHealthDamageDeltaTopG,
                           kHealthDamageDeltaTopB,
                           kHealthDamageDeltaTopA);
+#endif
 
     if (health.flashAlpha > 0) {
         const f32 fillW = barW * Clamp01(*healthRatio);
@@ -1755,13 +2077,13 @@ void CustomHudMgr::DrawFoeHealthCard(const HUD& hud) {
 
 void CustomHudMgr::DrawInventoryCard(const HUD& hud) {
     const bool showRedDragonCounter = !IsHubLevelActive();
-    const f32 iconSize = 16.0f;
-    const f32 topY = 7.0f;
-    const f32 slotW = 31.0f;
-    const f32 rightEdge = DEFAULT_SCREEN_WIDTH - 6.0f;
+    const f32 iconSize = kInventoryIconSize;
+    const f32 topY = kInventoryTopY;
+    const f32 slotW = kInventorySlotW;
+    const f32 rightEdge = kInventoryRightEdge;
     const f32 panelPadX = 2.0f;
     const s32 slotCount = showRedDragonCounter ? 3 : 2;
-    const f32 timerW = showRedDragonCounter ? 28.0f : 0.0f;
+    const f32 timerW = showRedDragonCounter ? kInventoryTimerW : 0.0f;
 
     const f32 dt = GetHudDeltaSeconds();
 
@@ -1874,7 +2196,7 @@ void CustomHudMgr::DrawInventoryCard(const HUD& hud) {
         const s32 redBoost = (s32)(redPulse * kInventoryPulseTextColorBoost);
         const f32 redTextScale = 1.0f + redPulse * kInventoryPulseTextScale;
         if (BeginHudText(GetHudTitleFontName(),
-            0.30f * redTextScale,
+            kInventoryTextScale * redTextScale,
             TextAlign_Left,
             255,
             SaturatingAddU8(244, redBoost),
@@ -1891,7 +2213,7 @@ void CustomHudMgr::DrawInventoryCard(const HUD& hud) {
     const s32 goldBoost = (s32)(goldPulse * kInventoryPulseTextColorBoost);
     const f32 goldTextScale = 1.0f + goldPulse * kInventoryPulseTextScale;
     if (BeginHudText(GetHudTitleFontName(),
-        0.30f * goldTextScale,
+        kInventoryTextScale * goldTextScale,
         TextAlign_Left,
         255,
         SaturatingAddU8(244, goldBoost),
@@ -1907,7 +2229,7 @@ void CustomHudMgr::DrawInventoryCard(const HUD& hud) {
     const s32 livesBoost = (s32)(livesPulse * kInventoryPulseTextColorBoost);
     const f32 livesTextScale = 1.0f + livesPulse * kInventoryPulseTextScale;
     if (BeginHudText(GetHudTitleFontName(),
-        0.30f * livesTextScale,
+        kInventoryTextScale * livesTextScale,
         TextAlign_Left,
         255,
         SaturatingAddU8(244, livesBoost),
@@ -1934,7 +2256,7 @@ void CustomHudMgr::DrawInventoryCard(const HUD& hud) {
 
         const f32 timerTextScale = 1.0f + livesPulse * kInventoryPulseTextScale;
         if (BeginHudText(GetHudTitleFontName(),
-            0.30f * timerTextScale,
+            kInventoryTextScale * timerTextScale,
             TextAlign_Left,
             255,
             SaturatingAddU8(244, 0),
@@ -1962,33 +2284,64 @@ void CustomHudMgr::DrawHitsCard(const HUD& hud) {
         m_hitTextShakeTimer = kHitTextShakeDurationSeconds;
     }
 
-    const Thing* anchor = nullptr;
-    if (Player::s_player) {
-        anchor = static_cast<const Thing*>(Player::s_player);
-    }
-    else if (hud.currentFoe) {
-        anchor = static_cast<const Thing*>(hud.currentFoe);
-    }
-
-    if (anchor && anchor != static_cast<const Thing*>(Player::s_player) && !IsLiveHumanoidHudTarget(anchor)) {
-        m_prevHitCount = hitCount;
-        return;
-    }
-
     f32 screenX = 0.0f;
     f32 screenY = 0.0f;
-    if (!ProjectThingToScreen(anchor, 950, &screenX, &screenY)) {
-        m_prevHitCount = hitCount;
-        return;
+    bool anchored = false;
+
+    if (kHitsAnchorOnFoe) {
+        // Above the enemy being hit, clear of its health bar and label. Once
+        // that enemy is gone the count stays where it last was until it fades.
+        const Thing* foe = static_cast<const Thing*>(hud.currentFoe);
+        if (foe && IsLiveHumanoidHudTarget(foe) && ProjectThingToScreen(foe, kEnemyHealthAnchorHeight, &screenX, &screenY)) {
+            // Only the boss bar carries a name label above it.
+            const bool labelled = hud.bossHandle && hud.bossHandle->owner == foe;
+            const f32 labelGap = labelled ? kEnemyHealthLabelYOffsetFromScreenH : kHitsBarGapFromScreenH;
+            screenY -= SCREEN_HEIGHT * (kEnemyHealthBarYOffsetFromScreenH + labelGap)
+                + SCREEN_SCALE_Y(32.0f * kHitsTextScale);
+            // Keep the count readable: below the top HUD strip, inside the edges.
+            const f32 minY = HudY(kHitsMinTopY);
+            const f32 edgeX = HudW(kHitsEdgeMarginX);
+            screenY = (screenY < minY) ? minY : screenY;
+            screenX = (screenX < edgeX) ? edgeX : ((screenX > SCREEN_WIDTH - edgeX) ? SCREEN_WIDTH - edgeX : screenX);
+            m_hitsAnchorX = screenX;
+            m_hitsAnchorY = screenY;
+            m_hitsAnchorValid = true;
+            anchored = true;
+        }
+        else if (m_hitsAnchorValid) {
+            screenX = m_hitsAnchorX;
+            screenY = m_hitsAnchorY;
+            anchored = true;
+        }
     }
-    screenY -= SCREEN_HEIGHT * 0.060f;
+
+    if (!anchored) {
+        const Thing* anchor = nullptr;
+        if (Player::s_player) {
+            anchor = static_cast<const Thing*>(Player::s_player);
+        }
+        else if (hud.currentFoe) {
+            anchor = static_cast<const Thing*>(hud.currentFoe);
+        }
+
+        if (anchor && anchor != static_cast<const Thing*>(Player::s_player) && !IsLiveHumanoidHudTarget(anchor)) {
+            m_prevHitCount = hitCount;
+            return;
+        }
+
+        if (!ProjectThingToScreen(anchor, 950, &screenX, &screenY)) {
+            m_prevHitCount = hitCount;
+            return;
+        }
+        screenY -= SCREEN_HEIGHT * 0.060f;
+    }
 
     const f32 shakeScale = (SCREEN_HEIGHT > 0.0f) ? (SCREEN_HEIGHT / DEFAULT_SCREEN_HEIGHT) : 1.0f;
     const f32 shakeX = GetHitTextShakeOffset(m_hitTextShakeTimer, kHitTextShakeAmpX * shakeScale, 0.0f);
     const f32 shakeY = GetHitTextShakeOffset(m_hitTextShakeTimer, kHitTextShakeAmpY * shakeScale, kHitTextShakePhaseY);
 
     const char* comboText = TrimLeftOrZero(hud.hits.hitsBuf);
-    if (BeginHudText(GetHudTitleFontName(), 0.28f, TextAlign_Center,
+    if (BeginHudText(GetHudTitleFontName(), kHitsTextScale, TextAlign_Center,
         (u8)hud.hits.colorR,
         (u8)hud.hits.colorG,
         (u8)hud.hits.colorB,
@@ -2017,10 +2370,14 @@ void CustomHudMgr::DrawDestinationBanner(const HUD& hud) const {
         return;
     }
 
-    const f32 w = 214.0f;
-    const f32 h = 32.0f;
+    const f32 w = kDestBannerW;
+    const f32 h = kDestBannerH;
     const f32 x = (DEFAULT_SCREEN_WIDTH - w) * 0.5f;
-    const f32 y = 8.0f;
+    const f32 y = kDestBannerY;
+
+    if (kShowHubPrompt && hud.destSelect.titleOvl2 && hud.destSelect.titleOvl2->visibility != 0) {
+        DrawHubPromptBar();
+    }
 
     const char* destSelectTitleText = g_customText.GetString(kDestSelectTitleToken);
     const char* destLevelFormatText = g_customText.GetString(kDestLevelFormatToken);
@@ -2052,9 +2409,9 @@ void CustomHudMgr::DrawDestinationBanner(const HUD& hud) const {
 
     const s32 currentLevel = hud.destSelect.currentLevel;
     if (currentLevel <= 0) {
-        if (BeginHudText(GetHudTitleFontName(), 0.35f, TextAlign_Center,
+        if (BeginHudText(GetHudTitleFontName(), kDestTitleScale, TextAlign_Center,
             kMenuTitleTextR, kMenuTitleTextG, kMenuTitleTextB, 255, true, false)) {
-            g_textManager->PrintString(destSelectTitleText, HudX(x + w * 0.5f), HudY(y + 5.0f));
+            g_textManager->PrintString(destSelectTitleText, HudX(x + w * 0.5f), HudY(y + kDestTitleY));
         }
 
         s32 totalGold = 0;
@@ -2067,9 +2424,9 @@ void CustomHudMgr::DrawDestinationBanner(const HUD& hud) const {
 
         char line[64];
         std::snprintf(line, sizeof(line), destTotalGoldFormatText, totalGold);
-        if (BeginHudText(kHudBodyFontName, 0.20f, TextAlign_Center,
-            kMenuTextNormR, kMenuTextNormG, kMenuTextNormB, 255, false, false)) {
-            g_textManager->PrintString(line, HudX(x + w * 0.5f), HudY(y + 20.0f));
+        if (BeginHudText(kHudBodyFontName, kDestSmallScale, TextAlign_Center,
+            kMenuTextNormR, kMenuTextNormG, kMenuTextNormB, 255, kDestSmallOutline, false)) {
+            g_textManager->PrintString(line, HudX(x + w * 0.5f), HudY(y + kDestSubtitleY));
         }
         return;
     }
@@ -2093,14 +2450,14 @@ void CustomHudMgr::DrawDestinationBanner(const HUD& hud) const {
         std::snprintf(levelBuf, sizeof(levelBuf), destLevelFormatText, currentLevel);
     }
 
-    if (BeginHudText(kHudBodyFontName, 0.20f, TextAlign_Center,
-        kMenuTextNormR, kMenuTextNormG, kMenuTextNormB, 255, false, false)) {
-        g_textManager->PrintString(destTravelToText, HudX(x + w * 0.5f), HudY(y + 4.0f));
+    if (BeginHudText(kHudBodyFontName, kDestSmallScale, TextAlign_Center,
+        kMenuTextNormR, kMenuTextNormG, kMenuTextNormB, 255, kDestSmallOutline, false)) {
+        g_textManager->PrintString(destTravelToText, HudX(x + w * 0.5f), HudY(y + kDestTravelY));
     }
 
-    if (BeginHudText(GetHudTitleFontName(), 0.37f, TextAlign_Center,
+    if (BeginHudText(GetHudTitleFontName(), kDestLevelNameScale, TextAlign_Center,
         kMenuTitleTextR, kMenuTitleTextG, kMenuTitleTextB, 255, true, false)) {
-        g_textManager->PrintString(levelBuf, HudX(x + w * 0.5f), HudY(y + 12.0f));
+        g_textManager->PrintString(levelBuf, HudX(x + w * 0.5f), HudY(y + kDestLevelNameY));
     }
 
     bool completed = false;
@@ -2109,17 +2466,46 @@ void CustomHudMgr::DrawDestinationBanner(const HUD& hud) const {
         completed = (ps[0].goldDragons != 0) || (ps[1].goldDragons != 0) || (ps[2].goldDragons != 0);
     }
 
-    if (BeginHudText(kHudBodyFontName, 0.20f, TextAlign_Center,
+    if (BeginHudText(kHudBodyFontName, kDestSmallScale, TextAlign_Center,
         kMenuTextNormR,
         kMenuTextNormG,
         kMenuTextNormB,
         255,
-        false,
+        kDestSmallOutline,
         false)) {
         g_textManager->PrintString(completed ? destCompletedText : destNotCompletedText,
                                    HudX(x + w * 0.5f),
-                                   HudY(y + 24.0f));
+                                   HudY(y + kDestStatusY));
     }
+}
+
+void CustomHudMgr::DrawHubPromptBar() const {
+    const char* text = g_customText.GetStringByHash(kHubPromptTextHash);
+    if (!text || !text[0]) {
+        text = "Press <ACT:OPEN_CLOSE_MENU> to open the main menu.";
+    }
+
+    if (!BeginHudText(kHudBodyFontName, kHubPromptScale, TextAlign_Center,
+        kMenuTextNormR, kMenuTextNormG, kMenuTextNormB, 255, true, false)) {
+        return;
+    }
+
+    // The prompt only changes with the language: lay it out once per string.
+    static const char* s_measuredText = nullptr;
+    static TextBounds s_measuredBounds = {};
+    if (text != s_measuredText) {
+        s_measuredBounds = g_textManager->MeasureString(Utf8TextView(text));
+        s_measuredText = text;
+    }
+    const TextBounds& bounds = s_measuredBounds;
+    const f32 barH = HudH(kHubPromptBarH);
+    const f32 barW = bounds.width + HudW(kHubPromptPadX) * 2.0f;
+    const f32 barX = std::floor((SCREEN_WIDTH - barW) * 0.5f);
+    const f32 barY = std::floor(SCREEN_HEIGHT - HudH(kHubPromptBottomMargin) - barH);
+
+    DrawScreenFilledRect(barX, barY, barW, barH, 0, 0, 0, kDestBannerFillA);
+    DrawScreenOutlineRect(barX, barY, barW, barH, kMenuFrameR, kMenuFrameG, kMenuFrameB, kMenuFrameA, 1.0f);
+    g_textManager->PrintString(text, SCREEN_WIDTH * 0.5f, barY + (barH - bounds.height) * 0.5f);
 }
 
 void CustomHudMgr::DrawTallyOverlay(const HUD& hud) {
@@ -2202,13 +2588,13 @@ void CustomHudMgr::DrawTallyOverlay(const HUD& hud) {
     DrawFilledRect(panelInnerX, bodyY0, panelInnerW, 1.0f,
                    kTallyPanelOutlineR, kTallyPanelOutlineG, kTallyPanelOutlineB, kTallyPanelOutlineA);
 
-    DrawFilledRect(x + 10.0f, y + 5.0f, w - 20.0f, 18.0f, 0, 0, 0, 255);
-    DrawOutlineRect(x + 10.0f, y + 5.0f, w - 20.0f, 18.0f,
+    DrawFilledRect(x + 10.0f, y + 5.0f, w - 20.0f, kTallyHeaderBoxH, 0, 0, 0, 255);
+    DrawOutlineRect(x + 10.0f, y + 5.0f, w - 20.0f, kTallyHeaderBoxH,
                     kTallyPanelOutlineR, kTallyPanelOutlineG, kTallyPanelOutlineB, 255, 1.0f);
 
     if (BeginHudText(kHudBodyFontName, kTallyHeaderTextScale, TextAlign_Center,
         kTallyTitleR, kTallyTitleG, kTallyTitleB, 255, true, false)) {
-        g_textManager->PrintString(tallyHeaderText, HudX(x + w * 0.5f), HudY(y + 9.0f));
+        g_textManager->PrintString(tallyHeaderText, HudX(x + w * 0.5f), HudY(y + kTallyHeaderTextY));
     }
 
     const f32 dt = GetHudDeltaSeconds();
@@ -2467,7 +2853,7 @@ void CustomHudMgr::DrawTallyOverlay(const HUD& hud) {
     std::snprintf(rdragonBuf, sizeof(rdragonBuf), "%d", m_tallyRDragonDisplay);
     std::snprintf(gdragonBuf, sizeof(gdragonBuf), "%d", m_tallyGDragonDisplay);
 
-    f32 rowY = y + 32.0f;
+    f32 rowY = y + kTallyRowsStartY;
     DrawTallyRow(x + 10.0f, rowY, w - 20.0f, fightLabelText, fightBuf, nullptr,
                  kTallyValueGoldR, kTallyValueGoldG, kTallyValueGoldB);
     rowY += kTallyRowSpacing;
@@ -2619,7 +3005,7 @@ void CustomHudMgr::DrawTallyOverlay(const HUD& hud) {
             m_tallyMovieBonusShakePhase -= 1024.0f;
         }
 
-        f32 drawScale = 0.30f;
+        f32 drawScale = kTallyMovieBonusTextScale;
         f32 lift = 0.0f;
         u8 drawAlpha = 255;
 

@@ -151,30 +151,37 @@ void HUD::Display() {
 #endif
     // Custom HUD rendering path replaces FE section overlays while preserving
     // all original HUD state/update behavior.
-// PSP uses the legacy section HUD unless PSP_CUSTOM_HUD opts in to the PC HUD.
-#if CUSTOM_MENU && (!defined(RC_PLATFORM_PSP) || defined(PSP_CUSTOM_HUD))
+// The PSP offers the original section HUD as the Classic HUD style.
+#if CUSTOM_MENU
+    if (IsCustomHudActive()) {
     #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
-    PspPerf::Trace("render: hud custom begin");
+        PspPerf::Trace("render: hud custom begin");
     #endif
-    g_customHudMgr.Render(*this);
+        g_customHudMgr.Render(*this);
     #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
-    PspPerf::Trace("render: hud custom done");
+        PspPerf::Trace("render: hud custom done");
     #endif
-#else
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
-    PspPerf::Trace("render: hud section begin");
+    }
+    else
 #endif
-    if (section) {
+    {
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("render: hud section begin");
+#endif
+        if (section) {
 #if FIX_ASPECT_RATIO
-        widescreenPatches.DrawSection(section);
+            widescreenPatches.DrawSection(section);
 #else
-        section->Draw();
+            section->Draw();
+#endif
+        }
+#if CUSTOM_MENU
+        g_customHudMgr.RenderClassicOverlays();
+#endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+        PspPerf::Trace("render: hud section done");
 #endif
     }
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
-    PspPerf::Trace("render: hud section done");
-#endif
-#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: hud done");
 #endif
