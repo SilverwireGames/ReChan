@@ -72,4 +72,11 @@ namespace p3d::io {
     std::string GetExecutableDir();
     std::string GetTempDir();
 
+#if defined(RC_PLATFORM_PSP)
+    // The folder holding EBOOT.PBP ("ms0:/PSP/GAME/RECHAN" by default);
+    // relative paths resolve under its data/ folder.
+    void SetPspGameDir(const char* dir);
+    const char* GetPspGameDir();
+#endif
+
 }

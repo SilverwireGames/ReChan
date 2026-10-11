@@ -57,7 +57,7 @@
 #include <pspkernel.h>
 #include <psppower.h>
 #include "psp/psp_perf.h"
-namespace p3d::io { void SetPspDevice(const char* device); }
+#include "p3d/fileio.h"
 
 static void ConfigurePspPerformance() {
     // The native 60 Hz target is CPU-bound while decoding PSX pages and
@@ -226,15 +226,31 @@ int main(int argc, char** argv) {
     PspPerf::Trace("main: telemetry reset");
 #endif
 
-    // EBOOT launches with the game directory as the working root on most
-    // shells, but explicitly selecting it also makes loading deterministic in
-    // PPSSPP and on installations using a different launch directory.
-    if (sceIoChdir("ms0:/PSP/GAME/RECHAN/data") < 0) {
-        if (sceIoChdir("ef0:/PSP/GAME/RECHAN/data") < 0) {
-            sceIoChdir("ms0:/PSP/GAME/RECHAN");
+    // The XMB passes the EBOOT path in argv[0], so the game runs from any
+    // folder name. PSPLink PRX builds start from host0: and use the default
+    // install folder (or PSP_GAME_DIR); the PSP Go keeps it on ef0:.
+    {
+        char gameDir[256] = "ms0:/PSP/GAME/RECHAN";
+#if defined(PSP_GAME_DIR)
+        std::snprintf(gameDir, sizeof(gameDir), "%s", PSP_GAME_DIR);
+#else
+        const char* exe = (argc > 0 && argv && argv[0]) ? argv[0] : "";
+        const char* slash = std::strrchr(exe, '/');
+        if ((std::strncmp(exe, "ms0:/", 5) == 0 || std::strncmp(exe, "ef0:/", 5) == 0)
+            && slash && (size_t)(slash - exe) < sizeof(gameDir)) {
+            std::memcpy(gameDir, exe, (size_t)(slash - exe));
+            gameDir[slash - exe] = '\0';
         }
-        else {
-            p3d::io::SetPspDevice("ef0:");
+        else if (sceIoChdir("ms0:/PSP/GAME/RECHAN/data") < 0
+                 && sceIoChdir("ef0:/PSP/GAME/RECHAN/data") >= 0) {
+            std::snprintf(gameDir, sizeof(gameDir), "%s", "ef0:/PSP/GAME/RECHAN");
+        }
+#endif
+        p3d::io::SetPspGameDir(gameDir);
+        char dataDir[272];
+        std::snprintf(dataDir, sizeof(dataDir), "%s/data", gameDir);
+        if (sceIoChdir(dataDir) < 0) {
+            sceIoChdir(gameDir);
         }
     }
 #if !defined(NDEBUG) || defined(PSP_GU_DIAGNOSTIC) || defined(PSP_STAGE_DIAGNOSTIC)

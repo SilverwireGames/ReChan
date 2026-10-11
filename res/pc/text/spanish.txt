@@ -661,6 +661,15 @@ Extrayendo archivos del juego...
 [FE_ASSET_ERR]
 Extraccion fallida: %s
 
+[FE_ASSET_PNONE]
+No se encontró ninguna imagen de disco. Copia la imagen de tu disco de Jackie Chan Stuntmaster (NTSC-U, SLUS-00684, .bin o .iso) en %s de la Memory Stick y elige Buscar de nuevo.
+
+[FE_ASSET_PMULTI]
+Hay más de un archivo .bin o .iso en %s. Deja solo uno y elige Buscar de nuevo.
+
+[FE_ASSET_PONE]
+Imagen de disco encontrada. La extracción tarda unos minutos y necesita unos 600 MB libres. Mantén la PSP conectada al cargador.
+
 #
 # Mods y trucos
 #

@@ -9,14 +9,15 @@
 
 namespace {
 
-char g_device[8] = "ms0:";
+// The folder holding EBOOT.PBP; relative paths resolve under its data/.
+char g_gameDir[256] = "ms0:/PSP/GAME/RECHAN";
 
 static std::string ToPspPath(const std::string& input) {
     std::string path = input;
     std::replace(path.begin(), path.end(), '\\', '/');
     if (path.empty()) return path;
     if (path.find(":/") == std::string::npos) {
-        return std::string(g_device) + "/PSP/GAME/RECHAN/data/" + path;
+        return std::string(g_gameDir) + "/data/" + path;
     }
     return path;
 }
@@ -29,11 +30,16 @@ static bool IsDirectory(const SceIoStat& stat) {
 
 namespace p3d::io {
 
-void SetPspDevice(const char* device) {
-    if (!device || (std::strcmp(device, "ms0:") != 0 && std::strcmp(device, "ef0:") != 0)) return;
-    std::strncpy(g_device, device, sizeof(g_device) - 1);
-    g_device[sizeof(g_device) - 1] = '\0';
+void SetPspGameDir(const char* dir) {
+    if (!dir || (std::strncmp(dir, "ms0:/", 5) != 0 && std::strncmp(dir, "ef0:/", 5) != 0)) return;
+    size_t len = std::strlen(dir);
+    while (len > 5 && dir[len - 1] == '/') len--;
+    if (len >= sizeof(g_gameDir)) return;
+    std::memcpy(g_gameDir, dir, len);
+    g_gameDir[len] = '\0';
 }
+
+const char* GetPspGameDir() { return g_gameDir; }
 
 std::string NormalizeSeparators(const std::string& path) {
     std::string result = path;
@@ -224,8 +230,8 @@ void FileHandle::Flush() {
     // undocumented per-file ioctl and keep the hot save path portable.
 }
 
-std::string GetExecutablePath() { return std::string(g_device) + "/PSP/GAME/RECHAN/EBOOT.PBP"; }
-std::string GetExecutableDir() { return std::string(g_device) + "/PSP/GAME/RECHAN/data"; }
-std::string GetTempDir() { return std::string(g_device) + "/PSP/GAME/RECHAN/data/userfiles/tmp"; }
+std::string GetExecutablePath() { return std::string(g_gameDir) + "/EBOOT.PBP"; }
+std::string GetExecutableDir() { return std::string(g_gameDir) + "/data"; }
+std::string GetTempDir() { return std::string(g_gameDir) + "/data/userfiles/tmp"; }
 
 } // namespace p3d::io

@@ -43,9 +43,12 @@ private:
     void ExtractThreadFunc(std::string imagePath);
 
 #if defined(RC_PLATFORM_PSP)
-    State m_state{ State::Idle };
-    s64 m_bytesDone = 0;
-    s64 m_bytesTotal = 0;
+    // Written by the extraction thread, polled by the menu.
+    volatile State m_state{ State::Idle };
+    volatile s64 m_bytesDone = 0;
+    volatile s64 m_bytesTotal = 0;
+    int m_thread = -1;
+    static int ThreadEntry(unsigned int args, void* argp);
 #else
     std::atomic<State> m_state{ State::Idle };
     std::atomic<s64> m_bytesDone{ 0 };

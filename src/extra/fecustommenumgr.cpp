@@ -21,6 +21,7 @@
 #include "xclib/xclib.h"
 #include "gen/scoremgr.h"
 #include "gen/world.h"
+#include "p3d/fileio.h"
 #include "p3d/texture.h"
 #include "pddi/pdditex.h"
 #include "pddi/pddishad.h"
@@ -7045,24 +7046,35 @@ void feCustomMenuMgr::RefreshAssetPageEntries() {
 
     PageDef& page = m_pages[MenuPage_AssetMissing];
 
+#if defined(RC_PLATFORM_PSP)
+    // The PSP texts name the Memory Stick folder and its buttons.
+    static constexpr const char* kNoneToken = "FE_ASSET_PNONE";
+    static constexpr const char* kMultiToken = "FE_ASSET_PMULTI";
+    static constexpr const char* kOneToken = "FE_ASSET_PONE";
+#else
+    static constexpr const char* kNoneToken = "FE_ASSET_NONE";
+    static constexpr const char* kMultiToken = "FE_ASSET_MULTI";
+    static constexpr const char* kOneToken = "FE_ASSET_ONE";
+#endif
+
     switch (g_psxDiscExtractor->GetState()) {
         case PsxDiscExtractor::State::ScanNoneFound:
             SetEntries(page, {
-                Info("FE_ASSET_NONE"),
+                Info(kNoneToken),
                 Button("FE_ASSET_RESCAN", EntryEvent_ScanForAssets),
                 Button("FE_QTG", EntryEvent_QuitFromAssetCheck),
                        });
             break;
         case PsxDiscExtractor::State::ScanMultipleFound:
             SetEntries(page, {
-                Info("FE_ASSET_MULTI"),
+                Info(kMultiToken),
                 Button("FE_ASSET_RESCAN", EntryEvent_ScanForAssets),
                 Button("FE_QTG", EntryEvent_QuitFromAssetCheck),
                        });
             break;
         case PsxDiscExtractor::State::ScanFoundOne:
             SetEntries(page, {
-                Info("FE_ASSET_ONE"),
+                Info(kOneToken),
                 Button("FE_ASSET_EXT", EntryEvent_ExtractAssets),
                 Button("FE_QTG", EntryEvent_QuitFromAssetCheck),
                        });
@@ -7103,6 +7115,17 @@ bool feCustomMenuMgr::BuildAssetInfoText(const char* token, char* outText, s32 o
         snprintf(outText, outTextLen, fmt, g_psxDiscExtractor->GetError());
         return true;
     }
+#if defined(RC_PLATFORM_PSP)
+    if (!strcmp(token, "FE_ASSET_PNONE") || !strcmp(token, "FE_ASSET_PMULTI")) {
+        const char* fmt = Localize(token);
+        if (!fmt) return false;
+        // "ms0:/PSP/GAME/RECHAN" -> "PSP/GAME/RECHAN/discimage"
+        char folder[160];
+        snprintf(folder, sizeof(folder), "%s/%s", p3d::io::GetPspGameDir() + 5, PsxDiscExtractor::kDiscImageDir);
+        snprintf(outText, outTextLen, fmt, folder);
+        return true;
+    }
+#endif
     return false;
 }
 
