@@ -167,6 +167,10 @@ static const f32 kEnemyHealthBarHFromScreenH = 6.0f / 272.0f;
 static const f32 kEnemyHealthBarYOffsetFromScreenH = 8.0f / 272.0f;
 static const f32 kEnemyHealthLabelYOffsetFromScreenH = 16.0f / 272.0f;
 static const f32 kEnemyHealthLabelScale = HUD_TEXT_PX(14);
+// Bars (and a boss name) stay below the top HUD strip when the enemy's head
+// leaves the screen, as it often does with the closer cameras.
+static const bool kClampEnemyBars = true;
+static const f32 kEnemyBarMinTopY = HUD_PX_Y(38);
 #else
 static const s32 kEnemyHealthAnchorHeight = 1100;
 static const f32 kEnemyHealthBarWFromScreenH = 0.076f;
@@ -174,6 +178,8 @@ static const f32 kEnemyHealthBarHFromScreenH = 0.016f;
 static const f32 kEnemyHealthBarYOffsetFromScreenH = 0.072f;
 static const f32 kEnemyHealthLabelYOffsetFromScreenH = 0.024f;
 static const f32 kEnemyHealthLabelScale = 0.20f;
+static const bool kClampEnemyBars = false;
+static const f32 kEnemyBarMinTopY = 0.0f;
 #endif
 
 // Inventory strip (dragons, takes, timer) along the top-right edge.
@@ -1913,6 +1919,17 @@ void CustomHudMgr::DrawPlayerHealthCard(const HUD& hud) {
 
 }
 
+// Top of an enemy health bar whose anchor projects to anchorScreenY.
+static f32 EnemyBarTopY(f32 anchorScreenY, bool labelled) {
+    const f32 barY = anchorScreenY - SCREEN_HEIGHT * kEnemyHealthBarYOffsetFromScreenH;
+    if (!kClampEnemyBars) {
+        return barY;
+    }
+    const f32 minY = HudY(kEnemyBarMinTopY)
+        + (labelled ? SCREEN_HEIGHT * kEnemyHealthLabelYOffsetFromScreenH : 0.0f);
+    return (barY < minY) ? minY : barY;
+}
+
 // Shared by DrawBossHealthCard/DrawFoeHealthCard: animates and draws one
 // enemy health bar above `target`, using the caller's own animation state.
 static void DrawOneEnemyHealthCard(const hdHealth& health,
@@ -1958,7 +1975,7 @@ static void DrawOneEnemyHealthCard(const hdHealth& health,
     const f32 barW = SCREEN_HEIGHT * kEnemyHealthBarWFromScreenH;
     const f32 barH = SCREEN_HEIGHT * kEnemyHealthBarHFromScreenH;
     const f32 barX = screenX - barW * 0.5f + shakeX;
-    const f32 barY = screenY - SCREEN_HEIGHT * kEnemyHealthBarYOffsetFromScreenH + shakeY;
+    const f32 barY = EnemyBarTopY(screenY, label && label[0]) + shakeY;
 
     if (label && label[0]) {
         char displayName[48] = {};
@@ -2260,12 +2277,17 @@ void CustomHudMgr::DrawHitsCard(const HUD& hud) {
             // Only the boss bar carries a name label above it.
             const bool labelled = hud.bossHandle && hud.bossHandle->owner == foe;
             const f32 labelGap = labelled ? kEnemyHealthLabelYOffsetFromScreenH : kHitsBarGapFromScreenH;
-            screenY -= SCREEN_HEIGHT * (kEnemyHealthBarYOffsetFromScreenH + labelGap)
-                + SCREEN_SCALE_Y(32.0f * kHitsTextScale);
-            // Keep the count readable: below the top HUD strip, inside the edges.
+            const f32 barTop = EnemyBarTopY(screenY, labelled);
+            screenY = barTop - SCREEN_HEIGHT * labelGap - SCREEN_SCALE_Y(32.0f * kHitsTextScale);
+            // Keep the count readable: below the top HUD strip (under the bar
+            // when there is no room above it) and inside the edges.
             const f32 minY = HudY(kHitsMinTopY);
             const f32 edgeX = HudW(kHitsEdgeMarginX);
-            screenY = (screenY < minY) ? minY : screenY;
+            if (screenY < minY) {
+                screenY = kClampEnemyBars
+                    ? barTop + SCREEN_HEIGHT * kEnemyHealthBarHFromScreenH + SCREEN_HEIGHT * kHitsBarGapFromScreenH
+                    : minY;
+            }
             screenX = (screenX < edgeX) ? edgeX : ((screenX > SCREEN_WIDTH - edgeX) ? SCREEN_WIDTH - edgeX : screenX);
             m_hitsAnchorX = screenX;
             m_hitsAnchorY = screenY;
