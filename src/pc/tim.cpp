@@ -769,6 +769,23 @@ void ScreenDraw::DrawGouraudQuad(f32 x0, f32 y0, u8 r0, u8 g0, u8 b0, u8 a0,
                                  f32 x1, f32 y1, u8 r1, u8 g1, u8 b1, u8 a1,
                                  f32 x2, f32 y2, u8 r2, u8 g2, u8 b2, u8 a2,
                                  f32 x3, f32 y3, u8 r3, u8 g3, u8 b3, u8 a3) {
+#if defined(RC_PLATFORM_PSP)
+    if (s_overlayBatchDepth > 0) {
+        // The batch's untextured triangles: the same vertices in the order
+        // the immediate path builds (0 1 2, 1 3 2) and the same colours (a
+        // byte survives the /255 float round trip below), one draw instead of
+        // one per quad.
+        EnsureShader();
+        EnsurePrimitiveBatchTexture(nullptr);
+        QueueBatchedVertex(x0, y0, 0.0f, 0.0f, r0, g0, b0, a0);
+        QueueBatchedVertex(x1, y1, 0.0f, 0.0f, r1, g1, b1, a1);
+        QueueBatchedVertex(x2, y2, 0.0f, 0.0f, r2, g2, b2, a2);
+        QueueBatchedVertex(x1, y1, 0.0f, 0.0f, r1, g1, b1, a1);
+        QueueBatchedVertex(x3, y3, 0.0f, 0.0f, r3, g3, b3, a3);
+        QueueBatchedVertex(x2, y2, 0.0f, 0.0f, r2, g2, b2, a2);
+        return;
+    }
+#endif
     if (s_overlayBatchDepth > 0) {
         FlushPendingPrimitiveBatch();
     }
