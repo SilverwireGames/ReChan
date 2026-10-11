@@ -93,6 +93,7 @@ enum EntryBinding : u8 {
     EntryBinding_Language,
     EntryBinding_HudStyle,
     EntryBinding_CinemaMode,
+    EntryBinding_CameraDistance,
     EntryBinding_DisplayResolution,
     EntryBinding_DisplayScreenMode,
     EntryBinding_DisplayVsync,

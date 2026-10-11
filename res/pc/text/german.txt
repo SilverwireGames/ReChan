@@ -145,6 +145,21 @@ Klassisch
 [FE_CINE]
 Kinomodus 30 fps:
 
+[FE_CAM]
+Kamera:
+
+[FE_CAM0]
+Original
+
+[FE_CAM1]
+Nah
+
+[FE_CAM2]
+Näher
+
+[FE_CAM3]
+Sehr nah
+
 [FE_LGEN]
 Englisch
 

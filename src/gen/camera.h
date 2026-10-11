@@ -106,6 +106,12 @@ public:
     void ClearBenchmarkMode() { benchmarkMode = false; }
     bool IsBenchmarkMode() const { return benchmarkMode; }
 
+    // Follow-camera distance as a 16.16 fraction of the level's own framing
+    // (0x10000 = original). Below one, the eye and look-at goals are scaled
+    // about the followed target: same angles and framing, closer to Jackie.
+    static void SetFollowDistanceScale(s32 scale16);
+    static s32 GetFollowDistanceScale();
+
 private:
     // Mode dispatch functions
     void DebugCam();                           // 0x80048718 = mode 0

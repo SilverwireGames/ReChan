@@ -145,6 +145,21 @@ Classic
 [FE_CINE]
 Cinema mode 30 fps:
 
+[FE_CAM]
+Camera:
+
+[FE_CAM0]
+Original
+
+[FE_CAM1]
+Close
+
+[FE_CAM2]
+Closer
+
+[FE_CAM3]
+Closest
+
 [FE_LGEN]
 English
 

@@ -142,6 +142,21 @@ Clássico
 [FE_CINE]
 Modo cinema 30 fps:
 
+[FE_CAM]
+Câmera:
+
+[FE_CAM0]
+Original
+
+[FE_CAM1]
+Próxima
+
+[FE_CAM2]
+Mais próxima
+
+[FE_CAM3]
+Muito próxima
+
 [FE_LGEN]
 Inglês
 

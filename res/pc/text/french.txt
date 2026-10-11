@@ -145,6 +145,21 @@ Classique
 [FE_CINE]
 Mode cinéma 30 i/s :
 
+[FE_CAM]
+Caméra :
+
+[FE_CAM0]
+Originale
+
+[FE_CAM1]
+Proche
+
+[FE_CAM2]
+Plus proche
+
+[FE_CAM3]
+Très proche
+
 [FE_LGEN]
 Anglais
 

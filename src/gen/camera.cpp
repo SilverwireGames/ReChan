@@ -38,6 +38,18 @@ static constexpr s32 RESTING_DIST = 3200;
 static constexpr s32 HEIGHT_OFFSET = 2000;
 static constexpr s32 SPIN_RATE = 6500;
 
+static s32 s_followDistanceScale = FIX16_ONE;
+
+void Camera::SetFollowDistanceScale(s32 scale16) {
+    // Never onto the target itself, never farther than the level's framing.
+    const s32 kMinScale = FIX16_ONE / 4;
+    s_followDistanceScale = (scale16 < kMinScale) ? kMinScale : (scale16 > FIX16_ONE ? FIX16_ONE : scale16);
+}
+
+s32 Camera::GetFollowDistanceScale() {
+    return s_followDistanceScale;
+}
+
 bool EvalCubic(s32* curValue, s32* accel, s32 target, s32 velocity, s32 time) {
     s32 v7 = *accel;
     s32 v8 = *curValue;
@@ -1029,6 +1041,21 @@ void Camera::FollowPath() {
     curPos.x += (s32)(((s64)normX * angleYInterp) >> 16);
     curPos.y += (s32)(((s64)normY * angleYInterp) >> 16);
     curPos.z += (s32)(((s64)normZ * angleYInterp) >> 16);
+
+    // Closer camera option: scale the eye and look-at goals about the target
+    // (Jackie's view spot). The view direction and the target's place on
+    // screen stay the level's; the target just appears larger. The eye moves
+    // along the line it already sees the target through. Move() eases into
+    // the new goals, so switching the option is smooth.
+    if (s_followDistanceScale != FIX16_ONE) {
+        const s32 k = s_followDistanceScale;
+        curPos.x = targetWorldPos.x + (s32)(((s64)(curPos.x - targetWorldPos.x) * k) >> 16);
+        curPos.y = targetWorldPos.y + (s32)(((s64)(curPos.y - targetWorldPos.y) * k) >> 16);
+        curPos.z = targetWorldPos.z + (s32)(((s64)(curPos.z - targetWorldPos.z) * k) >> 16);
+        prevTargetPos.x = targetWorldPos.x + (s32)(((s64)(prevTargetPos.x - targetWorldPos.x) * k) >> 16);
+        prevTargetPos.y = targetWorldPos.y + (s32)(((s64)(prevTargetPos.y - targetWorldPos.y) * k) >> 16);
+        prevTargetPos.z = targetWorldPos.z + (s32)(((s64)(prevTargetPos.z - targetWorldPos.z) * k) >> 16);
+    }
 
     // PSX: if lookAtMode is set, snap camera and compute angles
     if (lookAtMode) {

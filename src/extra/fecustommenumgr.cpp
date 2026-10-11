@@ -772,6 +772,7 @@ void feCustomMenuMgr::BuildPages() {
 #if defined(RC_PLATFORM_PSP)
         List("FE_HUDS", EntryBinding_HudStyle, 1, 0, (s32)HudStyle_Count - 1),
         Toggle("FE_CINE", EntryBinding_CinemaMode),
+        List("FE_CAM", EntryBinding_CameraDistance, 1, 0, kPspCameraDistanceCount - 1),
 #endif
         Button("FE_BCK", EntryEvent_Back),
                });
@@ -3054,7 +3055,7 @@ void feCustomMenuMgr::Adjust(s32 dir) {
             return;
         }
 
-        if (e->binding == EntryBinding_HudStyle) {
+        if (e->binding == EntryBinding_HudStyle || e->binding == EntryBinding_CameraDistance) {
             const s32 v = WrapStepValue(GetBoundValue(*e), e->step, e->lo, e->hi, dir);
             ApplyValue(*e, v);
             return;
@@ -3125,6 +3126,7 @@ s32 feCustomMenuMgr::GetBoundValue(const Entry& e) const {
         case EntryBinding_HudStyle: return (s32)GetHudStyle();
 #if defined(RC_PLATFORM_PSP)
         case EntryBinding_CinemaMode: return PspIsCinemaMode() ? 1 : 0;
+        case EntryBinding_CameraDistance: return PspGetCameraDistance();
 #endif
         case EntryBinding_DisplayResolution: return g_display ? g_display->GetResolutionIndex() : 0;
         case EntryBinding_DisplayScreenMode: return g_display ? g_display->GetScreenMode() : Display::GetDefaultScreenMode();
@@ -3227,6 +3229,9 @@ void feCustomMenuMgr::ApplyValue(const Entry& e, s32 v) {
 #if defined(RC_PLATFORM_PSP)
     else if (e.binding == EntryBinding_CinemaMode) {
         PspSetCinemaMode(v != 0);
+    }
+    else if (e.binding == EntryBinding_CameraDistance) {
+        PspSetCameraDistance(v);
     }
 #endif
     else if (e.binding == EntryBinding_ControllerPromptStyle) {
@@ -5806,6 +5811,26 @@ void feCustomMenuMgr::RenderCurrentPage() {
                                             selected ? selectedColor.GetBlue8() : normalColor.GetBlue8());
                     g_textManager->PrintString(cfgText, valueScreenX, rowScreenY);
                 }
+#if defined(RC_PLATFORM_PSP)
+                else if (item.binding == EntryBinding_CameraDistance) {
+                    static const char* kCameraTokens[kPspCameraDistanceCount] = {
+                        "FE_CAM0", "FE_CAM1", "FE_CAM2", "FE_CAM3",
+                    };
+                    const s32 level = GetBoundValue(item);
+                    const char* cameraText = (level >= 0 && level < kPspCameraDistanceCount)
+                        ? Localize(kCameraTokens[level]) : nullptr;
+
+                    if (!cameraText) {
+                        continue;
+                    }
+
+                    g_textManager->SetAlignment(TextAlign_Right);
+                    g_textManager->SetColor(selected ? selectedColor.GetRed8() : normalColor.GetRed8(),
+                                            selected ? selectedColor.GetGreen8() : normalColor.GetGreen8(),
+                                            selected ? selectedColor.GetBlue8() : normalColor.GetBlue8());
+                    g_textManager->PrintString(cameraText, valueScreenX, rowScreenY);
+                }
+#endif
                 else if (item.binding == EntryBinding_HudStyle) {
                     const char* styleText = Localize(
                         (GetBoundValue(item) == HudStyle_Classic) ? "FE_HUDC" : "FE_HUDM");
