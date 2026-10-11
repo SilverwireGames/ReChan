@@ -104,7 +104,85 @@ static void SubmitShadowFan(const LVector& center, LVector* points, s32 pointCou
     s_modelShadowQueue.push_back(queued);
 }
 
+#if defined(RC_PLATFORM_PSP)
+static void FillShadowFanVertex(ShadowRenderVertex& vertex, const LVector& position, f32 shade) {
+    vertex.x = static_cast<f32>(position.x);
+    vertex.y = static_cast<f32>(position.y);
+    vertex.z = static_cast<f32>(position.z);
+    vertex.r = shade;
+    vertex.g = shade;
+    vertex.b = shade;
+    vertex.u = 0.0f;
+    vertex.v = 0.0f;
+    vertex.tpage = -1.0f;  // no texture page
+    vertex.cba = 0.0f;
+}
+
+// One buffer per flush of a frame: a buffer the GE may still read this frame
+// is never rewritten (the pool restarts at BeginModelShadowQueue).
+static std::vector<pddiPrimBuffer*> s_pspShadowBatchBuffers;
+static u32 s_pspShadowBatchNext = 0;
+
+// All queued fans as one draw. ShadowShow draws each fan alone with the same
+// state (identity world, subtractive blend without depth writes, the same
+// polygon offset); a saturating subtraction does not depend on how the fans
+// are split into draws, and the triangles keep their order.
+static bool DrawShadowFanBatch() {
+    if (!p3d::device || !p3d::context) return false;
+#if MODERN_GRAPHICS
+    if (ShadowCSM::GetQuality() != SHADOW_QUALITY_OFF) return true;
+#endif
+    static std::vector<ShadowRenderVertex> verts;
+    static std::vector<u16> indices;
+    verts.clear();
+    indices.clear();
+    for (const QueuedShadowFan& fan : s_modelShadowQueue) {
+        if (fan.pointCount <= 0 || fan.pointCount > 6) continue;
+        const u16 base = static_cast<u16>(verts.size());
+        ShadowRenderVertex vertex = {};
+        FillShadowFanVertex(vertex, fan.center, 40.0f / 128.0f);
+        verts.push_back(vertex);
+        for (s32 i = 0; i < fan.pointCount; i++) {
+            FillShadowFanVertex(vertex, fan.points[i], 1.0f / 128.0f);
+            verts.push_back(vertex);
+            indices.push_back(base);
+            indices.push_back(static_cast<u16>(base + i + 1));
+            indices.push_back(static_cast<u16>(base + ((i + 1) % fan.pointCount) + 1));
+        }
+    }
+    if (verts.empty()) return true;
+    if (s_pspShadowBatchNext >= s_pspShadowBatchBuffers.size()) {
+        pddiPrimBuffer* created = p3d::device->NewPrimBuffer(pddiPrimBufferDesc(PDDI_PRIM_TRIANGLES,
+            PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO, 7u, 18u));
+        if (!created) return false;
+        s_pspShadowBatchBuffers.push_back(created);
+    }
+    pddiPrimBuffer* buffer = s_pspShadowBatchBuffers[s_pspShadowBatchNext++];
+    buffer->SetVertexData(verts.data(), static_cast<u32>(verts.size()));
+    buffer->SetIndices(indices.data(), static_cast<u32>(indices.size()));
+
+    const Mat4 savedWorld = p3d::context->GetWorldMatrix();
+    Mat4 identity;
+    p3d::context->SetWorldMatrix(identity);
+    p3d::context->EnableZBuffer(true);
+    p3d::context->SetCullMode(PDDI_CULL_NONE);
+    p3d::context->SetBlendMode(PDDI_BLEND_SUBTRACT);
+    p3d::context->SetPolygonOffset(true, 16.0f, 32.0f);
+    p3d::context->DrawPrimBuffer(buffer);
+    p3d::context->SetPolygonOffset(false);
+    p3d::context->SetBlendMode(PDDI_BLEND_NONE);
+    p3d::context->SetWorldMatrix(savedWorld);
+    return true;
+}
+#endif
+
 static void FlushShadowFanQueue() {
+#if defined(RC_PLATFORM_PSP) && !defined(PSP_SHADOW_FAN_DRAWS)
+    if (s_modelShadowQueue.size() > 1u && DrawShadowFanBatch()) {
+        s_modelShadowQueue.clear();
+        return;
+    }
+#endif
     for (QueuedShadowFan& queued : s_modelShadowQueue) {
         ShadowShow(queued.center, queued.points, queued.pointCount);
     }
@@ -398,6 +476,9 @@ void SimpleShadow::Show(void* /*view*/) {
 
 void BeginModelShadowQueue() {
     s_modelShadowQueueActive = true;
+#if defined(RC_PLATFORM_PSP)
+    s_pspShadowBatchNext = 0;
+#endif
 #if defined(RC_PLATFORM_PSP)
     if (s_modelShadowQueue.capacity() < 128u) {
         s_modelShadowQueue.reserve(128u);
