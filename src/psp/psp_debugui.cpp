@@ -24,6 +24,10 @@
 #include "ai/player.h"
 #include "gen/ai.h"
 #endif
+#if defined(PSP_BENCH_HUD_QA)
+#include "extra/cheats.h"
+#include "extra/customhudmgr.h"
+#endif
 
 namespace {
 
@@ -34,7 +38,13 @@ constexpr u32 kWarmupFrames = 300;
 #else
 constexpr u32 kWarmupFrames = 180;
 #endif
+#if defined(PSP_BENCH_HUD_QA)
+// HUD QA: the closing capture lands mid-fight, while the crowd is still
+// being hit (health bars falling, hit counter up).
+constexpr u32 kMeasurementFrames = 240;
+#else
 constexpr u32 kMeasurementFrames = 600;
+#endif
 // Ten 60-frame segments make one complete route fit exactly inside the
 // 600-frame measurement window.
 constexpr u32 kSegmentFrames = 60;
@@ -144,6 +154,11 @@ static void GatherCrowd() {
         ++moved;
     }
     PspPerf::SetScenarioNote(moved);
+#if defined(PSP_BENCH_HUD_QA)
+    // Enemies take damage so the HUD shows real fights; Jackie must not die
+    // or the scenario sequence would leave the benchmark route.
+    SetCheatEnabled(CheatOption::GodMode, true);
+#endif
 }
 #endif
 
@@ -154,9 +169,97 @@ static s32 Lerp(s32 from, s32 to, u32 numerator, u32 denominator) {
 } // namespace
 #endif
 
+#if defined(PSP_MENU_QA)
+#if !defined(PSP_PERF_TELEMETRY)
+#error "PSP_MENU_QA writes its captures through the telemetry build (usb-debug)"
+#endif
+#include "extra/customhudmgr.h"
+#include "extra/fecustommenumgr.h"
+#include "gen/game.h"
+#include "pddi/psp/psprender.h"
+#include <cstdio>
+
+namespace {
+
+// Menu QA: from the title screen, opens menu pages in the classic style
+// (original typeface) and then the modern one, plus the boot autosave
+// notice, writing SHOT_Mnn.BMP once each has settled. Reviewing dialog and
+// menu layout on hardware then needs no manual navigation.
+struct MenuQaShot {
+    MenuPage page;
+    HudStyle style;
+    bool autosavePopup;
+};
+
+static constexpr MenuQaShot kMenuQaShots[] = {
+    { MenuPage_Title, HudStyle_Classic, false },
+    { MenuPage_Options, HudStyle_Classic, false },
+    { MenuPage_Display, HudStyle_Classic, false },
+    { MenuPage_StartGame, HudStyle_Classic, false },
+    { MenuPage_QuitConfirm, HudStyle_Classic, false },
+    { MenuPage_Title, HudStyle_Modern, false },
+    { MenuPage_Options, HudStyle_Modern, false },
+    { MenuPage_Display, HudStyle_Modern, false },
+    { MenuPage_Sound, HudStyle_Modern, false },
+    { MenuPage_Controller, HudStyle_Modern, false },
+    { MenuPage_StartGame, HudStyle_Modern, false },
+    { MenuPage_LoadSlots, HudStyle_Modern, false },
+    { MenuPage_NewGameConfirm, HudStyle_Modern, false },
+    { MenuPage_QuitConfirm, HudStyle_Modern, false },
+    { MenuPage_Frontend, HudStyle_Modern, false },
+    { MenuPage_Cheats, HudStyle_Modern, false },
+    // Last: the popup stays open (it only closes through its own input).
+    { MenuPage_None, HudStyle_Modern, true },
+};
+constexpr u32 kMenuQaShotCount = static_cast<u32>(sizeof(kMenuQaShots) / sizeof(kMenuQaShots[0]));
+// The title intro has settled and the attract timer has not fired yet.
+constexpr u32 kMenuQaStartFrame = 600;
+constexpr u32 kMenuQaHoldFrames = 45;
+
+static u32 s_menuQaFrame = 0;
+static u32 s_menuQaStep = 0;
+
+} // namespace
+#endif
+
 namespace DebugUI {
 
 void Init() {}
+
+#if defined(RC_PLATFORM_PSP)
+void UpdateMenuQa(Game* game) {
+#if defined(PSP_MENU_QA)
+    if (!game || !g_feCustomMenuMgr || s_menuQaStep > kMenuQaShotCount) return;
+    if (game->GetState() != GameState::TitleLoop) return;
+    if (++s_menuQaFrame < kMenuQaStartFrame) return;
+    if ((s_menuQaFrame - kMenuQaStartFrame) % kMenuQaHoldFrames != 0) return;
+
+    if (s_menuQaStep > 0) {
+        char path[24] = {};
+        std::snprintf(path, sizeof(path), "SHOT_M%02lu.BMP", static_cast<unsigned long>(s_menuQaStep));
+        WritePspLastFrame(path);
+    }
+    if (s_menuQaStep < kMenuQaShotCount) {
+        const MenuQaShot& shot = kMenuQaShots[s_menuQaStep];
+        if (GetHudStyle() != shot.style) {
+            SetHudStyle(shot.style);
+        }
+        if (shot.autosavePopup) {
+            g_feCustomMenuMgr->Activate(MenuPage_None);
+            g_feCustomMenuMgr->OpenPopup(PopupKind_AutosaveNotice, 600.0f, []() -> s32 {
+                return static_cast<s32>(GameResult::ResumePlay);
+            });
+        }
+        else {
+            g_feCustomMenuMgr->Activate(shot.page);
+        }
+    }
+    ++s_menuQaStep;
+#else
+    (void)game;
+#endif
+}
+#endif
 
 // Benchmark output is intentionally underhood-only. Drawing a large text HUD
 // changes the GU workload and makes the result less useful for optimization.
@@ -256,6 +359,13 @@ void UpdateBenchmarkCamera(Camera* camera) {
 #if defined(PSP_BENCH_CROWD)
     if (s_routeFrame == kCrowdGatherFrame) {
         GatherCrowd();
+    }
+#endif
+#if defined(PSP_BENCH_HUD_QA)
+    // The temple scenario shows the end-of-level tally panel instead, so the
+    // closing capture covers it too.
+    if (s_routeFrame == kCrowdGatherFrame) {
+        g_customHudMgr.SetDebugTallyPreviewEnabled(kScenarios[s_scenarioIndex].levelId == 6);
     }
 #endif
     if (!s_measurementStarted && s_routeFrame == kWarmupFrames) {
@@ -389,7 +499,7 @@ bool QueueNextBenchmarkScenario(Game* game) {
 
 bool IsEnabled() { return false; }
 bool IsHumanoidDamageDisabled() {
-#if defined(PSP_BENCH_COMBAT)
+#if defined(PSP_BENCH_COMBAT) && !defined(PSP_BENCH_HUD_QA)
     // Nobody dies, so every scenario window stays a fight.
     return true;
 #else

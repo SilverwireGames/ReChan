@@ -395,6 +395,9 @@ int main(int argc, char** argv) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
         DebugUI::BeginBenchmarkFrame(&game);
 #endif
+#if defined(RC_PLATFORM_PSP) && defined(PSP_MENU_QA)
+        DebugUI::UpdateMenuQa(&game);
+#endif
 #if defined(RC_PLATFORM_PSP) && defined(PSP_STAGE_DIAGNOSTIC)
         if (game.GetState() != pspLastObservedState && pspStateTransitionProbe < 24u) {
             Log::Get().LogMessage("[PSP State] transition #%lu state=%d prev=%d",

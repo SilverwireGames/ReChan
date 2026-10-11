@@ -168,6 +168,13 @@ endif
 PSP_FUNC_PROFILE ?= 0
 ifeq ($(PSP_FUNC_PROFILE),1)
 CXXFLAGS += -DPSP_FUNC_PROFILE
+# PSP_PROFILE_SET=hud instruments the HUD/text path instead (customhudmgr,
+# text backend, overlay batching), whose functions are too small to show up
+# in the default set.
+ifeq ($(PSP_PROFILE_SET),hud)
+PSP_PROFILE_SOURCES := src/extra/customhudmgr.cpp src/pc/textbackend.cpp src/pc/textmgr.cpp \
+	src/fe/hud.cpp src/fe/hditem.cpp src/pc/tim.cpp src/extra/customtext.cpp
+endif
 # Character/animation/world/renderer path: ~150 KB of extra code. Instrumenting
 # whole directories (+390 KB) leaves the PSPLink PRX heap short at the peak.
 PSP_PROFILE_SOURCES ?= src/ai/humanoid.cpp src/ai/behaviour.cpp src/ai/player.cpp \

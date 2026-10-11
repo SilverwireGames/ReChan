@@ -12,6 +12,8 @@ namespace DebugUI {
     void OnBenchmarkFrameRecorded();
     bool IsBenchmarkFinished();
     bool QueueNextBenchmarkScenario(Game* game);
+    // PSP_MENU_QA: walks the menu pages from the title screen, capturing each.
+    void UpdateMenuQa(Game* game);
 #endif
     bool IsEnabled();
     bool IsHumanoidDamageDisabled();
