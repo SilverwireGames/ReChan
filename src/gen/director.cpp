@@ -36,7 +36,7 @@
 #include "pc/inputaction.h"
 #include "ai/door.h"
 #include "ai/ladder.h"
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP)
 #include "psp/psp_perf.h"
 #endif
 #include "gen/director_scripts_800d6f14.inc"

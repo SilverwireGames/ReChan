@@ -15,7 +15,7 @@
 #include "pc/inputaction.h"
 #include "p3d/context.h"
 #include "pddi/pddidev.h"
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
+#if defined(RC_PLATFORM_PSP)
 #include "psp/psp_perf.h"
 #endif
 
