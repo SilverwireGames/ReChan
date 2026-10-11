@@ -55,6 +55,14 @@
 // Adds a persistent Cheats page and its optional gameplay changes.
 #define NEW_CHEATS 1
 
+// Credits entry on the title and main menus: a scrolling roll of the ReChan
+// code contributors. PSP Edition only for now.
+#if defined(RC_PLATFORM_PSP)
+#define CREDITS_PAGE (CUSTOM_MENU && 1)
+#else
+#define CREDITS_PAGE 0
+#endif
+
 // Real-texture rendering: adds a second, runtime-switchable rendering path
 // (toggle via the debug UI) that samples a real full-resolution 2D texture
 // per material instead of the shared PSX VRAM/CLUT atlas. Off by default at

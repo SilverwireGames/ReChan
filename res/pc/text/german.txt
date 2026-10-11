@@ -160,6 +160,24 @@ Näher
 [FE_CAM3]
 Sehr nah
 
+[FE_CR_AUTHOR]
+Autor
+
+[FE_CR_CONTRIB]
+Mitwirkende
+
+[FE_CR_AG]
+Schöpfer von ReChan: Reverse Engineering, Neuimplementierung des Spiels und PC-Version.
+
+[FE_CR_GNK]
+Portugiesische Übersetzung, Videountertitel, Laden und Speichern über die Menüs und Korrekturen an der Türkollision.
+
+[FE_CR_LUCK]
+macOS-Version mit dem Metal-Renderer und die PSP-Edition-Portierung.
+
+[FE_CR_THANKS]
+Danke fürs Spielen!
+
 [FE_LGEN]
 Englisch
 

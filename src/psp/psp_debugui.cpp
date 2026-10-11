@@ -189,6 +189,8 @@ struct MenuQaShot {
     MenuPage page;
     HudStyle style;
     bool autosavePopup;
+    // Frames between opening the page and its capture; 0 = kMenuQaHoldFrames.
+    u32 holdFrames = 0;
 };
 
 static constexpr MenuQaShot kMenuQaShots[] = {
@@ -208,6 +210,14 @@ static constexpr MenuQaShot kMenuQaShots[] = {
     { MenuPage_QuitConfirm, HudStyle_Modern, false },
     { MenuPage_Frontend, HudStyle_Modern, false },
     { MenuPage_Cheats, HudStyle_Modern, false },
+#if CREDITS_PAGE
+    // First screen in both styles, then the roll after 5 s and 9 s (the QA
+    // counts 30 Hz ticks).
+    { MenuPage_Credits, HudStyle_Classic, false },
+    { MenuPage_Credits, HudStyle_Modern, false },
+    { MenuPage_Credits, HudStyle_Modern, false, 150 },
+    { MenuPage_Credits, HudStyle_Modern, false, 270 },
+#endif
     // Last: the popup stays open (it only closes through its own input).
     { MenuPage_None, HudStyle_Modern, true },
 };
@@ -218,6 +228,7 @@ constexpr u32 kMenuQaHoldFrames = 45;
 
 static u32 s_menuQaFrame = 0;
 static u32 s_menuQaStep = 0;
+static u32 s_menuQaNextFrame = kMenuQaStartFrame;
 
 } // namespace
 #endif
@@ -231,8 +242,7 @@ void UpdateMenuQa(Game* game) {
 #if defined(PSP_MENU_QA)
     if (!game || !g_feCustomMenuMgr || s_menuQaStep > kMenuQaShotCount) return;
     if (game->GetState() != GameState::TitleLoop) return;
-    if (++s_menuQaFrame < kMenuQaStartFrame) return;
-    if ((s_menuQaFrame - kMenuQaStartFrame) % kMenuQaHoldFrames != 0) return;
+    if (++s_menuQaFrame < s_menuQaNextFrame) return;
 
     if (s_menuQaStep > 0) {
         char path[24] = {};
@@ -253,6 +263,7 @@ void UpdateMenuQa(Game* game) {
         else {
             g_feCustomMenuMgr->Activate(shot.page);
         }
+        s_menuQaNextFrame = s_menuQaFrame + (shot.holdFrames ? shot.holdFrames : kMenuQaHoldFrames);
     }
     ++s_menuQaStep;
 #else

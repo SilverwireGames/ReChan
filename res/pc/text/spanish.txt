@@ -160,6 +160,24 @@ Más cercana
 [FE_CAM3]
 Muy cercana
 
+[FE_CR_AUTHOR]
+Autor
+
+[FE_CR_CONTRIB]
+Colaboradores
+
+[FE_CR_AG]
+Creador de ReChan: ingeniería inversa, reimplementación del juego y versión para PC.
+
+[FE_CR_GNK]
+Traducción al portugués, subtítulos de los vídeos, cargar y guardar desde los menús y correcciones en la colisión de las puertas.
+
+[FE_CR_LUCK]
+Versión para macOS con el renderizador Metal y el port PSP Edition.
+
+[FE_CR_THANKS]
+¡Gracias por jugar!
+
 [FE_LGEN]
 Ingles
 

@@ -7,6 +7,7 @@
 #include "extra/controllerpromptstyle.h"
 #include <functional>
 #include <initializer_list>
+#include <string>
 #include <vector>
 
 #if AUTO_UPDATER
@@ -38,6 +39,9 @@ enum MenuPage : s32 {
 #endif
 #if MOD_LOADER
     MenuPage_Mods,
+#endif
+#if CREDITS_PAGE
+    MenuPage_Credits,
 #endif
     MenuPage_LoadSlots,
     MenuPage_SaveSlots,
@@ -210,6 +214,10 @@ enum EntryEvent : u8 {
 
 #define DEF_CHANGELOG_TEXT_W 0.25f
 #define DEF_CHANGELOG_TEXT_H 0.25f
+
+// Credits page tuning
+#define DEF_CREDITS_WINDOW_W DEF_WINDOW_W
+#define DEF_CREDITS_WINDOW_H 200
 
 // Key Bindings page tuning
 #define DEF_KEYBIND_WINDOW_W 420
@@ -495,6 +503,13 @@ private:
     void RenderSaveSlotsPage(s32 panelX, s32 panelY, s32 panelW, s32 panelH,
                              const xcColour1555& selectedColor) const;
 
+#if CREDITS_PAGE
+    void AddCreditsEntry(PageDef& page);
+    void RebuildCreditsLines();
+    void UpdateCreditsScroll();
+    void RenderCreditsBody(s32 panelX, s32 panelY, s32 panelW, s32 panelH, s32 contentTop) const;
+#endif
+
 #if AUTO_UPDATER
     void RefreshUpdatePageEntries();
     void RenderUpdateProgressBar(s32 panelX, s32 panelW, s32 rowTop) const;
@@ -748,6 +763,21 @@ private:
     // the m_result value Invoke() should resolve to once the close-fade ends.
     std::function<s32()> m_popupPoll;
     s32 m_popupCloseResult = 1;
+
+#if CREDITS_PAGE
+    // One laid-out line of the credits roll: its top from the start of the
+    // roll and its height, in screen pixels.
+    struct CreditsLine {
+        std::string text;
+        u8 style = 0;
+        f32 y = 0.0f;
+        f32 h = 0.0f;
+    };
+    std::vector<CreditsLine> m_creditsLines;
+    f32 m_creditsHeight = 0.0f;     // whole roll, screen pixels
+    f32 m_creditsScrollPx = 0.0f;   // screen pixels scrolled past the viewport top
+    f32 m_creditsHoldSec = 0.0f;    // pause on the first screen before rolling
+#endif
 
 #if AUTO_UPDATER
     AutoUpdater::State m_lastUpdateState = AutoUpdater::State::Idle;

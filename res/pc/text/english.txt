@@ -160,6 +160,24 @@ Closer
 [FE_CAM3]
 Closest
 
+[FE_CR_AUTHOR]
+Author
+
+[FE_CR_CONTRIB]
+Contributors
+
+[FE_CR_AG]
+Creator of ReChan: reverse engineering, game reimplementation and the PC version.
+
+[FE_CR_GNK]
+Portuguese translation, video subtitles, loading and saving from the menus and door collision fixes.
+
+[FE_CR_LUCK]
+macOS version with the Metal renderer and the PSP Edition port.
+
+[FE_CR_THANKS]
+Thanks for playing!
+
 [FE_LGEN]
 English
 

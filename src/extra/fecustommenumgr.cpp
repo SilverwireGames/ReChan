@@ -174,6 +174,18 @@ static constexpr f32 DEF_CONTROLLER_ACTION_SCALE = 0.2f;
 static constexpr bool DEF_WINDOW_TITLE_OUTLINE = false;
 static constexpr f32 DEF_POPUP_WIDTH_SCALE = 1.0f;
 #endif
+#if CREDITS_PAGE
+// Credits roll: the title and headings use the menu face; names, GitHub
+// handles and contributions the Legal (Roboto) face, which also has the "_"
+// of "_AG" that the menu faces lack.
+#if defined(RC_PLATFORM_PSP)
+static constexpr f32 DEF_CREDITS_NAME_SCALE = MENU_TEXT_PX(14);
+static constexpr f32 DEF_CREDITS_SMALL_SCALE = MENU_TEXT_PX(12);
+#else
+static constexpr f32 DEF_CREDITS_NAME_SCALE = 0.3f;
+static constexpr f32 DEF_CREDITS_SMALL_SCALE = 0.25f;
+#endif
+#endif
 static constexpr f32 DEF_REDEFINE_KEY_TEXT_SCALE = 0.3f;
 static constexpr f32 DEF_MENU_DRAGON_COUNT_SCALE = 0.5f;
 
@@ -685,6 +697,9 @@ void feCustomMenuMgr::BuildPages() {
             Button("FE_QTG", EntryEvent_GoPage, MenuPage_QuitConfirm),
                    });
     }
+#if CREDITS_PAGE
+    AddCreditsEntry(feTitle);
+#endif
 
     auto& feMain = AddPage(MenuPage_Frontend, "FE_MNM", "Menu_Title", MenuPage_None, 0, false, -1, -1);
     SetEntries(feMain, {
@@ -695,6 +710,14 @@ void feCustomMenuMgr::BuildPages() {
         Button("FE_OPT", EntryEvent_GoPage, MenuPage_Options),
         Button("FE_QTG", EntryEvent_GoPage, MenuPage_QuitConfirm),
                });
+#if CREDITS_PAGE
+    AddCreditsEntry(feMain);
+
+    // Fully custom page: the roll is hand-drawn in RenderCreditsBody and its
+    // input handled in its own Invoke() block, so it carries no entries.
+    AddPage(MenuPage_Credits, "FE_CRE", "Menu_GameOption", MenuPage_Title, 0, false,
+            DEF_CREDITS_WINDOW_W, DEF_CREDITS_WINDOW_H);
+#endif
 
     auto& feStart = AddPage(MenuPage_StartGame, "FE_STG", "Menu_GameOption", MenuPage_Frontend, 1, false, -1, -1);
     SetEntries(feStart, {
@@ -1479,6 +1502,20 @@ s32 feCustomMenuMgr::Invoke() {
         }
         return m_result;
     }
+
+#if CREDITS_PAGE
+    // Credits: a self-running roll with no cursor; Up/Down steer it, Back/Confirm leave.
+    if (m_currPage == MenuPage_Credits) {
+        if (!g_actionInput)
+            return m_result;
+        UpdateCreditsScroll();
+        if (g_actionInput->JustPressed(ACTION_MENU_BACK) || g_actionInput->JustPressed(ACTION_MENU_CONFIRM)) {
+            PlaySound(FE_SND_MENU_5);
+            GoBack();
+        }
+        return m_result;
+    }
+#endif
 
 #if AUTO_UPDATER
     // Changelog: read-only scrolling text, no cursor/selection - handle Up/Down/Back directly.
@@ -2447,7 +2484,16 @@ void feCustomMenuMgr::SetPage(MenuPage page) {
                 Button("FE_QTG", EntryEvent_GoPage, MenuPage_QuitConfirm),
                        });
         }
+#if CREDITS_PAGE
+        AddCreditsEntry(m_pages[MenuPage_Title]);
+#endif
     }
+
+#if CREDITS_PAGE
+    if (m_currPage == MenuPage_Credits) {
+        RebuildCreditsLines();
+    }
+#endif
 
 #if MOD_LOADER
     if (m_currPage == MenuPage_Mods && m_prevPage != MenuPage_Mods) {
@@ -3598,6 +3644,235 @@ void feCustomMenuMgr::RenderChangelogBody(s32 panelX, s32 panelY, s32 panelW, s3
 
     DrawScrollBar((f32)(panelX + panelW - 12), (f32)(contentTop + DEF_CONTENT_PAD),
                   (f32)(maxVisibleLines * 8), totalLines, maxVisibleLines, m_changelogScrollVisual);
+}
+#endif
+
+#if CREDITS_PAGE
+namespace {
+
+enum CreditsStyle : u8 {
+    CreditsStyle_Title,
+    CreditsStyle_Heading,
+    CreditsStyle_Name,
+    CreditsStyle_Handle,
+    CreditsStyle_Role,
+};
+
+struct CreditsPerson {
+    const char* name;
+    const char* handle;
+    const char* roleToken;
+    const char* roleFallback;
+};
+
+// ReChan code contributors, from the git history and GitHub pull requests.
+static const CreditsPerson kCreditsAuthor[] = {
+    { "_AG", "@gennariarmando", "FE_CR_AG",
+      "Creator of ReChan: reverse engineering, game reimplementation and the PC version." },
+};
+
+static const CreditsPerson kCreditsContributors[] = {
+    { "GNK", "@GABRIELNNK", "FE_CR_GNK",
+      "Portuguese translation, video subtitles, loading and saving from the menus and door collision fixes." },
+    { "Lucas Soares", "@luckvice", "FE_CR_LUCK",
+      "macOS version with the Metal renderer and the PSP Edition port." },
+};
+
+// Roll speed in screen pixels per second: at 60 fps the text moves one pixel
+// every other frame, an even cadence. Up/Down steer it at the fast speed.
+static constexpr f32 kCreditsScrollPxPerSec = 30.0f;
+static constexpr f32 kCreditsFastPxPerSec = 150.0f;
+// The first screen holds still this long before the roll starts.
+static constexpr f32 kCreditsHoldSec = 2.0f;
+static constexpr f32 kCreditsTopPadPx = 8.0f;
+// Lines fade in and out over this distance from the viewport edges.
+static constexpr f32 kCreditsFadePx = 16.0f;
+
+// Sets the text state for one credits line style; outColor gets its colour.
+static bool ApplyCreditsStyle(u8 style, TextColor* outColor) {
+    const bool menuFace = style == CreditsStyle_Title || style == CreditsStyle_Heading;
+    if (!g_textManager || !g_textManager->SetFontByName(menuFace ? DEF_MENU_FONT_NAME : "Legal")) {
+        return false;
+    }
+    f32 scale = DEF_MENU_TEXT_SCALE;
+    TextColor color = {};
+    switch (style) {
+        case CreditsStyle_Title: color = { 255, 255, 255, 255 }; break;
+        case CreditsStyle_Heading: color = { 255, 200, 40, 255 }; break;
+        case CreditsStyle_Name: color = { 245, 245, 245, 255 }; scale = DEF_CREDITS_NAME_SCALE; break;
+        case CreditsStyle_Handle: color = { 130, 200, 255, 255 }; scale = DEF_CREDITS_SMALL_SCALE; break;
+        default: color = { 205, 205, 205, 255 }; scale = DEF_CREDITS_SMALL_SCALE; break;
+    }
+    g_textManager->SetScale(SCREEN_SCALE_Y(scale), SCREEN_SCALE_Y(scale));
+    g_textManager->SetAlignment(TextAlign_Center);
+    g_textManager->SetWrapWidth(0.0f);
+    g_textManager->SetLineSpacing(0);
+    g_textManager->SetPromptsEnabled(false);
+    g_textManager->SetShadow(false);
+    // Outlined menu face draws from the baked-outline strikes; the Legal
+    // strikes are plain.
+    g_textManager->SetOutline(menuFace);
+    if (outColor) {
+        *outColor = color;
+    }
+    return true;
+}
+
+static f32 CreditsViewportTop(s32 contentTop) {
+    return (f32)(contentTop + DEF_CONTENT_PAD);
+}
+
+static f32 CreditsViewportHeight(s32 panelY, s32 panelH, s32 contentTop) {
+    return (f32)(panelY + panelH - DEF_BOTTOM_BAR_H - DEF_CONTENT_BOTTOM_PAD) - CreditsViewportTop(contentTop);
+}
+
+} // namespace
+
+// Credits goes just above "Quit Game", the last entry of the title and main menus.
+void feCustomMenuMgr::AddCreditsEntry(PageDef& page) {
+    if (page.numEntries <= 0 || page.numEntries >= MAX_ENTRIES_PER_MENU) {
+        return;
+    }
+    const s32 at = page.numEntries - 1;
+    for (s32 i = page.numEntries; i > at; --i) {
+        page.entries[i] = page.entries[i - 1];
+    }
+    page.entries[at] = Button("FE_CRE", EntryEvent_GoPage, MenuPage_Credits);
+    page.numEntries++;
+    if (page.autoFrameH) {
+        page.frameH = CalcAutoFrameHeight(page.numEntries, CalcPageExtraHeight(page));
+    }
+}
+
+void feCustomMenuMgr::RebuildCreditsLines() {
+    m_creditsLines.clear();
+    m_creditsHeight = 0.0f;
+    m_creditsScrollPx = -kCreditsTopPadPx;
+    m_creditsHoldSec = kCreditsHoldSec;
+
+    const f32 maxWidth = SCREEN_SCALE_X((f32)(m_pages[MenuPage_Credits].frameW - DEF_LABEL_X_PAD * 2));
+    f32 y = 0.0f;
+    // Appends text in one style, word-wrapped to the window, gapPx below the
+    // previous line.
+    auto add = [&](u8 style, const char* text, f32 gapPx) {
+        y += gapPx;
+        if (!text || !ApplyCreditsStyle(style, nullptr)) {
+            return;
+        }
+        const f32 lineH = g_textManager->MeasureString("Ag").height;
+        const std::string paragraph = text;
+        std::string line;
+        size_t start = 0;
+        while (start <= paragraph.size()) {
+            size_t end = paragraph.find(' ', start);
+            if (end == std::string::npos) end = paragraph.size();
+            const std::string word = paragraph.substr(start, end - start);
+            const std::string candidate = line.empty() ? word : line + " " + word;
+            if (!line.empty() && g_textManager->MeasureString(candidate.c_str()).width > maxWidth) {
+                m_creditsLines.push_back({ line, style, y, lineH });
+                y += lineH;
+                line = word;
+            }
+            else {
+                line = candidate;
+            }
+            start = end + 1;
+        }
+        if (!line.empty()) {
+            m_creditsLines.push_back({ line, style, y, lineH });
+            y += lineH;
+        }
+    };
+    auto localized = [this](const char* token, const char* fallback) {
+        const char* text = Localize(token);
+        return text ? text : fallback;
+    };
+    auto addSection = [&](const char* headingToken, const char* headingFallback,
+                          const CreditsPerson* people, size_t count) {
+        add(CreditsStyle_Heading, localized(headingToken, headingFallback), 22.0f);
+        for (size_t i = 0; i < count; ++i) {
+            add(CreditsStyle_Name, people[i].name, (i == 0) ? 6.0f : 14.0f);
+            add(CreditsStyle_Handle, people[i].handle, 0.0f);
+            add(CreditsStyle_Role, localized(people[i].roleToken, people[i].roleFallback), 2.0f);
+        }
+    };
+
+    add(CreditsStyle_Title, "ReChan", 0.0f);
+    add(CreditsStyle_Role, "Jackie Chan Stuntmaster - PSP Edition", 2.0f);
+    addSection("FE_CR_AUTHOR", "Author", kCreditsAuthor, sizeof(kCreditsAuthor) / sizeof(kCreditsAuthor[0]));
+    addSection("FE_CR_CONTRIB", "Contributors", kCreditsContributors,
+               sizeof(kCreditsContributors) / sizeof(kCreditsContributors[0]));
+    add(CreditsStyle_Heading, localized("FE_CR_THANKS", "Thanks for playing!"), 26.0f);
+    add(CreditsStyle_Role, "github.com/SilverwireGames/ReChan", 4.0f);
+    m_creditsHeight = y;
+}
+
+void feCustomMenuMgr::UpdateCreditsScroll() {
+    const f32 dt = g_time ? g_time->GetDeltaTime() : (1.0f / 60.0f);
+    const bool up = g_actionInput->IsHeld(ACTION_MENU_UP);
+    const bool down = g_actionInput->IsHeld(ACTION_MENU_DOWN);
+    if (up || down) {
+        m_creditsHoldSec = 0.0f;
+    }
+    if (m_creditsHoldSec > 0.0f) {
+        m_creditsHoldSec -= dt;
+        return;
+    }
+
+    const f32 speed = down ? kCreditsFastPxPerSec : (up ? -kCreditsFastPxPerSec : kCreditsScrollPxPerSec);
+    const f32 previous = m_creditsScrollPx;
+    m_creditsScrollPx += speed * dt;
+
+    // Up stops at the first screen; past the end the roll enters again from
+    // the bottom.
+    const f32 start = -kCreditsTopPadPx;
+    if (speed < 0.0f && m_creditsScrollPx < start) {
+        m_creditsScrollPx = (previous < start) ? previous : start;
+    }
+    if (m_creditsScrollPx > m_creditsHeight) {
+        const PageDef& page = m_pages[MenuPage_Credits];
+        const s32 panelY = DEF_WINDOW_CENTER_Y - page.frameH / 2;
+        const s32 contentTop = panelY + DEF_TITLE_BAR_H + DEF_CONTENT_TOP_PAD;
+        m_creditsScrollPx = -SCREEN_SCALE_Y(CreditsViewportHeight(panelY, page.frameH, contentTop));
+    }
+}
+
+void feCustomMenuMgr::RenderCreditsBody(s32 panelX, s32 panelY, s32 panelW, s32 panelH, s32 contentTop) const {
+    (void)panelX;
+    (void)panelW;
+    const f32 viewTopLayout = CreditsViewportTop(contentTop);
+    const f32 viewHLayout = CreditsViewportHeight(panelY, panelH, contentTop);
+    const f32 viewTop = SCREEN_SCALE_Y(viewTopLayout);
+    const f32 viewBottom = SCREEN_SCALE_Y(viewTopLayout + viewHLayout);
+    // Whole pixels: every line moves together, one pixel at a time.
+    const f32 scroll = std::floor(m_creditsScrollPx);
+    const f32 centerX = SCALE_AND_CENTER_X((f32)DEF_WINDOW_CENTER_X);
+
+    SetVerticalScissorPSX(viewTopLayout, viewHLayout);
+    s32 activeStyle = -1;
+    TextColor color = {};
+    for (const CreditsLine& line : m_creditsLines) {
+        const f32 top = std::floor(viewTop + line.y - scroll + 0.5f);
+        if (top >= viewBottom) {
+            break;
+        }
+        if (top + line.h <= viewTop) {
+            continue;
+        }
+        if (line.style != activeStyle) {
+            if (!ApplyCreditsStyle(line.style, &color)) {
+                continue;
+            }
+            activeStyle = line.style;
+        }
+        const f32 center = top + line.h * 0.5f;
+        f32 fade = std::min(center - viewTop, viewBottom - center) / kCreditsFadePx;
+        fade = std::max(0.0f, std::min(1.0f, fade));
+        g_textManager->SetColor(color.r, color.g, color.b, (u8)(255.0f * fade));
+        g_textManager->PrintString(line.text.c_str(), centerX, top);
+    }
+    ScreenDraw::SetScissor(0, 0, (s32)(SCREEN_WIDTH + 0.5f), (s32)(SCREEN_HEIGHT + 0.5f));
+    g_textManager->SetPromptsEnabled(true);
 }
 #endif
 
@@ -5601,6 +5876,11 @@ void feCustomMenuMgr::RenderCurrentPage() {
         case MenuPage_Location:
             RenderLocationPage();
             break;
+#if CREDITS_PAGE
+        case MenuPage_Credits:
+            RenderCreditsBody(panelX, panelY, panelW, panelH, contentTop);
+            break;
+#endif
 #if AUTO_UPDATER
         case MenuPage_Update:
             if (g_autoUpdater && g_autoUpdater->GetState() == AutoUpdater::State::Downloading) {
@@ -6019,6 +6299,12 @@ void feCustomMenuMgr::RenderCurrentPage() {
             if (m_cursor != 0) {
                 pushPrompt("FE_HPTGL", "<ACT:MENU_CONFIRM> Toggle");
             }
+            pushPrompt("FE_HPBCK", "<ACT:MENU_BACK> Back");
+        }
+#endif
+#if CREDITS_PAGE
+        else if (m_currPage == MenuPage_Credits) {
+            pushPrompt("FE_HPSCR", "<ACT:MENU_UP>/<ACT:MENU_DOWN> Scroll");
             pushPrompt("FE_HPBCK", "<ACT:MENU_BACK> Back");
         }
 #endif
