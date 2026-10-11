@@ -284,6 +284,7 @@ namespace PspPerf {
 void WriteReport();
 u32 g_rendererCounters[static_cast<u32>(RendererCounter::Count)] = {};
 
+#if !defined(PSP_PERF_FRAME_ONLY)
 ScopeTimer::ScopeTimer(RendererCounter counter)
     : counter(counter), start(sceKernelGetSystemTimeLow()) {}
 
@@ -292,6 +293,7 @@ void ScopeTimer::Stop() {
     CountRenderer(counter, sceKernelGetSystemTimeLow() - start);
     active = false;
 }
+#endif
 
 u32 HandlerClock() {
     return sceKernelGetSystemTimeLow();

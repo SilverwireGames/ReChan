@@ -113,10 +113,12 @@ inline void RecordHandler(const void*, u32) {}
 #endif
 
 // Inclusive main-thread scopes; nested categories must not be summed.
-// Compiles away in release/desktop builds and never performs I/O.
+// Compiles away in release/desktop builds and never performs I/O. Each one
+// reads the system clock twice (a syscall, ~0.57 us each on the PSP-3000);
+// PSP_PERF_FRAME_ONLY drops them to measure a frame without that overhead.
 class ScopeTimer {
 public:
-#if defined(PSP_PERF_TELEMETRY)
+#if defined(PSP_PERF_TELEMETRY) && !defined(PSP_PERF_FRAME_ONLY)
     explicit ScopeTimer(RendererCounter counter);
     ~ScopeTimer() { Stop(); }
     void Stop();
