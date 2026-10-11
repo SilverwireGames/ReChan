@@ -1191,6 +1191,20 @@ bool Game::gsIntroState(Game* game) {
 bool Game::gsTitleState(Game* game) {
     MARKFUNCTION(0x8002C474); // gsTitleState
 
+#if defined(RC_PLATFORM_PSP) && CUSTOM_MENU && !defined(PSP_AUTO_START_PHASE1)
+    // The custom menu skips the original intro and with it the boot logos.
+    // The PSP plays them once, after the first load and before the title
+    // screen, as the original did (Dolby is not skippable there either).
+    // Benchmark builds go straight to the title.
+    static bool s_bootLogosPlayed = false;
+    if (!s_bootLogosPlayed) {
+        s_bootLogosPlayed = true;
+        game->PlayMovie("Mdwy320m.str", 1, 0);
+        game->PlayMovie("radi.str", 1, 0);
+        game->PlayMovie("dolby.str", 0, 0);
+    }
+#endif
+
     // PSX: FreeXconFE, InitXconFSImage
     FreeXconFE();
     InitXconFSImage();
