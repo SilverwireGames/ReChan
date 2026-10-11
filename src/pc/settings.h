@@ -19,6 +19,11 @@ void PspSetCinemaMode(bool enabled);
 static constexpr s32 kPspCameraDistanceCount = 4;
 s32 PspGetCameraDistance();
 void PspSetCameraDistance(s32 level);
+
+// First boot: no language and HUD style chosen yet. The intro shows the
+// choice once; finishing it saves the settings with the setup mark.
+bool PspIsFirstBootSetupPending();
+void PspFinishFirstBootSetup();
 #endif
 
 static constexpr const char* SETTINGS_PATH = apppaths::kSettingsPath;

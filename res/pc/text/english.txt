@@ -178,6 +178,15 @@ macOS version with the Metal renderer and the PSP Edition port.
 [FE_CR_THANKS]
 Thanks for playing!
 
+[FE_FBT]
+Welcome
+
+[FE_FBHINT]
+You can change these later in Options > Display Settings.
+
+[FE_FBOK]
+Confirm
+
 [FE_LGEN]
 English
 

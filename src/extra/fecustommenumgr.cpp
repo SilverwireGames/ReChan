@@ -719,6 +719,18 @@ void feCustomMenuMgr::BuildPages() {
             DEF_CREDITS_WINDOW_W, DEF_CREDITS_WINDOW_H);
 #endif
 
+#if FIRST_BOOT_SETUP
+    // First boot (Game::gsIntroState): language and HUD style. Both apply at
+    // once, so the page itself previews them; Confirm resolves it (result 8).
+    auto& feFirstBoot = AddPage(MenuPage_FirstBoot, "FE_FBT", "Menu_GameOption", MenuPage_None, 0, false, -1, -1);
+    SetEntries(feFirstBoot, {
+        List("FE_LNG", EntryBinding_Language, 1, 0, (s32)NumLanguages - 1),
+        List("FE_HUDS", EntryBinding_HudStyle, 1, 0, (s32)HudStyle_Count - 1),
+        Info("FE_FBHINT"),
+        Button("FE_FBOK", EntryEvent_Resume),
+               });
+#endif
+
     auto& feStart = AddPage(MenuPage_StartGame, "FE_STG", "Menu_GameOption", MenuPage_Frontend, 1, false, -1, -1);
     SetEntries(feStart, {
         Button("FE_NWG", EntryEvent_NewGame),
@@ -3022,6 +3034,12 @@ void feCustomMenuMgr::GoBack() {
     if (m_currPage == MenuPage_AssetMissing) {
         return;
     }
+#if FIRST_BOOT_SETUP
+    // The first-boot choice only ends with Confirm.
+    if (m_currPage == MenuPage_FirstBoot) {
+        return;
+    }
+#endif
 
     if (m_currPage == MenuPage::MenuPage_Frontend || m_currPage == MenuPage::MenuPage_Pause || m_currPage == MenuPage::MenuPage_Title) {
         Deactivate();
@@ -6341,6 +6359,9 @@ void feCustomMenuMgr::RenderCurrentPage() {
                 }
             }
 
+#if FIRST_BOOT_SETUP
+            if (m_currPage != MenuPage_FirstBoot)
+#endif
             pushPrompt("FE_HPBCK", "<ACT:MENU_BACK> Back");
         }
 

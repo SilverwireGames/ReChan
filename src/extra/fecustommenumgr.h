@@ -43,6 +43,9 @@ enum MenuPage : s32 {
 #if CREDITS_PAGE
     MenuPage_Credits,
 #endif
+#if FIRST_BOOT_SETUP
+    MenuPage_FirstBoot,
+#endif
     MenuPage_LoadSlots,
     MenuPage_SaveSlots,
     MenuPage_DeleteSlots,

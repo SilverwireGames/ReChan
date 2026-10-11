@@ -1076,6 +1076,28 @@ bool Game::gsIntroState(Game* game) {
     game->assetCheckDone = true;
 #endif
 
+#if FIRST_BOOT_SETUP && !defined(PSP_AUTO_START_PHASE1) && !defined(PSP_MENU_QA) && !defined(PSP_MOVIE_QA)
+    // First boot: language and HUD style, after the legal notice and before
+    // the autosave warning, which then shows in the chosen language.
+    // Unattended benchmark and QA builds go on without it.
+    if (PspIsFirstBootSetupPending() && g_feCustomMenuMgr) {
+        static bool s_firstBootOpened = false;
+        if (!s_firstBootOpened) {
+            s_firstBootOpened = true;
+            g_feCustomMenuMgr->Activate(MenuPage_FirstBoot);
+        }
+        const s32 menuResult = g_feCustomMenuMgr->Invoke();
+        g_display->BeginFrame();
+        g_feCustomMenuMgr->Render();
+        g_display->EndFrame();
+        if (menuResult == 8) {
+            g_feCustomMenuMgr->Deactivate();
+            PspFinishFirstBootSetup();
+        }
+        return true;
+    }
+#endif
+
 #if CUSTOM_MENU
     if (!game->autosaveNoticeShown) {
         game->autosaveNoticeShown = true;

@@ -178,6 +178,15 @@ Version macOS avec le moteur de rendu Metal et le portage PSP Edition.
 [FE_CR_THANKS]
 Merci d'avoir joué !
 
+[FE_FBT]
+Bienvenue
+
+[FE_FBHINT]
+Vous pourrez les modifier plus tard dans Options > Parametres Affichage.
+
+[FE_FBOK]
+Valider
+
 [FE_LGEN]
 Anglais
 

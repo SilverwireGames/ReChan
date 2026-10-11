@@ -63,6 +63,14 @@
 #define CREDITS_PAGE 0
 #endif
 
+// First boot: choose the language and the HUD style (Modern/Classic) after
+// the legal notice. PSP Edition only; its settings file keeps the choice.
+#if defined(RC_PLATFORM_PSP)
+#define FIRST_BOOT_SETUP (CUSTOM_MENU && 1)
+#else
+#define FIRST_BOOT_SETUP 0
+#endif
+
 // Real-texture rendering: adds a second, runtime-switchable rendering path
 // (toggle via the debug UI) that samples a real full-resolution 2D texture
 // per material instead of the shared PSX VRAM/CLUT atlas. Off by default at

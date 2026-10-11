@@ -204,7 +204,7 @@ endif
 # the Allegrex vector unit. The renderer already avoids redundant uploads, so
 # this changes only the implementation of the remaining matrix operations;
 # the PDDI math contract and visible vertex data stay unchanged.
-LIBS = -lstdc++ -lpspgum_vfpu -lpspvfpu -lpspgu -lpspaudiolib -lpspaudio -lpspaudio_driver -lpsppower -lm
+LIBS = -lstdc++ -lpspgum_vfpu -lpspvfpu -lpspgu -lpspaudiolib -lpspaudio -lpspaudio_driver -lpsppower -lpsputility -lm
 
 EXTRA_CLEAN = $(OBJS)
 

@@ -214,6 +214,10 @@ static constexpr MenuQaShot kMenuQaShots[] = {
     { MenuPage_QuitConfirm, HudStyle_Modern, false },
     { MenuPage_Frontend, HudStyle_Modern, false },
     { MenuPage_Cheats, HudStyle_Modern, false },
+#if FIRST_BOOT_SETUP
+    { MenuPage_FirstBoot, HudStyle_Classic, false },
+    { MenuPage_FirstBoot, HudStyle_Modern, false },
+#endif
 #if CREDITS_PAGE
     // First screen in both styles, then the roll after 5 s and 9 s (the QA
     // counts 30 Hz ticks).
