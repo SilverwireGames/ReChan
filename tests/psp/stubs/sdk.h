@@ -115,6 +115,10 @@ inline void Queue(uintptr_t offset) {
 }
 }
 struct ScePspFMatrix4 { float m[16]; };
+struct ScePspIVector4 { int x, y, z, w; };
+struct ScePspIMatrix4 { ScePspIVector4 x, y, z, w; };
+namespace FakeGe { inline int ditherLoads = 0; }
+inline void sceGuSetDither(const ScePspIMatrix4*) { ++FakeGe::ditherLoads; }
 struct SceCtrlData { unsigned int Buttons; unsigned char Lx, Ly; };
 inline void* memalign(size_t alignment, size_t bytes) {
     void* ptr = nullptr;

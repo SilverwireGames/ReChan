@@ -1933,6 +1933,12 @@ void pspContext::BeginFrame() {
     sceGuStart(GU_DIRECT, g_displayListStorage.words);
 #if defined(PSP_TRIPLE_BUFFER)
     BindDrawFramebuffer();
+    // The PSX dither matrix (the PSPSDK's default, which only the module's
+    // first sceGuStart loads): reloaded every frame so a lost GE register
+    // cannot leave the 3D draws undithered (seen once for a whole run).
+    static ScePspIMatrix4 psxDither = {
+        {-4, 0, -3, 1}, {2, -2, 3, -1}, {-3, 1, -4, 0}, {3, -1, 2, -2}};
+    sceGuSetDither(&psxDither);
 #endif
     listOpen = true;
     Setup3DState();
