@@ -1438,8 +1438,11 @@ bool Game::gsTitleLoopState(Game* game) {
     }
     g_display->EndFrame();
 
-#if !CUSTOM_MENU
+#if !CUSTOM_MENU || (defined(RC_PLATFORM_PSP) && !defined(PSP_AUTO_START_PHASE1) && !defined(PSP_MENU_QA) && !defined(PSP_MOVIE_QA))
     // PSX: attract mode timer check (gp+128 - gp+124) >= 900
+    // The PSP keeps the original's attract demo with the custom menu: 30 s
+    // idle on the "press any button" screen plays demo.str, then the title
+    // returns. Unattended benchmark and QA builds stay on the title.
     s32 elapsed = game->titleIdleTimer - game->titleIdleBase;
     if (elapsed >= 900) {
         rsEvent(RS_STOP_MUSIC, 0, 0, 0);
