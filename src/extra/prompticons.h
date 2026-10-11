@@ -9,6 +9,7 @@
 #include "pc/inputaction.h"
 #include "pc/tim.h"
 #include "p3d/texture.h"
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -32,6 +33,13 @@ public:
         PromptRect rect;
         bool isGamepad = false;
         char fallback[24] = {};
+#if defined(RC_PLATFORM_PSP)
+        // Atlas column of a PSP glyph (face button or D-pad), or -1.
+        s8 pspGlyph = -1;
+        // START/SELECT/L/R: the text renderer draws the fallback name on a
+        // dark badge (see DrawPspBadge).
+        bool pspBadge = false;
+#endif
 
         bool HasIcon() const {
             return tex && texW > 0 && texH > 0 && rect.IsValid();
@@ -151,9 +159,26 @@ public:
 
 #if defined(RC_PLATFORM_PSP)
         // The PSP has no keyboard and no Xbox sheet. Its pad is not always reported
-        // as "active", so never fall back to keyboard glyphs: use PSP text labels.
+        // as "active", so never fall back to keyboard glyphs: face buttons and the
+        // D-pad come from the PSP prompt atlas, START/SELECT/L/R are text badges,
+        // and plain PSP names remain if the atlas is missing.
         const s32 pspButton = g_actionInput ? g_actionInput->GetGamepadButtonBinding(action) : GpBtn::NONE;
         CopyText(out.fallback, (s32)sizeof(out.fallback), PspButtonToLabel(pspButton));
+        SheetState& pspSheet = GetPspPromptSheet();
+        if (!EnsurePspPromptSheetLoaded(pspSheet)) {
+            return out.HasFallback();
+        }
+        const s8 glyph = PspButtonToGlyph(pspButton);
+        if (glyph >= 0) {
+            out.tex = pspSheet.tex;
+            out.texW = pspSheet.width;
+            out.texH = pspSheet.height;
+            out.rect = PspGlyphRect(glyph, kPspPromptRowCount - 1);
+            out.isGamepad = true;
+            out.pspGlyph = glyph;
+            return true;
+        }
+        out.pspBadge = out.HasFallback();
         return out.HasFallback();
 #endif
 
@@ -271,6 +296,11 @@ public:
         if (!prompt.HasIcon() || drawHeight <= 0.0f) {
             return 0.0f;
         }
+#if defined(RC_PLATFORM_PSP)
+        if (prompt.pspGlyph >= 0) {
+            return PspGlyphSize(drawHeight);
+        }
+#endif
         const f32 effectiveHeight = GetDrawHeight(prompt, drawHeight);
         return effectiveHeight * ((f32)prompt.rect.w / (f32)prompt.rect.h);
     }
@@ -279,6 +309,15 @@ public:
         if (!prompt.HasIcon() || drawHeight <= 0.0f) {
             return;
         }
+#if defined(RC_PLATFORM_PSP)
+        if (prompt.pspGlyph >= 0) {
+            const s32 row = PspPromptRow(drawHeight);
+            const f32 size = PspGlyphSize(drawHeight);
+            DrawPspAtlasQuad(PspGlyphRect(prompt.pspGlyph, row), 0.0f, 1.0f,
+                PspGlyphLeft(x, drawHeight), PspGlyphTop(y, drawHeight), size, size, alpha);
+            return;
+        }
+#endif
 
         const f32 effectiveHeight = GetDrawHeight(prompt, drawHeight);
         const f32 drawWidth = GetDrawWidth(prompt, drawHeight);
@@ -309,6 +348,41 @@ public:
                              255, 255, 255, alpha);
     }
 
+#if defined(RC_PLATFORM_PSP)
+    // Width of a START/SELECT/L/R badge around a label textWidth pixels wide:
+    // the label plus side padding, never narrower than the badge is tall.
+    static f32 GetPspBadgeWidth(f32 textWidth, f32 drawHeight) {
+        const f32 size = PspBadgeSize(drawHeight);
+        f32 width = textWidth + 2.0f * std::floor(size * 0.3f + 0.5f);
+        if (width < size) {
+            width = size;
+        }
+        return PspPromptIsNative(drawHeight) ? std::floor(width + 0.5f) : width;
+    }
+
+    // Dark rimmed badge behind a START/SELECT/L/R label, one pixel taller
+    // than the button glyphs on each side so the rim clears the label: the
+    // atlas badge disc's left half, its centre column stretched, then its
+    // right half.
+    static void DrawPspBadge(f32 x, f32 y, f32 width, f32 drawHeight, u8 alpha) {
+        if (drawHeight <= 0.0f || !EnsurePspPromptSheetLoaded(GetPspPromptSheet())) {
+            return;
+        }
+        const PromptRect disc = PspBadgeRect(PspPromptRow(drawHeight));
+        const f32 size = PspBadgeSize(drawHeight);
+        const f32 half = size * 0.5f;
+        const f32 left = PspGlyphLeft(x, drawHeight);
+        const f32 top = PspGlyphTop(y, drawHeight) - 1.0f;
+        const f32 centreTexel = 0.5f / (f32)disc.w;
+        DrawPspAtlasQuad(disc, 0.0f, 0.5f, left, top, half, size, alpha);
+        if (width > size) {
+            DrawPspAtlasQuad(disc, 0.5f - centreTexel, 0.5f + centreTexel,
+                left + half, top, width - size, size, alpha);
+        }
+        DrawPspAtlasQuad(disc, 0.5f, 1.0f, left + width - half, top, half, size, alpha);
+    }
+#endif
+
 private:
     struct SheetState {
         tTexture* tex = nullptr;
@@ -316,6 +390,132 @@ private:
         s32 height = 0;
         bool tried = false;
     };
+
+#if defined(RC_PLATFORM_PSP)
+    // psp_prompts.png, built by scripts/make_psp_prompt_atlas.py: one row of
+    // glyphs per native size, columns kPspPromptColumnStep pixels apart, then
+    // one badge disc per row, two pixels taller than the row's glyphs.
+    static constexpr const char* kPspPromptAtlasPath = "pc/textures/frontend/psp_prompts.png";
+    static constexpr s32 kPspPromptRowCount = 2;
+    static constexpr s16 kPspPromptRowSize[kPspPromptRowCount] = { 14, 18 };
+    static constexpr s16 kPspPromptRowTop[kPspPromptRowCount] = { 0, 16 };
+    static constexpr s16 kPspPromptColumnStep = 20;
+    static constexpr s16 kPspPromptBadgeLeft = 9 * kPspPromptColumnStep;
+    // A text line within this many pixels of a row's size draws that row 1:1,
+    // as sharp as the font strikes; other sizes scale the nearest row.
+    static constexpr f32 kPspPromptSnapTolerance = 1.5f;
+
+    enum : s8 {
+        kPspGlyphCross,
+        kPspGlyphCircle,
+        kPspGlyphTriangle,
+        kPspGlyphSquare,
+        kPspGlyphDPad,
+        kPspGlyphDPadLeft,
+        kPspGlyphDPadRight,
+        kPspGlyphDPadUp,
+        kPspGlyphDPadDown,
+    };
+
+    // GpBtn layout on PSP: A = Cross, B = Circle, X = Square, Y = Triangle.
+    static s8 PspButtonToGlyph(s32 button) {
+        switch (button) {
+            case GpBtn::A: return kPspGlyphCross;
+            case GpBtn::B: return kPspGlyphCircle;
+            case GpBtn::X: return kPspGlyphSquare;
+            case GpBtn::Y: return kPspGlyphTriangle;
+            case GpBtn::DpadLeft: return kPspGlyphDPadLeft;
+            case GpBtn::DpadRight: return kPspGlyphDPadRight;
+            case GpBtn::DpadUp: return kPspGlyphDPadUp;
+            case GpBtn::DpadDown: return kPspGlyphDPadDown;
+            default: return -1;
+        }
+    }
+
+    static s32 PspPromptRow(f32 drawHeight) {
+        s32 best = 0;
+        for (s32 row = 1; row < kPspPromptRowCount; row++) {
+            if (std::fabs(drawHeight - (f32)kPspPromptRowSize[row])
+                < std::fabs(drawHeight - (f32)kPspPromptRowSize[best])) {
+                best = row;
+            }
+        }
+        return best;
+    }
+
+    static bool PspPromptIsNative(f32 drawHeight) {
+        return std::fabs(drawHeight - (f32)kPspPromptRowSize[PspPromptRow(drawHeight)]) <= kPspPromptSnapTolerance;
+    }
+
+    static f32 PspGlyphSize(f32 drawHeight) {
+        return PspPromptIsNative(drawHeight) ? (f32)kPspPromptRowSize[PspPromptRow(drawHeight)] : drawHeight;
+    }
+
+    static f32 PspGlyphLeft(f32 x, f32 drawHeight) {
+        return PspPromptIsNative(drawHeight) ? std::floor(x + 0.5f) : x;
+    }
+
+    // Centred where DrawPrompt centres desktop prompts: 40% down the line.
+    static f32 PspGlyphTop(f32 y, f32 drawHeight) {
+        const f32 top = y + drawHeight * 0.4f - PspGlyphSize(drawHeight) * 0.5f;
+        return PspPromptIsNative(drawHeight) ? std::floor(top + 0.5f) : top;
+    }
+
+    static PromptRect PspGlyphRect(s8 glyph, s32 row) {
+        PromptRect rect;
+        rect.x = (s16)(glyph * kPspPromptColumnStep);
+        rect.y = kPspPromptRowTop[row];
+        rect.w = kPspPromptRowSize[row];
+        rect.h = kPspPromptRowSize[row];
+        return rect;
+    }
+
+    static f32 PspBadgeSize(f32 drawHeight) {
+        return PspGlyphSize(drawHeight) + 2.0f;
+    }
+
+    static PromptRect PspBadgeRect(s32 row) {
+        PromptRect rect;
+        rect.x = (s16)(kPspPromptBadgeLeft + row * kPspPromptColumnStep);
+        rect.y = 0;
+        rect.w = (s16)(kPspPromptRowSize[row] + 2);
+        rect.h = rect.w;
+        return rect;
+    }
+
+    // Draws the [uFrom, uTo] horizontal slice (fractions of the cell) of an
+    // atlas cell.
+    static void DrawPspAtlasQuad(const PromptRect& rect, f32 uFrom, f32 uTo,
+        f32 x, f32 y, f32 w, f32 h, u8 alpha) {
+        const SheetState& sheet = GetPspPromptSheet();
+        if (!sheet.tex || w <= 0.0f || h <= 0.0f) {
+            return;
+        }
+        const f32 invW = 1.0f / (f32)sheet.width;
+        const f32 invH = 1.0f / (f32)sheet.height;
+        ScreenDraw::DrawQuad(sheet.tex, x, y, w, h,
+            ((f32)rect.x + uFrom * (f32)rect.w) * invW, (f32)rect.y * invH,
+            ((f32)rect.x + uTo * (f32)rect.w) * invW, (f32)(rect.y + rect.h) * invH,
+            255, 255, 255, alpha);
+    }
+
+    static SheetState& GetPspPromptSheet() {
+        static SheetState sheet;
+        return sheet;
+    }
+
+    static bool EnsurePspPromptSheetLoaded(SheetState& sheet) {
+        if (sheet.tex) {
+            return true;
+        }
+        if (sheet.tried) {
+            return false;
+        }
+        sheet.tried = true;
+        sheet.tex = tTexture::LoadFromImagePath(kPspPromptAtlasPath, &sheet.width, &sheet.height);
+        return sheet.tex != nullptr;
+    }
+#endif
 
     static void CopyText(char* dst, s32 dstLen, const char* src) {
         if (!dst || dstLen <= 0) {

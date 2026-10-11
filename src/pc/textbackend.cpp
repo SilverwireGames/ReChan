@@ -995,6 +995,24 @@ private:
                         PromptIcons::DrawPrompt(prompt, x, y, lineHeight, alpha);
                     }
 #if defined(RC_PLATFORM_PSP)
+                } else if (prompt.pspBadge) {
+                    // START/SELECT/L/R: the button's name in white on a dark
+                    // badge styled like the round button glyphs.
+                    const f32 textWidth = MeasureFallbackWidth(face, prompt.fallback);
+                    token.width = PromptIcons::GetPspBadgeWidth(textWidth, lineHeight);
+                    if (draw) {
+                        PromptIcons::DrawPspBadge(x, y, token.width, lineHeight, alpha);
+                        // Plain white label: a black outline would cover the badge rim.
+                        TextRenderState labelState = state;
+                        labelState.color.r = 245;
+                        labelState.color.g = 245;
+                        labelState.color.b = 245;
+                        labelState.outline.enabled = false;
+                        labelState.shadow.enabled = false;
+                        const f32 labelX = x + (token.width - textWidth) * 0.5f;
+                        DrawFallbackText(prompt.fallback, face.snap ? std::floor(labelX + 0.5f) : labelX,
+                            y, labelState, alpha);
+                    }
                 } else if (prompt.HasFallback()) {
                     // PSP has no glyph sheet for this action: draw its name in text instead.
                     token.width = MeasureFallbackWidth(face, prompt.fallback);

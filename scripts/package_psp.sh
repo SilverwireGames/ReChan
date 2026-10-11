@@ -120,6 +120,7 @@ pc/textures/frontend/controller_sheet_ps.png
 pc/textures/frontend/controller_sheet_switch.png
 pc/textures/frontend/keyboard_mouse_sheet_default.png
 pc/textures/frontend/menu_ornament.png
+pc/textures/frontend/psp_prompts.png
 pc/textures/frontend/scroll_arrow.png
 pc/textures/frontend/slider_o.png
 pc/textures/frontend/slider_f.png
