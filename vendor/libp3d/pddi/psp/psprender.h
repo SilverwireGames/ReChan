@@ -279,6 +279,10 @@ void PreparePspPrimBufferForDynamicSubmission(pddiPrimBuffer* buffer);
 bool UpdatePspPrimBufferDynamicVertices(pddiPrimBuffer* buffer,
                                         const void* data, u32 count,
                                         bool uvIsIntegral);
+// Minimum display refreshes per presented frame (1 = up to 60 fps, 2 = a
+// steady 30 fps for cinema mode); clamped to 1..4.
+void SetPspSwapInterval(u32 refreshes);
+u32 GetPspSwapInterval();
 #if defined(PSP_PERF_TELEMETRY)
 // Benchmark: writes the last presented frame as a 24-bit BMP.
 bool WritePspLastFrame(const char* path);

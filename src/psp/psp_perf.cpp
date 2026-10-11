@@ -40,6 +40,9 @@ namespace {
 constexpr std::size_t kWindowSize = 600;
 // PSP display cadence is approximately 59.94 Hz.
 constexpr u32 kFrameBudgetUs = 16684;
+// The presentation target (60, or 30 in cinema mode) and its frame budget.
+u32 g_targetFps = 60;
+u32 g_frameBudgetUs = kFrameBudgetUs;
 
 struct MetricRing {
     std::array<u32, kWindowSize> values = {};
@@ -266,7 +269,7 @@ static u32 Percentile(const MetricRing& metric, int percentile) {
 static u32 CountOverBudget() {
     u32 count = 0;
     for (std::size_t i = 0; i < g_frame.count; ++i) {
-        if (g_frame.values[i] > kFrameBudgetUs) {
+        if (g_frame.values[i] > g_frameBudgetUs) {
             ++count;
         }
     }
@@ -571,7 +574,7 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         report,
         sizeof(report),
         "Re:Chain PSP frame profile\n"
-        "target_fps=60\n"
+        "target_fps=%lu\n"
         "budget_us=%lu\n"
         "total_frames=%lu\n"
         "window_frames=%lu\n"
@@ -588,7 +591,8 @@ void WriteReportTo(const char* path, u32 scenario, s32 level) {
         "draw_calls_avg=%lu\n"
         "submitted_vertices_avg=%lu\n"
         "page_cache_misses_avg=%lu\n",
-        static_cast<unsigned long>(kFrameBudgetUs),
+        static_cast<unsigned long>(g_targetFps),
+        static_cast<unsigned long>(g_frameBudgetUs),
         static_cast<unsigned long>(g_totalFrames),
         static_cast<unsigned long>(g_frame.count),
         static_cast<unsigned long>(averageFrameUs),
@@ -815,6 +819,11 @@ void SetScenarioNote(u32 note) {
     g_scenarioNote = note;
 }
 
+void SetFrameTarget(u32 fps) {
+    g_targetFps = (fps > 0u && fps < 60u) ? fps : 60u;
+    g_frameBudgetUs = kFrameBudgetUs * (60u / g_targetFps);
+}
+
 void RecordFusedSkinCheck(bool matched) {
     ++g_fusedSkinChecks;
     if (!matched) ++g_fusedSkinMismatches;
@@ -945,6 +954,7 @@ void WriteReport() {}
 void WriteReportTo(const char*, u32, s32) {}
 void WriteState(const char*, s32, s32, s32) {}
 void SetScenarioNote(u32) {}
+void SetFrameTarget(u32) {}
 void RecordFusedSkinCheck(bool) {}
 void GetSnapshot(Snapshot* out) { if (out) *out = {}; }
 void Trace(const char*) {}

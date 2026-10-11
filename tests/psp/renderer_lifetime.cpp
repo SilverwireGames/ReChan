@@ -591,6 +591,38 @@ int main() {
     }
 
     {
+        // Cinema mode: with a two-refresh interval, back-to-back frames are
+        // presented two VBlanks apart (a steady 30 fps); interval 1 keeps the
+        // one-refresh cadence.
+        const auto swapGaps = [&](u32 interval) {
+            SetPspSwapInterval(interval);
+            std::vector<int> queuedAt;
+            for (int frame = 0; frame < 6; ++frame) {
+                ctx.BeginFrame();
+                const int swapsBefore = FakeGe::swaps;
+                display.SwapBuffers();
+                require(FakeGe::swaps == swapsBefore + 1, "frame not presented");
+                queuedAt.push_back(FakeDisplay::vcount);
+            }
+            int minGap = 1 << 30;
+            int maxGap = 0;
+            for (size_t i = 1; i < queuedAt.size(); ++i) {
+                minGap = std::min(minGap, queuedAt[i] - queuedAt[i - 1]);
+                maxGap = std::max(maxGap, queuedAt[i] - queuedAt[i - 1]);
+            }
+            return std::make_pair(minGap, maxGap);
+        };
+        const auto cinema = swapGaps(2);
+        require(cinema.first == 2 && cinema.second == 2, "cinema mode must present every second refresh");
+        const auto normal = swapGaps(1);
+        require(normal.first == 1 && normal.second == 1, "60 fps cadence changed");
+        require(GetPspSwapInterval() == 1, "swap interval not restored");
+        SetPspSwapInterval(9);
+        require(GetPspSwapInterval() == 4, "swap interval not clamped");
+        SetPspSwapInterval(1);
+    }
+
+    {
         // Cached material runs must give exactly the per-triangle scan's
         // boundaries (valid, invalid and mixed keys, partial tails), also
         // after a dynamic upload rewrites material lanes.

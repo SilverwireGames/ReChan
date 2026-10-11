@@ -771,6 +771,7 @@ void feCustomMenuMgr::BuildPages() {
         List("FE_LNG", EntryBinding_Language, 1, 0, (s32)NumLanguages - 1),
 #if defined(RC_PLATFORM_PSP)
         List("FE_HUDS", EntryBinding_HudStyle, 1, 0, (s32)HudStyle_Count - 1),
+        Toggle("FE_CINE", EntryBinding_CinemaMode),
 #endif
         Button("FE_BCK", EntryEvent_Back),
                });
@@ -3122,6 +3123,9 @@ s32 feCustomMenuMgr::GetBoundValue(const Entry& e) const {
         case EntryBinding_ControllerPromptStyle: return ControllerPromptManager::GetStyle();
         case EntryBinding_Language: return (s32)g_customText.GetLanguage();
         case EntryBinding_HudStyle: return (s32)GetHudStyle();
+#if defined(RC_PLATFORM_PSP)
+        case EntryBinding_CinemaMode: return PspIsCinemaMode() ? 1 : 0;
+#endif
         case EntryBinding_DisplayResolution: return g_display ? g_display->GetResolutionIndex() : 0;
         case EntryBinding_DisplayScreenMode: return g_display ? g_display->GetScreenMode() : Display::GetDefaultScreenMode();
         case EntryBinding_DisplayVsync: return g_display ? g_display->GetVsync() : Display::GetDefaultVsync();
@@ -3220,6 +3224,11 @@ void feCustomMenuMgr::ApplyValue(const Entry& e, s32 v) {
     else if (e.binding == EntryBinding_HudStyle) {
         SetHudStyle(v);
     }
+#if defined(RC_PLATFORM_PSP)
+    else if (e.binding == EntryBinding_CinemaMode) {
+        PspSetCinemaMode(v != 0);
+    }
+#endif
     else if (e.binding == EntryBinding_ControllerPromptStyle) {
         if (ControllerPromptManager::SetStyle(v)) {
             ReloadControllerPromptTextures();

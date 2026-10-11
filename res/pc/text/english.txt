@@ -142,6 +142,9 @@ Modern
 [FE_HUDC]
 Classic
 
+[FE_CINE]
+Cinema mode 30 fps:
+
 [FE_LGEN]
 English
 

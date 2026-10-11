@@ -142,6 +142,9 @@ Moderne
 [FE_HUDC]
 Classique
 
+[FE_CINE]
+Mode cinéma 30 i/s :
+
 [FE_LGEN]
 Anglais
 

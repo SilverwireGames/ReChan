@@ -142,6 +142,9 @@ Modern
 [FE_HUDC]
 Klassisch
 
+[FE_CINE]
+Kinomodus 30 fps:
+
 [FE_LGEN]
 Englisch
 

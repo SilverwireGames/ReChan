@@ -2,7 +2,10 @@
 
 #include "extra/customhudmgr.h"
 #include "gen/ccfile.h"
+#include "gen/time.h"
 #include "p3d/fileio.h"
+#include "pddi/psp/psprender.h"
+#include "psp/psp_perf.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,13 +19,34 @@ GameSettings g_settings;
 // desktop game.ini, which packaged trees may carry along.
 static const char kPspSettingsPath[] = "userfiles/pspconf.ini";
 static const char kHudStyleKey[] = "hud_style=";
+static const char kCinemaKey[] = "cinema=";
+
+static bool s_cinemaMode = false;
 
 // Settings are saved after every menu adjustment; skip Memory Stick writes
 // that would store what the file already holds.
 static s32 s_savedHudStyle = -1;
+static s32 s_savedCinema = -1;
+
+bool PspIsCinemaMode() {
+    return s_cinemaMode;
+}
+
+void PspSetCinemaMode(bool enabled) {
+    s_cinemaMode = enabled;
+    // The display holds each frame for two refreshes and the game takes one
+    // 30 Hz tick per frame (Time's 30 fps path): no interpolation needed.
+    SetPspSwapInterval(enabled ? 2u : 1u);
+    PspPerf::SetFrameTarget(enabled ? 30u : 60u);
+    if (g_time) {
+        g_time->targetFPS = enabled ? 30 : 60;
+        g_time->ResetPlayPresentationState();
+    }
+}
 
 bool GameSettings::Load(const char*) {
     s32 hudStyle = HudStyle_Modern;
+    s32 cinema = 0;
 
     ccFile file;
     if (file.Open(kPspSettingsPath, ccFile::OPEN_READ)) {
@@ -39,28 +63,35 @@ bool GameSettings::Load(const char*) {
             if (std::strncmp(line, kHudStyleKey, sizeof(kHudStyleKey) - 1) == 0) {
                 hudStyle = (s32)std::atoi(line + sizeof(kHudStyleKey) - 1);
             }
+            else if (std::strncmp(line, kCinemaKey, sizeof(kCinemaKey) - 1) == 0) {
+                cinema = (std::atoi(line + sizeof(kCinemaKey) - 1) != 0) ? 1 : 0;
+            }
             line = std::strchr(line, '\n');
             if (line) {
                 line++;
             }
         }
         s_savedHudStyle = hudStyle;
+        s_savedCinema = cinema;
     }
 
     SetHudStyle(hudStyle);
+    PspSetCinemaMode(cinema != 0);
     return true;
 }
 
 bool GameSettings::Save(const char*) {
     const s32 hudStyle = (s32)GetHudStyle();
-    if (hudStyle == s_savedHudStyle) {
+    const s32 cinema = s_cinemaMode ? 1 : 0;
+    if (hudStyle == s_savedHudStyle && cinema == s_savedCinema) {
         return true;
     }
 
     p3d::io::CreateDirectories(apppaths::kUserFilesDir);
 
     char text[64] = {};
-    const s32 length = (s32)std::snprintf(text, sizeof(text), "%s%d\n", kHudStyleKey, (int)hudStyle);
+    const s32 length = (s32)std::snprintf(text, sizeof(text), "%s%d\n%s%d\n",
+        kHudStyleKey, (int)hudStyle, kCinemaKey, (int)cinema);
 
     ccFile file;
     if (!file.Open(kPspSettingsPath, ccFile::OPEN_WRITE)) {
@@ -73,5 +104,6 @@ bool GameSettings::Save(const char*) {
     }
 
     s_savedHudStyle = hudStyle;
+    s_savedCinema = cinema;
     return true;
 }

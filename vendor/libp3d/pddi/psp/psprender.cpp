@@ -164,6 +164,29 @@ static void WaitForVblankSinceSwap() {
 #endif
 }
 
+// Display refreshes each presented frame stays on screen at least: 1 shows
+// up to 60 frames a second, 2 holds a steady 30 (cinema mode). The vcount is
+// the one read right after the previous swap was queued.
+static u32 g_swapInterval = 1;
+static u32 g_lastSwapVcount = 0;
+
+// Holds the next swap until the previous frame has had its full interval: a
+// swap queued at vcount v shows from v + 1, so the next one may be queued
+// from v + interval. The one-refresh case is WaitForVblankSinceSwap's job.
+static void WaitForSwapInterval() {
+    if (g_swapInterval <= 1u) return;
+#if defined(PSP_PERF_TELEMETRY)
+    const u32 vblankStart = sceKernelGetSystemTimeLow();
+#endif
+    while (static_cast<u32>(sceDisplayGetVcount()) - g_lastSwapVcount < g_swapInterval) {
+        sceDisplayWaitVblankStart();
+    }
+#if defined(PSP_PERF_TELEMETRY)
+    PspPerf::CountRenderer(PspPerf::RendererCounter::VblankUs,
+        sceKernelGetSystemTimeLow() - vblankStart);
+#endif
+}
+
 static void WaitForSwapVblank() {
 #if !defined(PSP_TRIPLE_BUFFER)
     WaitForVblankSinceSwap();
@@ -588,6 +611,14 @@ static void Convert2DUvToTexels(PspVertex* vertices, int count, pddiTexture* tex
 }
 
 } // namespace
+
+void SetPspSwapInterval(u32 refreshes) {
+    g_swapInterval = refreshes < 1u ? 1u : (refreshes > 4u ? 4u : refreshes);
+}
+
+u32 GetPspSwapInterval() {
+    return g_swapInterval;
+}
 
 pspPrimBuffer::pspPrimBuffer(const pddiPrimBufferDesc& desc)
     : primType(desc.primType), vertexFormat(desc.vertexFormat) {
@@ -1669,11 +1700,13 @@ void pspDisplay::SwapBuffers() {
     // drawn next. Frames slower than one refresh had a VBlank since the last
     // swap and never wait; faster ones are held to the display rate.
     WaitForVblankSinceSwap();
+    WaitForSwapInterval();
     const auto edramBase = reinterpret_cast<std::uintptr_t>(sceGeEdramGetAddr());
     sceDisplaySetFrameBuf(reinterpret_cast<void*>(edramBase + DrawFramebufferOffset()),
                           kBufferWidth, kFramebufferPsm, PSP_DISPLAY_SETBUF_NEXTVSYNC);
     // Read after queueing, as in the double-buffered path below.
     g_swapVcount = sceDisplayGetVcount();
+    g_lastSwapVcount = g_swapVcount;
     g_swapVblankPending = true;
     // Queued: the buffer just finished. On screen until the next VBlank: the
     // one shown so far. Free to draw: the buffer that one replaced.
@@ -1682,7 +1715,9 @@ void pspDisplay::SwapBuffers() {
     g_replacedFramebuffer = g_shownFramebuffer;
     g_shownFramebuffer = finished;
 #else
+    WaitForSwapInterval();
     sceGuSwapBuffers();
+    g_lastSwapVcount = sceDisplayGetVcount();
     g_drawingSecondBuffer = !g_drawingSecondBuffer;
 #endif
 #if defined(PSP_TRIPLE_BUFFER)

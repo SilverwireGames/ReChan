@@ -92,6 +92,7 @@ enum EntryBinding : u8 {
     EntryBinding_ControllerPromptStyle,
     EntryBinding_Language,
     EntryBinding_HudStyle,
+    EntryBinding_CinemaMode,
     EntryBinding_DisplayResolution,
     EntryBinding_DisplayScreenMode,
     EntryBinding_DisplayVsync,

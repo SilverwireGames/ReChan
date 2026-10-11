@@ -187,6 +187,8 @@ void WriteReport();
 void WriteReportTo(const char* path, u32 scenario = 0, s32 level = -1);
 // Free-form number written as scenario_note= (e.g. enemies gathered).
 void SetScenarioNote(u32 note);
+// Presentation target for the frame budget in reports (60, or 30 in cinema mode).
+void SetFrameTarget(u32 fps);
 // PSP_DRAW_MICROBENCH: total time of one repeated renderer operation,
 // written as microbench_<slot>_us= in every later report.
 void RecordMicrobench(u32 slot, u32 totalUs);
