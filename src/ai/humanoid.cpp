@@ -370,8 +370,6 @@ static void RestoreHumanoidRenderAnimPose(const HumanoidRenderAnimPoseBackup& ba
         backup.flip->dirty = 1;
     }
 
-    // Sequences drive the flip with a part-local frame and never blend; everything else
-    // must leave the skeleton exactly as the logic tick built it, blend included.
     if (backup.animStructure && !backup.animStructure->sequence && backup.animStructure->flip == backup.flip) {
         backup.animStructure->ApplyFlipPose(backup.frameReal);
         return;
@@ -1224,6 +1222,7 @@ Humanoid::~Humanoid() {
 #endif
     // PSX: KillDialog, DeleteModel, DeleteRightHandObj, DeleteLeftHandObj, etc.
     KillDialog(0, 0, 512);
+    pcDestroying = true;
     DeleteModel();
     DeleteRightHandObj();
     DeleteLeftHandObj();
@@ -1500,8 +1499,7 @@ void Humanoid::Draw() {
     Thing::Draw();
 }
 
-// PSX: tail of Draw__8Humanoid. Split out so the high-fps path can also run it once per
-// logic tick; Draw alone leaves the bounds a tick stale when several ticks share a frame.
+// PSX: tail of Draw__8Humanoid.
 void Humanoid::UpdateCollisionBoundsFromJoints() {
     HumanoidModel* hm = static_cast<HumanoidModel*>(model);
     if (!hm || !hm->animMatrices || !hm->animMatrices->Copy()) {
@@ -1899,15 +1897,10 @@ void Humanoid::CreateModel(const char* name) {
         hm->backPtr = this;
     }
 
-    if (field452 != 0 && activeZone && !pcVisualModelOnly) {
-        activeZone->AddHumanoidToOverlordMembers(this);
+    // PC: display-only models get gameplay state on promotion.
+    if (!pcVisualModelOnly) {
+        CreateGameplayState();
     }
-
-    if (!behaviour) {
-        behaviour = new Behaviour(this, thingType, field452);
-    }
-
-    field444 = 1;
 
     // PSX: calls Thing::CreateModel which does the LevelManager lookup
     Thing::CreateModel(name);
@@ -1966,17 +1959,53 @@ void Humanoid::CreateModel(const char* name) {
     CreateSound();
 }
 
-// PC: zone membership follows the gameplay model, not a display-only one.
-void Humanoid::OnVisualModelPromoted() {
+// PSX: the zone-member and Behaviour part of CreateModel__8HumanoidPCc (0x800632B4).
+void Humanoid::CreateGameplayState() {
     if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
         activeZone->AddHumanoidToOverlordMembers(this);
     }
+
+    if (!behaviour) {
+        behaviour = new Behaviour(this, thingType, field452);
+        if (field444 != 0) {
+            behaviour->handlerThisOffset = 0;
+            behaviour->handlerDispatch = -1;
+            behaviour->handler = (spawnCount != 0) ? Behaviour::Idle : Behaviour::NDMS;
+        }
+        field444 = 1;
+    }
 }
 
-void Humanoid::OnVisualModelDemoted() {
+// PSX: the zone-member and Behaviour part of DeleteModel__8Humanoid (0x80063514).
+void Humanoid::DestroyGameplayState() {
+    // Host safety: AI teardown can clear activeZoneList before humanoids are destroyed.
     if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
         activeZone->RemoveHumanoidFromOverlordMembers(this);
     }
+
+    // PC: the player's Behaviour is never rebuilt.
+    if (behaviour && this != Player::s_player) {
+        spawnCount = (behaviour->handlerDispatch == -1 && behaviour->handler == Behaviour::Idle) ? 1 : 0;
+        delete behaviour;
+        behaviour = nullptr;
+    }
+}
+
+void Humanoid::OnVisualModelPromoted() {
+    CreateGameplayState();
+}
+
+void Humanoid::OnVisualModelDemoted() {
+    DestroyGameplayState();
+    flags2 &= ~8u;
+
+    Model* m = static_cast<Model*>(model);
+    if (m) {
+        m->SetAnim(22, 0, 1, 0);
+    }
+    SetActionState((field364 != 0) ? (u32)field364 : (u32)AS_STAND_ANIM, 0);
+    orientation = spawnOrientation;
+    faceAngle = spawnOrientation.y;
 }
 
 // PSX: DeleteModel__8Humanoid (HUMANOID.CPP:910)
@@ -1985,9 +2014,14 @@ void Humanoid::DeleteModel() {
     const bool wasVisualOnly = pcVisualModelOnly;
     Thing::DeleteModel();
 
-    // Host safety: AI teardown can clear activeZoneList before humanoids are destroyed.
-    if (!wasVisualOnly && field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
-        activeZone->RemoveHumanoidFromOverlordMembers(this);
+    if (!wasVisualOnly) {
+        DestroyGameplayState();
+    }
+
+    // PSX: SetActionState(0, 0), then clear flags2 bit 3.
+    if (!pcDestroying && this != Player::s_player) {
+        SetActionState(AS_INACTIVE_IDLE, 0);
+        flags2 &= ~8u;
     }
 
     ReleaseSound();

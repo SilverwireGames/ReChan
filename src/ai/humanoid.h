@@ -340,7 +340,7 @@ public:
     // PSX +444 (s32): reserved
     s32 field444 = 0;
 
-    // PSX +448 (s32): spawn count (set to 1)
+    // PSX +448 (s32): was-idle flag saved by DeleteModel
     s32 spawnCount = 1;
 
     // PSX +452 (s32): reserved
@@ -428,6 +428,9 @@ public:
     // HIGH_FPS presentation layer is disabled.
     void ResetRenderInterpolation();
 
+    void CreateGameplayState();
+    void DestroyGameplayState();
+    bool pcDestroying = false;
     void OnVisualModelPromoted() override;
     void OnVisualModelDemoted() override;
     void AdvanceRenderInterpolationTick();

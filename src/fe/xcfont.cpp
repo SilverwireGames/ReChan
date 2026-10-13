@@ -668,8 +668,6 @@ void oxFontFile::FontInit(const char* path) {
     MARKFUNCTION(0x80040998);
 
     // PSX: allocate and construct new xcSectionMan (8 bytes)
-    // PC: may be re-entered from ReloadFont when the first attempt ran before the disc
-    // assets were extracted; the sectionMan is already shared with the FE managers then.
     if (!sectionMan) {
         sectionMan = new xcSectionMan();
     }

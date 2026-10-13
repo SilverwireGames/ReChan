@@ -779,9 +779,7 @@ static s32 StackEJointCallback(STreeJoint* joint, u32 jointIndex, const Mat4& cu
 
     Stack* stack = static_cast<Stack*>(joint->callbackData);
 
-    // Built from the stack's own transform, not the model's posX/rot: those are only
-    // written by Draw(), so a stack toppled before it was ever drawn would resolve its
-    // joints at the origin.
+    // Model posX/rot are only written by Draw().
     Mat4 modelWorld = Mat4();
     p3dBuildRotMatrixZYX(
         (u16)(stack->orientation.x & 0xFFFF),

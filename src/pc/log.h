@@ -34,8 +34,7 @@ private:
     std::vector<std::string> m_MessageStack;
 };
 
-// Written in every configuration, so Release crash reports carry some context.
-// Keep it to rare events (startup, state changes, missing files), never per-frame.
+// Written in every configuration; rare events only.
 #define LOG_ALWAYS(fmt, ...) Log::Get().LogMessage(fmt, ##__VA_ARGS__)
 
 #if defined(NDEBUG)

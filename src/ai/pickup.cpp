@@ -741,9 +741,7 @@ s32 Pickup::Release(Thing* owner, ccList* list, const SVector* forceDir, s32 for
     }
 
 #if HIGH_FPS_PLAY_PRESENTATION
-    // A held pickup is only positioned from Humanoid::Draw, off a render-interpolated
-    // hand matrix. The wall check and throw origin below must start from the hand as
-    // captured on the logic tick, not from wherever the last rendered frame put it.
+    // Held pickups are only positioned at render time.
     if ((pickupFlags & 4u) != 0 && attachedOwner && attachedOwner->model
         && g_game && g_game->GetState() == GameState::Play) {
         HumanoidModel* ownerModel = static_cast<HumanoidModel*>(attachedOwner->model);

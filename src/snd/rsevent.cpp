@@ -517,10 +517,7 @@ enum DialogStatus : s32 {
     DialogStatus_PlayingPrimaryState14 = 14,
 };
 
-// Dialog timeouts are counted in 30 Hz frames. g_time's frame counter only runs at that
-// rate during gameplay; in menus and while paused it ticks once per rendered frame, which
-// expired timeouts several times too early at high frame rates. Voices play in real
-// time, so derive the 30 Hz count from the wall clock instead.
+// 30 Hz count from the wall clock; g_time ticks per rendered frame in menus.
 static s32 GetDialogFrameCounter() {
     // +1: a stored frame of 0 means "unset" in the queue bookkeeping.
     return (s32)(Time::GetTimeInSeconds() * 30.0) + 1;

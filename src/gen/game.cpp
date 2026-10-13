@@ -376,8 +376,7 @@ static void CaptureHumanoidAttackJointsLoop(ccList& list) {
             hm->animMatrices->Swap();
             hm->CaptureAttackJointMatrices();
 
-            // The rest of what PSX Draw did right after the capture. Draw still does it
-            // too, but only once per rendered frame.
+            // PSX did this in Draw right after the capture.
             Humanoid* humanoid = static_cast<Humanoid*>(thing);
             humanoid->attackJointIndex = -1;
             humanoid->UpdateCollisionBoundsFromJoints();
@@ -485,7 +484,6 @@ void Game::DrawEverythingHandlerCB(Handler*) {
 
     if (g_director) {
 #if HIGH_FPS_PLAY_PRESENTATION
-        // EndLevelLoop runs on the same fixed logic step as Play (see main loop).
         const bool usesFixedLogicStep = g_game
             && (g_game->GetState() == GameState::Play || g_game->GetState() == GameState::EndLevelLoop);
         const bool isPlayRenderOnlyFrame = (usesFixedLogicStep && g_time && !g_time->DidPlayLogicStepThisFrame());
@@ -589,9 +587,7 @@ static bool PumpMenuFadeFrame(f64 frameStart) {
 void Game::MenuFade() {
     MARKFUNCTION(0x80029E34);
 
-    // Safety bound only. The original hang was a reused voice handle keeping the gate
-    // true forever; handles now carry a generation, so this should never trigger. It
-    // has to be longer than any dialog line or it cuts the PSX wait short.
+    // Safety bound only; must exceed the longest dialog line.
     constexpr f64 kMaxDialogWaitSec = 15.0;
     const f64 dialogWaitStart = Time::GetTimeInSeconds();
     while (jcsIsPlaying()) {
@@ -780,9 +776,9 @@ bool Game::gsIntroState(Game* game) {
     }
 #endif
 
-    if (AutoTest::IsEnabled()) {
+    if (AutoTest_IsEnabled()) {
         if (!PsxDiscExtractor::AreAssetsPresent()) {
-            AutoTest::Fail(10, "game data missing");
+            AutoTest_Fail(10, "game data missing");
             return true;
         }
         game->assetCheckDone = true;
@@ -903,13 +899,11 @@ bool Game::gsIntroState(Game* game) {
                         g_sound->SetupSound();
                     }
 
-                    // Same for AI::InternalOpen(): scr/behave.txt didn't exist yet, so
-                    // behaviourList is empty and every enemy would get a null animConfigPtr.
+                    // Same for behave.txt and the fonts.
                     if (g_ai && !g_ai->behaviourList.head) {
                         g_ai->ParseBehaviourAttribScript();
                     }
 
-                    // And for the XC/FONTS.1 load at the top of this state.
                     InitXconFSImage();
                 }
             }
@@ -1080,8 +1074,8 @@ bool Game::gsTitleState(Game* game) {
 
     game->SetState(GameState::TitleLoop);
 
-    if (AutoTest::IsEnabled()) {
-        g_selectedLevel = (s16)AutoTest::GetLevelIndex();
+    if (AutoTest_IsEnabled()) {
+        g_selectedLevel = (s16)AutoTest_GetLevelIndex();
         game->titleAutoStart = true;
     }
 
@@ -1379,7 +1373,7 @@ bool Game::gsOpenFEState(Game* game) {
     if (g_selectedLevel != -1) {
         World* world = game->GetWorld();
         if (world) {
-            world->SetTargetLevelPetal((u32)g_selectedLevel, AutoTest::IsEnabled() ? (u32)AutoTest::GetPetalIndex() : 0);
+            world->SetTargetLevelPetal((u32)g_selectedLevel, AutoTest_IsEnabled() ? (u32)AutoTest_GetPetalIndex() : 0);
         }
         if (g_time) {
             g_time->frameCounter = 0;
@@ -2303,7 +2297,7 @@ void Game::PlayMovie(const char* name, s32 skippable, s32 unloadLevel) {
         }
     }
 
-    if (AutoTest::IsEnabled()) {
+    if (AutoTest_IsEnabled()) {
         return;
     }
 

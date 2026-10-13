@@ -317,8 +317,7 @@ void Behaviour::SetAIHandler(u32 handlerType) {
     nextHandlerDispatch = 0;
     nextHandler = nullptr;
 
-    // PC: behave.txt is parsed in AI::InternalOpen, which can run before the disc assets
-    // exist. Never hand out a null animConfigPtr because of that ordering.
+    // PC: behave.txt may not exist yet when AI opens.
     if (g_ai && !g_ai->behaviourList.head) {
         g_ai->ParseBehaviourAttribScript();
     }
@@ -2893,8 +2892,7 @@ void Behaviour::NDMS(Behaviour* b) {
         }
     }
     else if (distanceToPlayer > REJOIN_ACTIVE_ZONE_PLAYER_DIST_THRESHOLD) {
-        // PSX 0x800761F8: between attackingDist and fringeDist. Close in / circle; the
-        // only attacks from here are the up/down ones when the player is above or below.
+        // PSX 0x800761F8: between attackingDist and fringeDist.
         b->ndmsRangeBand = 2;
         b->field60 = 1;
 
@@ -2963,7 +2961,7 @@ void Behaviour::NDMS(Behaviour* b) {
         }
     }
     else {
-        // PSX 0x800763C4: within attackingDist. Attack, hold, or back out of the fight.
+        // PSX 0x800763C4: within attackingDist.
         b->ndmsRangeBand = 3;
         b->field60 = 1;
 
@@ -3062,8 +3060,7 @@ void Behaviour::NDMS(Behaviour* b) {
             }
 
             if (floorDelta >= NDMS_FLOOR_SAFE_DELTA_THRESHOLD) {
-                // PSX 0x800766CC: unlike cases 0-3, this one becomes 5 when the enemy has
-                // a taunt line and is left as it is when it has none.
+                // PSX 0x800766CC: 5 with a taunt line, else unchanged.
                 if ((s32)rmRangedRandom(1) != 0) {
                     b->ndmsDecision = 6;
                 }

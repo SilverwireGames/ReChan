@@ -667,9 +667,7 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
         drawList[drawListCount++] = nextBlocks[index];
     }
 
-    // PSX: the active range comes straight from the current block (bytes 35/34), capped
-    // at 7 blocks. This decides which things think, so unlike the load and draw windows
-    // it is never widened for aspect ratio.
+    // PSX: active range from block bytes 35/34, capped at 7.
     u32 previousActive = (previousCount < currentBlock->lodFarZ) ? previousCount : (u32)currentBlock->lodFarZ;
     u32 nextActive = (u32)currentBlock->lodNearZ;
     if (nextCount < nextActive) {

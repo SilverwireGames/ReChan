@@ -454,9 +454,7 @@ static void BobbleHeadUpdate(Humanoid* owner, STreeJoint* joint) {
         model->bobbleAngleZ = std::sin(model->bobblePhase * 0.8f + 1.7f) * total * 0.7f;
     }
 
-    // The offset is added in place. If nothing re-evaluated the joint since the last
-    // Show() (paused game, repeated draws of one pose) it still holds our previous
-    // offset, so start again from the saved base instead of stacking another one.
+    // Don't stack the offset on a joint that was not re-evaluated.
     if (model->bobbleApplied
         && joint->rotationX == model->bobbleAppliedRotX
         && joint->rotationZ == model->bobbleAppliedRotZ) {

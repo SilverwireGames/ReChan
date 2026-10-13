@@ -360,8 +360,7 @@ void AnimStructure::ExecuteHandler(s32 doFlip) {
     prevTick = currentTick;
 }
 
-// PC: the pose-apply tail of Update, shared with the high-fps render path so an
-// interpolated or restored pose goes through the same BLEND2 blend as the logic tick.
+// PC: pose-apply tail of Update, shared with the render path.
 void AnimStructure::ApplyFlipPose(s32 frameReal) {
     if (!flip) {
         return;

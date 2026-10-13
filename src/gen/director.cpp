@@ -683,10 +683,7 @@ static void RegisterScriptRegion(u32 virtualBase, s32* hostBase, s32 wordCount) 
 }
 
 static s32* ResolveScriptAddress(u32 virtualAddress) {
-    // Regions can overlap: death_fall_goo is reconstructed with the words that follow it
-    // in PSX memory, which are NISdoor1 and the start of NISdoor1WithDialog. The region
-    // with the closest base owns the address, otherwise a script that starts inside an
-    // earlier region's tail resolves to a truncated copy and runs off its end.
+    // Regions can overlap; the closest base owns the address.
     s32* best = nullptr;
     u32 bestBase = 0;
     for (s32 i = 0; i < g_directorScriptRegionCount; i++) {
@@ -2247,7 +2244,6 @@ void Director::Process() {
                 // rather than desyncing by consuming one word.
                 LOG("[Director] unknown opcode 0x%02X at scriptPtr=%p", static_cast<u32>(opcode), static_cast<const void*>(scriptPtr));
                 {
-                    // Blocks here every frame, so only report each stuck location once.
                     static const s32* s_lastReported = nullptr;
                     if (s_lastReported != scriptPtr) {
                         s_lastReported = scriptPtr;

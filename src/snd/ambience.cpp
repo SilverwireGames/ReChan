@@ -289,8 +289,7 @@ void Ambiance::Update() {
 
     if (!running) return;
 
-    // The fade steps are sized for 60 calls per second, but this is called once per
-    // rendered frame. Scale by real elapsed time so fades last what was asked for.
+    // Fade steps assume 60 calls per second.
     static f64 s_lastUpdateTime = 0.0;
     const f64 now = Time::GetTimeInSeconds();
     f64 elapsed = now - s_lastUpdateTime;

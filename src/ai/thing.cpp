@@ -228,15 +228,12 @@ void Thing::Activate() {
             CreateModel(nullptr);
         }
         else if (pcVisualModelOnly) {
-            // PC: the model was only there to be looked at; now it is the real thing.
             pcVisualModelOnly = false;
             OnVisualModelPromoted();
         }
     }
     else if (g_blockManager && g_blockManager->IsVisualOnlyBlock(blockNum) && !(flags & TF_MODEL_CREATED)) {
-        // PC: widescreen draws blocks beyond the PSX active range. Give their things a
-        // model so they don't pop in at the screen edges, but leave them deactivated:
-        // they don't think, and humanoids don't count as zone members until promoted.
+        // PC: display-only model for widescreen.
         pcVisualModelOnly = true;
         CreateModel(nullptr);
     }
@@ -265,8 +262,6 @@ void Thing::Deactivate() {
         if (!(flags & TF_ACTIVATED)) {
             if (flags & TF_MODEL_CREATED) {
                 if (g_blockManager && g_blockManager->IsVisualOnlyBlock(blockNum)) {
-                    // PC: still on screen in widescreen. Keep the model for display, but
-                    // undo what the PSX DeleteModel here would undo for gameplay.
                     if (!pcVisualModelOnly) {
                         pcVisualModelOnly = true;
                         OnVisualModelDemoted();

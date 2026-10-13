@@ -172,8 +172,7 @@ public:
     virtual void AddOverlayCallback(OverlayCallback cb) = 0;
     virtual void RenderOverlay() = 0;
 
-    // Copies the frame about to be presented as tightly packed RGB rows, top row first.
-    // Only meaningful between the last draw and SwapBuffers (e.g. from an overlay callback).
+    // RGB rows, top first; valid between the last draw and SwapBuffers.
     virtual bool ReadBackBuffer(std::vector<unsigned char>& rgb, int& width, int& height) { return false; }
 };
 

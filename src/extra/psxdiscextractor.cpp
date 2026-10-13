@@ -496,7 +496,6 @@ void PsxDiscExtractor::ExtractThreadFunc(std::string imagePath) {
             }
         }
 
-        // Lookups made before the assets existed cached directory listings without them.
         p3d::io::InvalidateResolveCache();
         LOG_ALWAYS("[PsxDiscExtractor] Extraction done: %lld bytes", (long long)m_bytesDone);
         m_state = State::Done;

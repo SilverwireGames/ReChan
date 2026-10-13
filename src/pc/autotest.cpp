@@ -17,121 +17,117 @@
 
 #include "vendor/stb/stb_image_write.h"
 
-namespace {
-    bool s_enabled = false;
-    s32 s_levelIndex = 0;
-    s32 s_levelId = -1;
-    s32 s_petalIndex = 0;
-    s32 s_warpGenerator = -1;
-    bool s_traceSpawns = false;
-    s32 s_killInterval = 0;
-    s32 s_frames = 300;
-    s32 s_fps = 60;
-    u32 s_heldButtons = 0;
-    std::string s_screenshotPath;
+static bool s_enabled = false;
+static s32 s_levelIndex = 0;
+static s32 s_levelId = -1;
+static s32 s_petalIndex = 0;
+static s32 s_warpGenerator = -1;
+static bool s_traceSpawns = false;
+static s32 s_killInterval = 0;
+static s32 s_frames = 300;
+static s32 s_fps = 60;
+static u32 s_heldButtons = 0;
+static std::string s_screenshotPath;
 
-    s32 s_playFrames = 0;
-    bool s_captureRequested = false;
-    bool s_captureDone = false;
-    bool s_finished = false;
-    int s_exitCode = 0;
-    f64 s_startTime = 0.0;
+static s32 s_playFrames = 0;
+static bool s_captureRequested = false;
+static bool s_captureDone = false;
+static bool s_finished = false;
+static int s_exitCode = 0;
+static f64 s_startTime = 0.0;
 
-    // Generous: a cold level load on a slow disk is well under this.
-    constexpr f64 kReachGameplayTimeoutSec = 180.0;
+static constexpr f64 kReachGameplayTimeoutSec = 180.0;
 
-    struct ButtonName {
-        const char* name;
-        u32 mask;
-    };
+struct AutoTestButtonName {
+    const char* name;
+    u32 mask;
+};
 
-    const ButtonName kButtonNames[] = {
-        { "up", PsxPad::Up },
-        { "down", PsxPad::Down },
-        { "left", PsxPad::Left },
-        { "right", PsxPad::Right },
-        { "cross", PsxPad::Cross },
-        { "circle", PsxPad::Circle },
-        { "square", PsxPad::Square },
-        { "triangle", PsxPad::Triangle },
-        { "l1", PsxPad::L1 },
-        { "r1", PsxPad::R1 },
-        { "l2", PsxPad::L2 },
-        { "r2", PsxPad::R2 },
-    };
+static const AutoTestButtonName kButtonNames[] = {
+    { "up", PsxPad::Up },
+    { "down", PsxPad::Down },
+    { "left", PsxPad::Left },
+    { "right", PsxPad::Right },
+    { "cross", PsxPad::Cross },
+    { "circle", PsxPad::Circle },
+    { "square", PsxPad::Square },
+    { "triangle", PsxPad::Triangle },
+    { "l1", PsxPad::L1 },
+    { "r1", PsxPad::R1 },
+    { "l2", PsxPad::L2 },
+    { "r2", PsxPad::R2 },
+};
 
-    u32 ParseButtons(const char* list) {
-        u32 mask = 0;
-        std::string token;
-        for (const char* c = list;; ++c) {
-            if (*c == ',' || *c == '\0') {
-                for (const ButtonName& b : kButtonNames) {
-                    if (token == b.name) {
-                        mask |= b.mask;
-                    }
-                }
-                token.clear();
-                if (*c == '\0') {
-                    break;
+static u32 ParseButtons(const char* list) {
+    u32 mask = 0;
+    std::string token;
+    for (const char* c = list;; ++c) {
+        if (*c == ',' || *c == '\0') {
+            for (const AutoTestButtonName& b : kButtonNames) {
+                if (token == b.name) {
+                    mask |= b.mask;
                 }
             }
-            else {
-                token += *c;
+            token.clear();
+            if (*c == '\0') {
+                break;
             }
         }
-        return mask;
+        else {
+            token += *c;
+        }
     }
-
-    // Puts the player on the Nth EnemyGenerator so its room's spawn logic runs.
-    void WarpToGenerator(s32 wanted) {
-        Player* player = Player::s_player;
-        if (!g_ai || !player) {
-            return;
-        }
-
-        s32 index = 0;
-        for (ccMinNode* n = g_ai->moveList.head; n; n = n->next) {
-            Thing* thing = static_cast<Thing*>(n);
-            if (thing->thingType != AITypes::TT_ENEMYGENERATOR) {
-                continue;
-            }
-            if (index++ != wanted) {
-                continue;
-            }
-
-            player->pos = thing->pos;
-            player->homePos = thing->pos;
-            player->UpdatePosition();
-            if (g_blockManager) {
-                const u16 block = g_blockManager->GetBlockNumber(thing->pos);
-                player->blockNum = (block != 4096) ? block : thing->blockNum;
-            }
-            LOG_ALWAYS("[AutoTest] Warped to generator %d at (%d,%d,%d) block=%u", wanted,
-                       thing->pos.x, thing->pos.y, thing->pos.z, (u32)player->blockNum);
-            return;
-        }
-        LOG_ALWAYS("[AutoTest] Generator %d not found (%d in level)", wanted, index);
-    }
-
-    void CaptureOverlay() {
-        if (!s_captureRequested || s_captureDone) {
-            return;
-        }
-        s_captureDone = true;
-
-        std::vector<unsigned char> rgb;
-        int width = 0;
-        int height = 0;
-        if (!p3d::display->ReadBackBuffer(rgb, width, height)
-            || !stbi_write_png(s_screenshotPath.c_str(), width, height, 3, rgb.data(), width * 3)) {
-            AutoTest::Fail(12, "screenshot failed");
-            return;
-        }
-        LOG_ALWAYS("[AutoTest] Wrote %s (%dx%d)", s_screenshotPath.c_str(), width, height);
-    }
+    return mask;
 }
 
-void AutoTest::ParseArgs(int argc, char** argv) {
+static void WarpToGenerator(s32 wanted) {
+    Player* player = Player::s_player;
+    if (!g_ai || !player) {
+        return;
+    }
+
+    s32 index = 0;
+    for (ccMinNode* n = g_ai->moveList.head; n; n = n->next) {
+        Thing* thing = static_cast<Thing*>(n);
+        if (thing->thingType != AITypes::TT_ENEMYGENERATOR) {
+            continue;
+        }
+        if (index++ != wanted) {
+            continue;
+        }
+
+        player->pos = thing->pos;
+        player->homePos = thing->pos;
+        player->UpdatePosition();
+        if (g_blockManager) {
+            const u16 block = g_blockManager->GetBlockNumber(thing->pos);
+            player->blockNum = (block != 4096) ? block : thing->blockNum;
+        }
+        LOG_ALWAYS("[AutoTest] Warped to generator %d at (%d,%d,%d) block=%u", wanted,
+                   thing->pos.x, thing->pos.y, thing->pos.z, (u32)player->blockNum);
+        return;
+    }
+    LOG_ALWAYS("[AutoTest] Generator %d not found (%d in level)", wanted, index);
+}
+
+static void CaptureOverlay() {
+    if (!s_captureRequested || s_captureDone) {
+        return;
+    }
+    s_captureDone = true;
+
+    std::vector<unsigned char> rgb;
+    int width = 0;
+    int height = 0;
+    if (!p3d::display->ReadBackBuffer(rgb, width, height)
+        || !stbi_write_png(s_screenshotPath.c_str(), width, height, 3, rgb.data(), width * 3)) {
+        AutoTest_Fail(12, "screenshot failed");
+        return;
+    }
+    LOG_ALWAYS("[AutoTest] Wrote %s (%dx%d)", s_screenshotPath.c_str(), width, height);
+}
+
+void AutoTest_ParseArgs(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const bool hasValue = (i + 1 < argc);
         if (std::strcmp(argv[i], "--autotest") == 0 && hasValue) {
@@ -178,11 +174,11 @@ void AutoTest::ParseArgs(int argc, char** argv) {
     }
 }
 
-bool AutoTest::IsEnabled() {
+bool AutoTest_IsEnabled() {
     return s_enabled;
 }
 
-s32 AutoTest::GetLevelIndex() {
+s32 AutoTest_GetLevelIndex() {
     if (s_levelId >= 0 && g_game && g_game->GetWorld()) {
         const s32 index = g_game->GetWorld()->LevelIDToIndex(s_levelId);
         if (index >= 0) {
@@ -192,33 +188,33 @@ s32 AutoTest::GetLevelIndex() {
     return s_levelIndex;
 }
 
-bool AutoTest::TraceSpawns() {
+bool AutoTest_TraceSpawns() {
     return s_enabled && s_traceSpawns;
 }
 
-s32 AutoTest::GetPetalIndex() {
+s32 AutoTest_GetPetalIndex() {
     return s_petalIndex;
 }
 
-s32 AutoTest::GetFps() {
+s32 AutoTest_GetFps() {
     return s_fps;
 }
 
-f32 AutoTest::GetFixedDeltaTime() {
+f32 AutoTest_GetFixedDeltaTime() {
     return 1.0f / (f32)s_fps;
 }
 
-u32 AutoTest::GetHeldButtons() {
+u32 AutoTest_GetHeldButtons() {
     return (s_enabled && s_playFrames > 0) ? s_heldButtons : 0;
 }
 
-void AutoTest::Fail(int exitCode, const char* reason) {
+void AutoTest_Fail(int exitCode, const char* reason) {
     LOG_ALWAYS("[AutoTest] FAILED: %s", reason);
     s_exitCode = exitCode;
     s_finished = true;
 }
 
-bool AutoTest::Step(GameState state) {
+bool AutoTest_Step(GameState state) {
     if (!s_enabled) {
         return true;
     }
@@ -233,7 +229,7 @@ bool AutoTest::Step(GameState state) {
 
     if (state != GameState::Play) {
         if (s_playFrames == 0 && Time::GetTimeInSeconds() - s_startTime > kReachGameplayTimeoutSec) {
-            Fail(11, "never reached gameplay");
+            AutoTest_Fail(11, "never reached gameplay");
             return false;
         }
         return true;
@@ -244,7 +240,6 @@ bool AutoTest::Step(GameState state) {
         WarpToGenerator(s_warpGenerator);
     }
     if (s_killInterval > 0 && s_playFrames > 30 && (s_playFrames % s_killInterval) == 0 && g_ai) {
-        // Stand-in for the player winning fights: removes one active enemy.
         for (ccMinNode* n = g_ai->humanoidList.head; n; n = n->next) {
             Thing* thing = static_cast<Thing*>(n);
             if (thing != Player::s_player && (thing->flags & TF_ACTIVATED) && !(thing->flags & TF_DEAD)) {
@@ -268,6 +263,6 @@ bool AutoTest::Step(GameState state) {
     return false;
 }
 
-int AutoTest::GetExitCode() {
+int AutoTest_GetExitCode() {
     return s_exitCode;
 }

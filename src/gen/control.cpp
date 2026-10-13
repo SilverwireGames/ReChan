@@ -243,7 +243,7 @@ void InputManager::ServiceHostPads(const ActionInput* actionInput, bool commitNo
         actionInput->GetPadAnalog(analogLX, analogLY, analogRX, analogRY);
     }
 
-    buttons |= AutoTest::GetHeldButtons();
+    buttons |= AutoTest_GetHeldButtons();
 
     sampledPressLatch[0] |= (buttons & ~sampledButtons[0]);
     sampledButtons[0] = buttons;

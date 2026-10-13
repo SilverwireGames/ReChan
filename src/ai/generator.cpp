@@ -253,7 +253,7 @@ void EnemyGenerator::GenerateObject(s32 param) {
         modelNameBuffer,
         &dbRoot);
 
-    if (AutoTest::TraceSpawns()) {
+    if (AutoTest_TraceSpawns()) {
         Humanoid* h = static_cast<Humanoid*>(generated);
         LOG_ALWAYS("[Spawn] gen 0x%08X spawned %p type=%u at (%d,%d,%d) posBlock=%u thingBlock=%u flags=0x%X zone=%p aiParam=%d zoneMembers=%d made=%d/%d",
                    nameCRC, (void*)generated, (u32)generateType, spawnPos.x, spawnPos.y, spawnPos.z,
@@ -374,7 +374,7 @@ void EnemyGenerator::Think() {
         if (g_ai) {
             activeZone = static_cast<ActiveZone*>(g_ai->activeZoneList.FindNodeCRC(activeZoneHash, nullptr));
         }
-        if (AutoTest::TraceSpawns()) {
+        if (AutoTest_TraceSpawns()) {
             LOG_ALWAYS("[Spawn] gen 0x%08X first think: pos=(%d,%d,%d) block=%u type=%u total=%d burst=%d threshold=%d zoneHash=0x%08X zone=%p targets=%u",
                        nameCRC, pos.x, pos.y, pos.z, (u32)blockNum, (u32)generateType, field200, field292, field288,
                        activeZoneHash, (void*)activeZone, targetCount);

@@ -135,8 +135,7 @@ static bool OnWndProc(const pddiWndMessage& msg) {
 }
 
 #if !defined(RC_PLATFORM_SWITCH)
-// Game data is addressed relative to the working directory. When launched from somewhere
-// else (shortcut, IDE, terminal), fall back to the executable's own folder.
+// Fall back to the executable's folder for game data.
 static bool EnsureDataDirectory() {
     if (p3d::io::DirExists("pc")) {
         return true;
@@ -160,7 +159,7 @@ int main(int argc, char** argv) {
     Log::Get().Init();
     CrashReporter::Install();
     LOG_ALWAYS("%s %s", JCS_TITLE, GAME_VERSION);
-    AutoTest::ParseArgs(argc, argv);
+    AutoTest_ParseArgs(argc, argv);
 
 #if !defined(RC_PLATFORM_SWITCH)
     if (!dataDirFound) {
@@ -327,9 +326,8 @@ int main(int argc, char** argv) {
 
     game.Open();
 
-    if (AutoTest::IsEnabled() && g_time) {
-        // After Open(), which loads the frame-rate setting.
-        g_time->targetFPS = AutoTest::GetFps();
+    if (AutoTest_IsEnabled() && g_time) {
+        g_time->targetFPS = AutoTest_GetFps();
     }
 
 #ifdef MOD_LOADER
@@ -349,8 +347,8 @@ int main(int argc, char** argv) {
 
         f32 realDt = (f32)(frameStart - prevTime);
         prevTime = frameStart;
-        if (AutoTest::IsEnabled()) {
-            realDt = AutoTest::GetFixedDeltaTime();
+        if (AutoTest_IsEnabled()) {
+            realDt = AutoTest_GetFixedDeltaTime();
         }
         g_time->Tick(realDt);
 #if HIGH_FPS_PLAY_PRESENTATION
@@ -428,7 +426,7 @@ int main(int argc, char** argv) {
         jcsUpdateAmbience();
         jcsUpdateDialogCD();
 
-        if (!AutoTest::Step(game.GetState())) {
+        if (!AutoTest_Step(game.GetState())) {
             break;
         }
 
@@ -480,5 +478,5 @@ int main(int argc, char** argv) {
     LOG_ALWAYS("Clean shutdown");
     Log::Get().Shutdown();
 
-    return AutoTest::GetExitCode();
+    return AutoTest_GetExitCode();
 }
