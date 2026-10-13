@@ -5,7 +5,7 @@
 #define UPDATE_REPO_OWNER "SilverwireGames"
 #define UPDATE_REPO_NAME "ReChan"
 
-#define LEGAL_TEXT R"(
+inline constexpr const char* LEGAL_TEXT = R"(
 LEGAL NOTICE
 
 ReChan is an independent, unofficial reimplementation project for Jackie Chan Stuntmaster.
@@ -22,4 +22,4 @@ For updates and more information:
 silverwiregames.com/rechan
 
 © 2026 Silverwire Games
-)"
+)";
