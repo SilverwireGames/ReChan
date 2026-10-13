@@ -247,6 +247,15 @@ void Thing::Activate() {
         if (!(flags & TF_MODEL_CREATED)) {
             CreateModel(nullptr);
         }
+        else if (pcVisualModelOnly) {
+            pcVisualModelOnly = false;
+            OnVisualModelPromoted();
+        }
+    }
+    else if (g_blockManager && g_blockManager->IsVisualOnlyBlock(blockNum) && !(flags & TF_MODEL_CREATED)) {
+        // PC: display-only model for widescreen.
+        pcVisualModelOnly = true;
+        CreateModel(nullptr);
     }
 }
 
@@ -272,10 +281,24 @@ void Thing::Deactivate() {
     if (wasInactiveOnEntry) {
         if (!(flags & TF_ACTIVATED)) {
             if (flags & TF_MODEL_CREATED) {
-                DeleteModel();
+                if (g_blockManager && g_blockManager->IsVisualOnlyBlock(blockNum)) {
+                    if (!pcVisualModelOnly) {
+                        pcVisualModelOnly = true;
+                        OnVisualModelDemoted();
+                    }
+                }
+                else {
+                    DeleteModel();
+                }
             }
         }
     }
+}
+
+void Thing::OnVisualModelPromoted() {
+}
+
+void Thing::OnVisualModelDemoted() {
 }
 
 // PSX: Move__5Thing (THING.CPP:835)
@@ -332,8 +355,11 @@ void Thing::CreateModel(const char* name) {
     }
     else if (modelType == 1) {
         SModel* sm = nullptr;
-        if (existing && existing->drawableType != 1) {
-            sm = static_cast<SModel*>(existing);
+        if (existing) {
+            sm = dynamic_cast<SModel*>(existing);
+        }
+        if (sm) {
+            model = sm;
         }
         else {
             if (existing) {
@@ -383,6 +409,7 @@ void Thing::DeleteModel() {
         model = nullptr;
     }
     flags &= ~TF_MODEL_CREATED;
+    pcVisualModelOnly = false;
 }
 
 // PSX: HandleCollision__5ThingP5Thingle (THING.CPP:713)

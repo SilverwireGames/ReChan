@@ -120,8 +120,10 @@ void HUD::Display() {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: hud step flag begin");
 #endif
+    const bool usesFixedLogicStep = g_game
+        && (g_game->GetState() == GameState::Play || g_game->GetState() == GameState::EndLevelLoop);
     const bool isPlayRenderOnlyFrame =
-        (g_game && g_game->GetState() == GameState::Play && g_time && !g_time->DidPlayLogicStepThisFrame());
+        (usesFixedLogicStep && g_time && !g_time->DidPlayLogicStepThisFrame());
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     PspPerf::Trace("render: hud step flag done");
 #endif

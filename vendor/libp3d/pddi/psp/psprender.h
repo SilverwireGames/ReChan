@@ -545,6 +545,8 @@ public:
     void UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
                                  const u16* data, int x, int y,
                                  int w, int h) override;
+    void UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                               int srcPitchTexels, const u16* data) override;
     void SetRealTextureMode(bool enabled) override {
         if (realTextureMode != enabled) FlushQueuedOpaqueDraws();
         realTextureMode = enabled;

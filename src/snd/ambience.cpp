@@ -1,6 +1,7 @@
 #include "snd/ambience.h"
 
 #include "gen/common.h"
+#include "gen/time.h"
 #include "snd/sound.h"
 #include "snd/adpcm.h"
 #include "xclib/xcfile.h"
@@ -288,9 +289,19 @@ void Ambiance::Update() {
 
     if (!running) return;
 
+    // Fade steps assume 60 calls per second.
+    static f64 s_lastUpdateTime = 0.0;
+    const f64 now = Time::GetTimeInSeconds();
+    f64 elapsed = now - s_lastUpdateTime;
+    s_lastUpdateTime = now;
+    if (elapsed < 0.0 || elapsed > 0.1) {
+        elapsed = 1.0 / 60.0;
+    }
+    const f32 stepScale = (f32)(elapsed * 60.0);
+
     // Global fade gate (level enter/exit, engine mute).
     if (globalFadeDir != 0) {
-        globalFade += globalFadeStep * (f32)globalFadeDir;
+        globalFade += globalFadeStep * stepScale * (f32)globalFadeDir;
         if (globalFade <= 0.0f) {
             globalFade = 0.0f;
             globalFadeDir = 0;
@@ -303,7 +314,7 @@ void Ambiance::Update() {
 
     // Space crossfade: advance mix; the outgoing bed is stopped once fully out.
     if (crossfading) {
-        mix += crossFadeStep;
+        mix += crossFadeStep * stepScale;
         if (mix >= 1.0f) {
             mix = 1.0f;
             crossfading = false;

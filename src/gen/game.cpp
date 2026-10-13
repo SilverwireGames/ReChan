@@ -54,6 +54,7 @@
 #include "pc/settings.h"
 #include "radlib/rtask.h"
 #include "pc/textmgr.h"
+#include "pc/autotest.h"
 #include "extra/version.h"
 
 #if !defined(RC_PLATFORM_PSP)
@@ -450,6 +451,11 @@ static void CaptureHumanoidAttackJointsLoop(ccList& list) {
         if (hm && hm->animMatrices) {
             hm->animMatrices->Swap();
             hm->CaptureAttackJointMatrices();
+
+            // PSX did this in Draw right after the capture.
+            Humanoid* humanoid = static_cast<Humanoid*>(thing);
+            humanoid->attackJointIndex = -1;
+            humanoid->UpdateCollisionBoundsFromJoints();
         }
     }
 }
@@ -591,7 +597,9 @@ void Game::DrawEverythingHandlerCB(Handler*) {
 #else
     if (g_director) {
 #if HIGH_FPS_PLAY_PRESENTATION
-        const bool isPlayRenderOnlyFrame = (g_game && g_game->GetState() == GameState::Play && g_time && !g_time->DidPlayLogicStepThisFrame());
+        const bool usesFixedLogicStep = g_game
+            && (g_game->GetState() == GameState::Play || g_game->GetState() == GameState::EndLevelLoop);
+        const bool isPlayRenderOnlyFrame = (usesFixedLogicStep && g_time && !g_time->DidPlayLogicStepThisFrame());
         if (!isPlayRenderOnlyFrame) {
 #endif
         g_director->updateVramAnims();
@@ -720,14 +728,12 @@ void Game::MenuFade() {
     MARKFUNCTION(0x80029E34);
     LOG("[Game] MenuFade: begin");
 
-    // Safety bound: if the dialogue gate never clears (e.g. a stuck load
-    // state), don't hang the game forever waiting for it - proceed with
-    // the fade anyway after a couple of seconds.
-    constexpr f64 kMaxDialogWaitSec = 2.0;
+    // Safety bound only; must exceed the longest dialog line.
+    constexpr f64 kMaxDialogWaitSec = 15.0;
     const f64 dialogWaitStart = Time::GetTimeInSeconds();
     while (jcsIsPlaying()) {
         if (Time::GetTimeInSeconds() - dialogWaitStart > kMaxDialogWaitSec) {
-            LOG("[Game] MenuFade: jcsIsPlaying() stuck past %.1fs, proceeding with fade anyway", kMaxDialogWaitSec);
+            LOG_ALWAYS("[Game] MenuFade: jcsIsPlaying() stuck past %.1fs, proceeding with fade anyway", kMaxDialogWaitSec);
             break;
         }
         const f64 frameStart = Time::GetTimeInSeconds();
@@ -923,7 +929,7 @@ void Game::SetState(GameState s) {
         }
     }
 
-    LOG("[Game] State: %d -> %d", static_cast<int>(prevState), static_cast<int>(state));
+    LOG_ALWAYS("[Game] State: %d -> %d", static_cast<int>(prevState), static_cast<int>(state));
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY)
     char trace[64];
     std::snprintf(trace, sizeof(trace), "state %d -> %d",
@@ -955,6 +961,17 @@ bool Game::gsIntroState(Game* game) {
         g_psxDiscExtractor->Init();
     }
 #endif
+
+    if (AutoTest_IsEnabled()) {
+        if (!PsxDiscExtractor::AreAssetsPresent()) {
+            AutoTest_Fail(10, "game data missing");
+            return true;
+        }
+        game->assetCheckDone = true;
+        game->autosaveNoticeShown = true;
+        game->SetState(GameState::Init);
+        return true;
+    }
 
 #if SKIP_INTRO
     // Only skips the legal-splash presentation, not the asset check below - a build with
@@ -1069,9 +1086,12 @@ bool Game::gsIntroState(Game* game) {
                     }
                     // AI::InternalOpen() parsed scr/behave.txt at the same point and found
                     // nothing, which leaves every enemy without attacks until a restart.
+                    // Same for behave.txt and the fonts.
                     if (g_ai && g_ai->behaviourList.IsEmpty()) {
                         g_ai->ParseBehaviourAttribScript();
                     }
+
+                    InitXconFSImage();
                 }
             }
             return true;
@@ -1276,6 +1296,11 @@ bool Game::gsTitleState(Game* game) {
     game->titleFadeType = 0;
 
     game->SetState(GameState::TitleLoop);
+
+    if (AutoTest_IsEnabled()) {
+        g_selectedLevel = (s16)AutoTest_GetLevelIndex();
+        game->titleAutoStart = true;
+    }
 
     if (g_inputManager) {
         const s16* titleMode = TitleControlModeArray();
@@ -1594,7 +1619,7 @@ bool Game::gsOpenFEState(Game* game) {
             g_selectedLevel = static_cast<s16>(world->LevelIDToIndex(1));
             PspPerf::WriteState("autostart", 1, g_selectedLevel, g_selectedLevel);
 #endif
-            world->SetTargetLevelPetal((u32)g_selectedLevel, 0);
+            world->SetTargetLevelPetal((u32)g_selectedLevel, AutoTest_IsEnabled() ? (u32)AutoTest_GetPetalIndex() : 0);
         }
         if (g_time) {
             g_time->frameCounter = 0;
@@ -2708,6 +2733,10 @@ void Game::PlayMovie(const char* name, s32 skippable, s32 unloadLevel) {
         if (world) {
             world->Unload();
         }
+    }
+
+    if (AutoTest_IsEnabled()) {
+        return;
     }
 
     // PSX: rsEvent(4, 24, 0, 0) -- SetSFXVol(24)

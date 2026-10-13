@@ -33,7 +33,8 @@ SOURCES += $(ROOT)/src/extra/cheats.cpp \
 	$(ROOT)/src/extra/jsondataloader.cpp \
 	$(ROOT)/src/extra/shadowcsm.cpp \
 	$(ROOT)/src/extra/wavloader.cpp
-SOURCES += $(ROOT)/src/pc/coldebug.cpp \
+SOURCES += $(ROOT)/src/pc/autotest.cpp \
+	$(ROOT)/src/pc/coldebug.cpp \
 	$(ROOT)/src/pc/controllerlight.cpp \
 	$(ROOT)/src/pc/inputaction.cpp \
 	$(ROOT)/src/pc/textbackend.cpp \

@@ -53,9 +53,12 @@ void Log::LogMessageV(const char* fmt, va_list args) {
 #else
     m_MessageStack.emplace_back(buffer);
 #endif
-    WriteToConsole(buffer);
-    WriteToConsole("\n");
+    // Console output is tied to the log file: a release EBOOT never opens it,
+    // and upstream's LOG_ALWAYS call sites must not push text through
+    // pspDebugScreenPrintf in a shipping build.
     if (g_pspLogFile) {
+        WriteToConsole(buffer);
+        WriteToConsole("\n");
         std::fprintf(g_pspLogFile, "%s\n", buffer);
         std::fflush(g_pspLogFile);
     }

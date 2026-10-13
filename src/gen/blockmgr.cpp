@@ -192,6 +192,8 @@ BlockManager::BlockManager() {
     memset(drawList, 0, sizeof(drawList));
     alreadyLoadedCount = 0;
     memset(alreadyLoadedList, 0, sizeof(alreadyLoadedList));
+    activeCount = 0;
+    memset(activeList, 0, sizeof(activeList));
     flag1 = 1;
     flag2 = 1;
     flag3 = 1;
@@ -233,6 +235,8 @@ void BlockManager::InternalOpen() {
     memset(drawList, 0, sizeof(drawList));
     alreadyLoadedCount = 0;
     memset(alreadyLoadedList, 0, sizeof(alreadyLoadedList));
+    activeCount = 0;
+    memset(activeList, 0, sizeof(activeList));
     toBeLoadedCount = 0;
     memset(toBeLoadedList, 0, sizeof(toBeLoadedList));
     loadingState = 0;
@@ -249,6 +253,7 @@ void BlockManager::InternalClose() {
     totalBlocks = 0;
     drawListCount = 0;
     alreadyLoadedCount = 0;
+    activeCount = 0;
     toBeLoadedCount = 0;
 }
 
@@ -423,15 +428,27 @@ u16 BlockManager::GetBlockNumberAllBlocks(const LVector& pos) const {
 }
 
 // InActiveList__C12BlockManagerUl (BLKMGR.CPP:825, 0x80050D44)
-// PSX: checks alreadyLoadedList u16 array for blockNum.
+// PSX: checks the active list (+112 count, +116 u16 array) for blockNum.
 bool BlockManager::InActiveList(u32 blockNum) const {
     MARKFUNCTION(0x80050D44);
-    for (u32 i = 0; i < alreadyLoadedCount; i++) {
-        if (alreadyLoadedList[i] == (u16)blockNum) {
+    for (u32 i = 0; i < activeCount; i++) {
+        if (activeList[i] == (u16)blockNum) {
             return true;
         }
     }
     return false;
+}
+
+bool BlockManager::IsVisualOnlyBlock(u32 blockNum) const {
+#if FIX_ASPECT_RATIO
+    const f32 aspectRatio = g_display ? g_display->GetAspectRatio() : DEFAULT_ASPECT_RATIO;
+    if (aspectRatio <= DEFAULT_ASPECT_RATIO + 0.001f) {
+        return false;
+    }
+    return InDrawList(blockNum) && !InActiveList(blockNum) && IsValidBlockNumber(blockNum);
+#else
+    return false;
+#endif
 }
 
 // InDrawList__C12BlockManagerUl (BLKMGR.CPP:807, 0x80050CF4)
@@ -559,10 +576,12 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
         toBeLoadedList[index] = 6969;
         alreadyLoadedList[index] = 6969;
         drawList[index] = 6969;
+        activeList[index] = 6969;
     }
     toBeLoadedCount = 0;
     alreadyLoadedCount = 0;
     drawListCount = 0;
+    activeCount = 0;
 
     if (numBlocks == 0) {
         return false;
@@ -801,38 +820,23 @@ bool BlockManager::UpdateToBeLoadedList(u32 blockNum) {
         drawList[drawListCount++] = nextBlocks[index];
     }
 
+    // PSX: active range from block bytes 35/34, capped at 7.
     u32 previousActive = (previousCount < currentBlock->lodFarZ) ? previousCount : (u32)currentBlock->lodFarZ;
     u32 nextActive = (u32)currentBlock->lodNearZ;
     if (nextCount < nextActive) {
         nextActive = nextCount;
     }
-#if FIX_ASPECT_RATIO
-    {
-        const f32 wsAspect = g_display ? g_display->GetAspectRatio() : DEFAULT_ASPECT_RATIO;
-        if (wsAspect > DEFAULT_ASPECT_RATIO + 0.001f) {
-            FitBlockWindowWidescreen(previousActive, nextActive, previousCount, nextCount, numBlocks);
-        } else if (numBlocks > GetBaseLoadedBlockCount()) {
-            FitBlockWindow(previousActive, nextActive, previousCount, nextCount, numBlocks);
-        } else if (previousActive + nextActive + 1 >= 8) {
-            FitBlockWindow(previousActive, nextActive, previousCount, nextCount, 7);
-        }
-    }
-#else
-    if (numBlocks > GetBaseLoadedBlockCount()) {
-        FitBlockWindow(previousActive, nextActive, previousCount, nextCount, numBlocks);
-    }
-    else if (previousActive + nextActive + 1 >= 8) {
+    if (previousActive + nextActive + 1 >= 8) {
         FitBlockWindow(previousActive, nextActive, previousCount, nextCount, 7);
     }
-#endif
 
-    alreadyLoadedCount = 1;
-    alreadyLoadedList[0] = (u16)blockNum;
-    for (u32 index = 0; index < previousActive && alreadyLoadedCount < kBlockManagerListCapacity; index++) {
-        alreadyLoadedList[alreadyLoadedCount++] = previousBlocks[index];
+    activeCount = 1;
+    activeList[0] = (u16)blockNum;
+    for (u32 index = 0; index < previousActive && activeCount < kBlockManagerListCapacity; index++) {
+        activeList[activeCount++] = previousBlocks[index];
     }
-    for (u32 index = 0; index < nextActive && alreadyLoadedCount < kBlockManagerListCapacity; index++) {
-        alreadyLoadedList[alreadyLoadedCount++] = nextBlocks[index];
+    for (u32 index = 0; index < nextActive && activeCount < kBlockManagerListCapacity; index++) {
+        activeList[activeCount++] = nextBlocks[index];
     }
 
     return toBeLoadedCount < numBlocks;

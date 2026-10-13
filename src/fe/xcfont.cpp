@@ -668,7 +668,9 @@ void oxFontFile::FontInit(const char* path) {
     MARKFUNCTION(0x80040998);
 
     // PSX: allocate and construct new xcSectionMan (8 bytes)
-    sectionMan = new xcSectionMan();
+    if (!sectionMan) {
+        sectionMan = new xcSectionMan();
+    }
 
     // PSX: xcReadFileLow(path, &data, &size)
     u8* data = nullptr;
@@ -708,8 +710,8 @@ void oxFontFile::FontInit(const char* path) {
 void oxFontFile::ReloadFont(const char* path) {
     MARKFUNCTION(0x80040A8C);
 
-    // If no sectionMan yet, do FontInit instead
-    if (!sectionMan) {
+    // If no sectionMan yet (or it never got its fonts), do FontInit instead
+    if (!sectionMan || !sectionMan->fonts) {
         FontInit(path);
         return;
     }

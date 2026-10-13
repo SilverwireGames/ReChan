@@ -35,6 +35,7 @@
 #include "snd/sndfact.h"
 #include "pc/log.h"
 
+#include <algorithm>
 #include <vector>
 
 #include "extra/shadowcsm.h"
@@ -65,6 +66,7 @@ struct PspWEffectFrameScratch {
     std::vector<Mat4> partJointMatrices;
     pddiPrimBuffer* sortedTriangleBuffer = nullptr;
     pddiPrimBuffer* sortedQuadBuffer = nullptr;
+    pddiPrimBuffer* batchBuffer = nullptr;
 };
 
 PspWEffectFrameScratch g_pspWEffectFrameScratch;
@@ -4557,6 +4559,78 @@ bool ComEffect::IsFastDrawGeoCurrent() const {
     return GetGeo(fastDrawGeoIndex) == fastDrawGeo;
 }
 
+// Depth-sort key for the fast display paths below. Sorting these instead of the
+// primitives keeps the far-to-near draw order while moving 8 bytes per swap.
+struct FastSortOrder {
+    f32 depth;
+    u32 index;
+};
+
+// Scratch geometry for the batched effect draws. Both fast display paths feed
+// the same vertex layout, so one pair of buffers serves both; they are reused
+// across frames and only ever grow.
+static std::vector<GeoRenderVertex> s_fastBatchVerts;
+static std::vector<u16> s_fastBatchIndices;
+
+static void FastEffectBatchReset() {
+    s_fastBatchVerts.clear();
+    s_fastBatchIndices.clear();
+}
+
+// Appends one triangle (3 verts) or quad (4 verts) as a triangle list.
+static void FastEffectBatchAddPrim(const GeoRenderVertex* verts, u32 vertCount) {
+    const u16 base = static_cast<u16>(s_fastBatchVerts.size());
+    for (u32 i = 0; i < vertCount; i++) {
+        s_fastBatchVerts.push_back(verts[i]);
+    }
+    if (vertCount == 4u) {
+        const u16 quad[6] = { base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                              static_cast<u16>(base + 2), static_cast<u16>(base + 1),
+                              static_cast<u16>(base + 3) };
+        s_fastBatchIndices.insert(s_fastBatchIndices.end(), quad, quad + 6);
+        return;
+    }
+    const u16 tri[3] = { base, static_cast<u16>(base + 1), static_cast<u16>(base + 2) };
+    s_fastBatchIndices.insert(s_fastBatchIndices.end(), tri, tri + 3);
+}
+
+static void FastEffectBatchDraw() {
+    if (s_fastBatchIndices.empty()) {
+        return;
+    }
+    const u32 vertCount = static_cast<u32>(s_fastBatchVerts.size());
+    const u32 indexCount = static_cast<u32>(s_fastBatchIndices.size());
+    pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES,
+                            PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO,
+                            vertCount, indexCount);
+#if defined(RC_PLATFORM_PSP)
+    // Retain the batch buffer across runs and frames; a per-run alloc/free on
+    // the PSP heap was the churn the frame scratch exists to avoid. Grow it
+    // only when a run needs more room than the retained buffer offers.
+    pddiPrimBuffer* buffer = g_pspWEffectFrameScratch.batchBuffer;
+    if (buffer && (buffer->GetVertexCount() < vertCount
+                   || buffer->GetIndexCount() < indexCount)) {
+        buffer->Release();
+        buffer = nullptr;
+    }
+    if (!buffer) {
+        buffer = p3d::device->NewPrimBuffer(desc);
+        g_pspWEffectFrameScratch.batchBuffer = buffer;
+    }
+#else
+    pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
+#endif
+    if (!buffer) {
+        return;
+    }
+    buffer->SetVertexData(s_fastBatchVerts.data(), vertCount);
+    buffer->SetIndices(s_fastBatchIndices.data(), indexCount);
+    p3d::context->DrawPrimBuffer(buffer);
+#if !defined(RC_PLATFORM_PSP)
+    buffer->Release();
+#endif
+}
+
 void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
     MARKFUNCTION(0x8004F5E8);
 
@@ -4609,7 +4683,13 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
     ResizeRetainedWEffectScratch(sortedTris,
                                   static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
 #else
-    std::vector<FastSortedTri> sortedTris(static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
+    // Reused across frames: this used to allocate the full worst-case buffer
+    // (a FastSortedTri is 128 bytes) on every call.
+    static std::vector<FastSortedTri> sortedTris;
+    const size_t sortedTriCapacity = static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount);
+    if (sortedTris.size() < sortedTriCapacity) {
+        sortedTris.resize(sortedTriCapacity);
+    }
 #endif
     u32 sortedTriCount = 0;
 
@@ -4699,42 +4779,51 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
         return;
     }
 
-    for (u32 i = 1u; i < sortedTriCount; i++) {
-        const FastSortedTri key = sortedTris[i];
-        u32 j = i;
-        while (j > 0u && sortedTris[j - 1u].depth < key.depth) {
-            sortedTris[j] = sortedTris[j - 1u];
-            j--;
-        }
-        sortedTris[j] = key;
+    // Sort an index list rather than the primitives. The old insertion sort was
+    // O(n^2) over 128-byte structs, so a few hundred tris meant megabytes of
+    // copying per frame; this moves 8-byte keys and is O(n log n). stable_sort
+    // with the same strict comparison keeps the original tie order.
+    static std::vector<FastSortOrder> sortedTriOrder;
+    if (sortedTriOrder.size() < sortedTriCount) {
+        sortedTriOrder.resize(sortedTriCount);
     }
-
-    static const u16 kTriIndices[3] = { 0, 1, 2 };
-    const u32 format = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+    for (u32 i = 0u; i < sortedTriCount; i++) {
+        sortedTriOrder[i].depth = sortedTris[i].depth;
+        sortedTriOrder[i].index = i;
+    }
+    std::stable_sort(sortedTriOrder.begin(), sortedTriOrder.begin() + sortedTriCount,
+                     [](const FastSortOrder& a, const FastSortOrder& b) { return a.depth > b.depth; });
 
     p3d::context->SetWorldMatrix(Mat4());
     p3d::context->SetCullMode(PDDI_CULL_NONE);
-    for (u32 triIndex = 0; triIndex < sortedTriCount; triIndex++) {
-        const FastSortedTri& tri = sortedTris[triIndex];
-        pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format, 3u, 3u);
-#if defined(RC_PLATFORM_PSP)
-        if (!g_pspWEffectFrameScratch.sortedTriangleBuffer) {
-            g_pspWEffectFrameScratch.sortedTriangleBuffer = p3d::device->NewPrimBuffer(desc);
-        }
-        pddiPrimBuffer* buffer = g_pspWEffectFrameScratch.sortedTriangleBuffer;
-#else
-        pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
-#endif
-        if (!buffer) {
-            continue;
+    // Batch runs of consecutive primitives that share blend state into one draw
+    // instead of one buffer + one draw per triangle. Only *consecutive* entries
+    // merge, so the depth-sorted back-to-front order is preserved exactly, and
+    // the blend state around each run is the same sequence the per-primitive
+    // version produced.
+    for (u32 triIndex = 0; triIndex < sortedTriCount; ) {
+        const FastSortedTri& first = sortedTris[sortedTriOrder[triIndex].index];
+        const bool runSemiTrans = first.usesSemiTrans;
+        const u8 runMode = first.semiTransMode;
+
+        u32 runEnd = triIndex;
+        while (runEnd < sortedTriCount) {
+            const FastSortedTri& tri = sortedTris[sortedTriOrder[runEnd].index];
+            if (tri.usesSemiTrans != runSemiTrans) break;
+            if (runSemiTrans && tri.semiTransMode != runMode) break;
+            // 16-bit indices cap a batch at 65535 vertices.
+            if ((runEnd - triIndex) * 3u + 3u > 65535u) break;
+            runEnd++;
         }
 
-        buffer->SetVertexData(tri.verts, 3u);
-        buffer->SetIndices(kTriIndices, 3u);
+        FastEffectBatchReset();
+        for (u32 i = triIndex; i < runEnd; i++) {
+            FastEffectBatchAddPrim(sortedTris[sortedTriOrder[i].index].verts, 3u);
+        }
 
-        if (tri.usesSemiTrans) {
+        if (runSemiTrans) {
             pddiBlendMode blendMode = PDDI_BLEND_ALPHA;
-            switch (tri.semiTransMode & 3u) {
+            switch (runMode & 3u) {
                 case 1: blendMode = PDDI_BLEND_ADD; break;
                 case 2: blendMode = PDDI_BLEND_SUBTRACT; break;
                 case 3: blendMode = PDDI_BLEND_PSX_QUARTER; break;
@@ -4743,15 +4832,13 @@ void ComEffect::FastZSortDisplayGCT3(u32 primCount) {
             p3d::context->SetBlendMode(blendMode);
         }
 
-        p3d::context->DrawPrimBuffer(buffer);
+        FastEffectBatchDraw();
 
-        if (tri.usesSemiTrans) {
+        if (runSemiTrans) {
             p3d::context->SetBlendMode(PDDI_BLEND_NONE);
         }
 
-#if !defined(RC_PLATFORM_PSP)
-        buffer->Release();
-#endif
+        triIndex = runEnd;
     }
 
     p3d::context->SetWorldMatrix(savedWorld);
@@ -4809,7 +4896,12 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
     ResizeRetainedWEffectScratch(sortedQuads,
                                   static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
 #else
-    std::vector<FastSortedQuad> sortedQuads(static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount));
+    // Reused across frames, as with the triangle path above.
+    static std::vector<FastSortedQuad> sortedQuads;
+    const size_t sortedQuadCapacity = static_cast<size_t>(fastDrawCount) * static_cast<size_t>(primCount);
+    if (sortedQuads.size() < sortedQuadCapacity) {
+        sortedQuads.resize(sortedQuadCapacity);
+    }
 #endif
     u32 sortedQuadCount = 0;
 
@@ -4899,42 +4991,43 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
         return;
     }
 
-    for (u32 i = 1u; i < sortedQuadCount; i++) {
-        const FastSortedQuad key = sortedQuads[i];
-        u32 j = i;
-        while (j > 0u && sortedQuads[j - 1u].depth < key.depth) {
-            sortedQuads[j] = sortedQuads[j - 1u];
-            j--;
-        }
-        sortedQuads[j] = key;
+    // Index sort, as with the triangle path above (a FastSortedQuad is 168 bytes).
+    static std::vector<FastSortOrder> sortedQuadOrder;
+    if (sortedQuadOrder.size() < sortedQuadCount) {
+        sortedQuadOrder.resize(sortedQuadCount);
     }
-
-    static const u16 kQuadIndices[6] = { 0, 1, 2, 2, 1, 3 };
-    const u32 format = PDDI_V_POSITION | PDDI_V_COLOUR | PDDI_V_UV | PDDI_V_TEXINFO;
+    for (u32 i = 0u; i < sortedQuadCount; i++) {
+        sortedQuadOrder[i].depth = sortedQuads[i].depth;
+        sortedQuadOrder[i].index = i;
+    }
+    std::stable_sort(sortedQuadOrder.begin(), sortedQuadOrder.begin() + sortedQuadCount,
+                     [](const FastSortOrder& a, const FastSortOrder& b) { return a.depth > b.depth; });
 
     p3d::context->SetWorldMatrix(Mat4());
     p3d::context->SetCullMode(PDDI_CULL_NONE);
-    for (u32 quadIndex = 0; quadIndex < sortedQuadCount; quadIndex++) {
-        const FastSortedQuad& quad = sortedQuads[quadIndex];
-        pddiPrimBufferDesc desc(PDDI_PRIM_TRIANGLES, format, 4u, 6u);
-#if defined(RC_PLATFORM_PSP)
-        if (!g_pspWEffectFrameScratch.sortedQuadBuffer) {
-            g_pspWEffectFrameScratch.sortedQuadBuffer = p3d::device->NewPrimBuffer(desc);
-        }
-        pddiPrimBuffer* buffer = g_pspWEffectFrameScratch.sortedQuadBuffer;
-#else
-        pddiPrimBuffer* buffer = p3d::device->NewPrimBuffer(desc);
-#endif
-        if (!buffer) {
-            continue;
+    // Batched the same way as the triangle path above.
+    for (u32 quadIndex = 0; quadIndex < sortedQuadCount; ) {
+        const FastSortedQuad& first = sortedQuads[sortedQuadOrder[quadIndex].index];
+        const bool runSemiTrans = first.usesSemiTrans;
+        const u8 runMode = first.semiTransMode;
+
+        u32 runEnd = quadIndex;
+        while (runEnd < sortedQuadCount) {
+            const FastSortedQuad& quad = sortedQuads[sortedQuadOrder[runEnd].index];
+            if (quad.usesSemiTrans != runSemiTrans) break;
+            if (runSemiTrans && quad.semiTransMode != runMode) break;
+            if ((runEnd - quadIndex) * 4u + 4u > 65535u) break;
+            runEnd++;
         }
 
-        buffer->SetVertexData(quad.verts, 4u);
-        buffer->SetIndices(kQuadIndices, 6u);
+        FastEffectBatchReset();
+        for (u32 i = quadIndex; i < runEnd; i++) {
+            FastEffectBatchAddPrim(sortedQuads[sortedQuadOrder[i].index].verts, 4u);
+        }
 
-        if (quad.usesSemiTrans) {
+        if (runSemiTrans) {
             pddiBlendMode blendMode = PDDI_BLEND_ALPHA;
-            switch (quad.semiTransMode & 3u) {
+            switch (runMode & 3u) {
                 case 1: blendMode = PDDI_BLEND_ADD; break;
                 case 2: blendMode = PDDI_BLEND_SUBTRACT; break;
                 case 3: blendMode = PDDI_BLEND_PSX_QUARTER; break;
@@ -4943,15 +5036,13 @@ void ComEffect::FastZSortDisplayGCT4(u32 primCount) {
             p3d::context->SetBlendMode(blendMode);
         }
 
-        p3d::context->DrawPrimBuffer(buffer);
+        FastEffectBatchDraw();
 
-        if (quad.usesSemiTrans) {
+        if (runSemiTrans) {
             p3d::context->SetBlendMode(PDDI_BLEND_NONE);
         }
 
-#if !defined(RC_PLATFORM_PSP)
-        buffer->Release();
-#endif
+        quadIndex = runEnd;
     }
 
     p3d::context->SetWorldMatrix(savedWorld);
@@ -5815,6 +5906,10 @@ s32 WEffect::Create() {
     PspPerf::WriteState("weffect_create_reset", blockNum, effectType, active);
 #endif
 
+    // PSX (WEFFECT.CPP:908) only seeds the cursor here. Decoding frame 0 as well
+    // consumes it without advancing frameIndex, so the first WEffect::Update
+    // decodes frame 0 again with the cursor left at writeCursorEnd -- one
+    // duplicated frame, and 256 entries written past the palette buffer.
     if (paletteData) {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
         PspPerf::WriteState("weffect_palette_begin", blockNum, effectType, 1);
@@ -5823,20 +5918,6 @@ s32 WEffect::Create() {
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
         PspPerf::WriteState("weffect_palette_init", blockNum, effectType, 1);
 #endif
-        // Pre-initialize CLUT in vram.data so RefreshVRAMTexture captures the
-        // correct initial palette state after a petal reload (not stale values
-        // from the previous gameplay session).
-        const bool paletteUpdated = paletteData->Update();
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
-        PspPerf::WriteState("weffect_palette_update", blockNum, effectType,
-            paletteUpdated ? 1 : 0);
-#endif
-        if (paletteUpdated) {
-            paletteData->TransferVram();
-#if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
-            PspPerf::WriteState("weffect_palette_transfer", blockNum, effectType, 1);
-#endif
-        }
     }
 #if defined(RC_PLATFORM_PSP) && defined(PSP_PERF_TELEMETRY) && defined(PSP_AUTO_START_PHASE1)
     PspPerf::WriteState("weffect_create_palette", blockNum, effectType,
@@ -6010,16 +6091,22 @@ void WEffect::Display(s32 inBlockNum) {
 
     comEffect->SetFrame(frame);
 
+    // PSX calls this after Render (WEFFECT.CPP:1135) because Render only queues
+    // primitives into the ordering table -- the CLUT reaches VRAM before the OT
+    // is rasterised, so the frame draws with its own palette. Render() here
+    // rasterises immediately, so the transfer has to precede it or every frame
+    // draws with the previous frame's CLUT. Update() already filled the buffer
+    // during the logic step, so it is this frame's palette either way.
+    if (paletteData) {
+        paletteData->TransferVram();
+    }
+
     const LVector* scalePtr = hasScale ? &scale : nullptr;
     comEffect->Render(renderPos, scalePtr, &rotation, renderFlags);
 
     if (kDebugRenderUntexturedBillboard
         && (kDebugBillboardEffectHashFilter == 0u || nameCRC == kDebugBillboardEffectHashFilter)) {
         DrawDebugUntexturedBillboard(renderPos, 160.0f);
-    }
-
-    if (paletteData) {
-        paletteData->TransferVram();
     }
 }
 

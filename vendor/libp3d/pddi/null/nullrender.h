@@ -208,6 +208,7 @@ public:
     u32  CreateVRAMTexture(int, int, const u16*) override { return 0; }
     void DestroyVRAMTexture(u32) override {}
     void UpdateVRAMTexture(u32, int, int, const u16*) override {}
+    void UpdateVRAMTextureRect(u32, int, int, int, int, int, const u16*) override {}
 
     void SetRealTextureMode(bool enabled) override { realTextureMode = enabled; }
     bool IsRealTextureModeEnabled() const override { return realTextureMode; }

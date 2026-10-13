@@ -6,6 +6,8 @@ workspace "rechan"
 
     filter "system:windows"
         toolset "v145"
+        -- Parallel translation units race on the shared compiler PDB (C1041).
+        buildoptions { "/FS" }
     filter {}
 
 outputdir = "%{cfg.buildcfg}-%{cfg.system}-%{cfg.architecture}"
@@ -98,6 +100,7 @@ project "rechan"
         runtime "Release"
         optimize "on"
         symbols "on"
+        targetname "rechan-headless"
 
     filter { "system:linux", "configurations:Headless" }
         removelinks { "GL", "X11", "Xcursor", "Xi", "Xinerama", "Xrandr", "SDL2" }
@@ -112,10 +115,15 @@ project "rechan"
             "Metal.framework", "OpenGL.framework",
         }
 
+    -- Every config shares targetdir "bin" so the game finds its assets, so each
+    -- needs its own targetname or they silently overwrite each other's exe.
+    -- Release and Shipping deliberately both stay "rechan": pack-win64.ps1
+    -- packages bin/rechan.exe by name.
     filter "configurations:Debug"
         runtime "Debug"
         symbols "on"
         defines { "DEBUG" }
+        targetname "rechan-debug"
 
     filter "configurations:Release*"
         defines { "NDEBUG" }

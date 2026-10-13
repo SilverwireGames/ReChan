@@ -685,6 +685,9 @@ static void RegisterScriptRegion(u32 virtualBase, s32* hostBase, s32 wordCount) 
 }
 
 static s32* ResolveScriptAddress(u32 virtualAddress) {
+    // Regions can overlap; the closest base owns the address.
+    s32* best = nullptr;
+    u32 bestBase = 0;
     for (s32 i = 0; i < g_directorScriptRegionCount; i++) {
         const DirectorScriptRegion& region = g_directorScriptRegions[i];
         if (virtualAddress < region.virtualBase) {
@@ -701,10 +704,13 @@ static s32* ResolveScriptAddress(u32 virtualAddress) {
             continue;
         }
 
-        return region.hostBase + wordOffset;
+        if (!best || region.virtualBase > bestBase) {
+            best = region.hostBase + wordOffset;
+            bestBase = region.virtualBase;
+        }
     }
 
-    return nullptr;
+    return best;
 }
 
 static s32* ResolveOverlay7BlobAddress(u32 virtualAddress) {
@@ -2278,6 +2284,13 @@ void Director::Process() {
                         known ? info.regionVirtualBase : 0u, known ? info.wordOffset : -1);
                 }
                 LOG("[Director] unknown opcode 0x%02X at scriptPtr=%p", static_cast<u32>(opcode), static_cast<const void*>(scriptPtr));
+                {
+                    static const s32* s_lastReported = nullptr;
+                    if (s_lastReported != scriptPtr) {
+                        s_lastReported = scriptPtr;
+                        LOG_ALWAYS("[Director] script blocked on unknown opcode 0x%02X", static_cast<u32>(opcode));
+                    }
+                }
                 field68 = 1;
                 break;
         }
@@ -3516,19 +3529,13 @@ bool Director::DoesLevelHaveExtraMem(s32 level) {
 void Director::updateVramAnims() {
     MARKFUNCTION(0x8003BB90);
 
-    bool updated = false;
-
+    // AdvanceFrame pushes its new frame through p3d::rawTextureUploader, which
+    // is World::UploadToVRAM, so the dirty rect is recorded there.
     if (flipbookA) {
         reinterpret_cast<tFlipbook*>(flipbookA)->AdvanceFrame();
-        updated = true;
     }
     if (flipbookB) {
         reinterpret_cast<tFlipbook*>(flipbookB)->AdvanceFrame();
-        updated = true;
-    }
-
-    if (updated && g_game && g_game->GetWorld()) {
-        g_game->GetWorld()->RefreshVRAMTexture();
     }
 }
 

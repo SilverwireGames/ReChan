@@ -1353,6 +1353,7 @@ void AI::ParseBehaviourAttribScript() {
 
     ccFile file;
     if (!file.Open("scr/behave.txt", ccFile::OPEN_READ)) {
+        LOG_ALWAYS("[AI] Failed to open: scr/behave.txt");
         return;
     }
 
@@ -1502,6 +1503,8 @@ void AI::ParseBehaviourAttribScript() {
 
     delete[] buffer;
     file.Close();
+
+    LOG_ALWAYS("[AI] behave.txt: %d behaviours", behaviourList.GetNumElements());
 }
 
 // PSX: aiPrivHandler (AI.CPP:257, 0x800540E0) - handler callback

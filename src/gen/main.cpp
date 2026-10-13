@@ -15,6 +15,7 @@
 #include "pc/debugui.h"
 #include "pc/inputaction.h"
 #include "pc/rechan_icon_embedded.h"
+#include "pc/shadersrc.h"
 #include "pc/textmgr.h"
 #include "gen/game.h"
 #include "gen/world.h"
@@ -27,6 +28,7 @@
 #include "extra/assetexporter.h"
 #endif
 #include "pc/apppaths.h"
+#include "pc/autotest.h"
 #if MOD_LOADER
 #include "extra/gltfloader.h"
 #endif
@@ -45,6 +47,11 @@
 
 #include <vector>
 #include <algorithm>
+#if !defined(RC_PLATFORM_PSP)
+#include <filesystem>
+#endif
+#include <string>
+#include <system_error>
 
 #if defined(RC_PLATFORM_SWITCH)
 #include <unistd.h>
@@ -154,11 +161,48 @@ static bool OnWndProc(const pddiWndMessage& msg) {
     return false;
 }
 
+#if !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
+// Fall back to the executable's folder for game data.
+static bool EnsureDataDirectory() {
+    if (p3d::io::DirExists("pc")) {
+        return true;
+    }
+
+    const std::string exeDir = p3d::io::GetExecutableDir();
+    if (exeDir.empty() || !p3d::io::DirExists(p3d::io::JoinPath(exeDir, "pc"))) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::current_path(exeDir, ec);
+    return !ec;
+}
+#endif
+
 int main(int argc, char** argv) {
-#if !defined(NDEBUG) && !defined(RC_PLATFORM_PSP)
+#if !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
+    const bool dataDirFound = EnsureDataDirectory();
+#endif
+#if !defined(RC_PLATFORM_PSP)
+    // On PSP the log is opened later (PSP_LOG.TXT) only in builds that want it;
+    // a release EBOOT must not touch the Memory Stick per message.
     Log::Get().Init();
 #endif
     CrashReporter::Install();
+    LOG_ALWAYS("%s %s", JCS_TITLE, GAME_VERSION);
+    AutoTest_ParseArgs(argc, argv);
+
+#if !defined(RC_PLATFORM_SWITCH) && !defined(RC_PLATFORM_PSP)
+    if (!dataDirFound) {
+        LOG_ALWAYS("[main] 'pc' data folder not found next to the executable or in the working directory");
+        CrashReporter::ShowFatalMessage(
+            "ReChan",
+            "The 'pc' data folder was not found.\n\n"
+            "Keep the executable together with the files it shipped with and start it from that folder.");
+        Log::Get().Shutdown();
+        return 1;
+    }
+#endif
 
 #if defined(RC_PLATFORM_SWITCH)
     p3d::io::CreateDirectories("sdmc:/switch/rechan");
@@ -256,6 +300,12 @@ int main(int argc, char** argv) {
 #if !defined(NDEBUG) || defined(PSP_GU_DIAGNOSTIC) || defined(PSP_STAGE_DIAGNOSTIC)
     Log::Get().Init("PSP_LOG.TXT");
 #endif
+#endif
+
+    // Must precede CreateContext: the backend compiles its programs there and
+    // pddi carries no GLSL of its own.
+#if !defined(RC_PLATFORM_PSP)
+    RechanInstallShaderSources();
 #endif
 
     tPlatform* platform = tPlatform::Create();
@@ -369,6 +419,10 @@ int main(int argc, char** argv) {
 #endif
 #endif
 
+    if (AutoTest_IsEnabled() && g_time) {
+        g_time->targetFPS = AutoTest_GetFps();
+    }
+
 #if MOD_LOADER
     ModLoader::Instance().Init();
 #endif
@@ -406,6 +460,9 @@ int main(int argc, char** argv) {
 
         f32 realDt = (f32)(frameStart - prevTime);
         prevTime = frameStart;
+        if (AutoTest_IsEnabled()) {
+            realDt = AutoTest_GetFixedDeltaTime();
+        }
 #endif
         g_time->Tick(realDt);
 #if defined(RC_PLATFORM_PSP) && defined(PSP_AUTO_START_PHASE1)
@@ -589,6 +646,10 @@ int main(int argc, char** argv) {
         jcsUpdateAmbience();
         jcsUpdateDialogCD();
 
+        if (!AutoTest_Step(game.GetState())) {
+            break;
+        }
+
 #if defined(RC_PLATFORM_PSP)
         // A no-op on PSP (SwapBuffers already waits for vblank).
         g_time->WaitForFrameEnd(0.0);
@@ -675,6 +736,10 @@ int main(int argc, char** argv) {
 #endif
     ShutdownPspGeometryFrameScratch();
 #endif
+
+    LOG_ALWAYS("[main] Main loop ended: windowClosed=%d state=%d",
+               p3d::display->ShouldClose() ? 1 : 0, static_cast<int>(game.GetState()));
+
     platform->DestroyContext(ctx);
     tPlatform::Destroy();
 
@@ -705,10 +770,8 @@ int main(int argc, char** argv) {
     ModLoader::Instance().Shutdown();
 #endif
 
-    LOG("Clean shutdown");
-#if !defined(NDEBUG) || defined(PSP_GU_DIAGNOSTIC)
+    LOG_ALWAYS("Clean shutdown");
     Log::Get().Shutdown();
-#endif
 
-    return 0;
+    return AutoTest_GetExitCode();
 }

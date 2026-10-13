@@ -32,7 +32,7 @@ void ObstacleBuildRenderTransform(
 
 void ObstacleForgetRenderTransform(const Thing* owner);
 
-static s32 MulShift16(s32 a, s32 b) {
+static inline s32 MulShift16(s32 a, s32 b) {
     return static_cast<s32>((static_cast<s64>(a) * b) >> 16);
 }
 

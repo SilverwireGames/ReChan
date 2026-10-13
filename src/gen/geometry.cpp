@@ -463,6 +463,10 @@ tPrimGeom::~tPrimGeom() {
 #if defined(RC_PLATFORM_PSP)
     ReleasePspPrimGeomCache(this);
 #endif
+    if (drawBuffer) {
+        drawBuffer->Release();
+        drawBuffer = nullptr;
+    }
 
     delete[] ownedRawData;
     ownedRawData = nullptr;
@@ -592,7 +596,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
                                                    const GMFogState* gmFogState,
                                                    bool* outUsesSemiTrans,
                                                    u8* outSemiTransMode,
-                                                   bool reusePspFrameBuffer
+                                                   bool reuseGeomBuffer = false
 #if defined(RC_PLATFORM_PSP)
                                                    , std::vector<u32>* outUvOffsets = nullptr
                                                    , std::vector<u32>* outColourOffsets = nullptr
@@ -658,7 +662,7 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     const bool useClipOverlapReject = !(gmFogState && gmFogState->enabled);
 
 #if defined(RC_PLATFORM_PSP)
-    PspPrimGeomFrameScratch* frameScratch = reusePspFrameBuffer ? &s_pspPrimGeomFrameScratch : nullptr;
+    PspPrimGeomFrameScratch* frameScratch = reuseGeomBuffer ? &s_pspPrimGeomFrameScratch : nullptr;
     if (frameScratch) {
         ReservePspPrimGeomScratch(frameScratch, geom);
     }
@@ -670,14 +674,18 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     }
 #endif
 
+#if defined(RC_PLATFORM_PSP)
     std::vector<PrimGeomBuildLoopInfo> localLoops;
     std::vector<PrimGeomBuildLoopInfo>& loops =
-#if defined(RC_PLATFORM_PSP)
         frameScratch ? frameScratch->loops : localLoops;
 #else
-        localLoops;
+    // Reused across calls: rebuilt for every block every frame (camera-
+    // dependent). Rendering is single-threaded and this function is not
+    // re-entrant, so a function-local static is safe here.
+    static std::vector<PrimGeomBuildLoopInfo> loops;
 #endif
     loops.clear();
+    loops.reserve(geom->numLoops);
 
     u16 vertAccum = 0;
     u32 expectedPolyCount = 0;
@@ -719,23 +727,15 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     }
 #endif
 
+#if defined(RC_PLATFORM_PSP)
     std::vector<PrimGeomBuildVert> localVertBuf;
     std::vector<u16> localIdxBuf;
     std::vector<PrimGeomBuildVert>& vertBuf =
-#if defined(RC_PLATFORM_PSP)
         frameScratch ? frameScratch->verts : localVertBuf;
-#else
-        localVertBuf;
-#endif
     std::vector<u16>& idxBuf =
-#if defined(RC_PLATFORM_PSP)
         frameScratch ? frameScratch->indices : localIdxBuf;
-#else
-        localIdxBuf;
-#endif
     vertBuf.clear();
     idxBuf.clear();
-#if defined(RC_PLATFORM_PSP)
     // Size the build buffers once (at most 4 vertices / 6 indices per primitive).
     // Growing them with push_back doubles repeatedly and needs the old and new
     // block at the same time; on a nearly full heap that 1.5x peak is what made
@@ -748,6 +748,14 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     if (outColourOffsets) {
         outColourOffsets->reserve(outColourOffsets->size() + static_cast<size_t>(expectedPolyCount) * 4u);
     }
+#else
+    // Rebuilt for every visible block every frame (the emitted triangle set is
+    // camera-dependent), so the storage is reused rather than reallocated per
+    // call. Rendering is single-threaded and this function is not re-entrant.
+    static std::vector<PrimGeomBuildVert> vertBuf;
+    static std::vector<u16> idxBuf;
+    vertBuf.clear();
+    idxBuf.clear();
 #endif
     u32 culledBackfaceCount = 0;
     u32 culledClipCount = 0;
@@ -943,12 +951,15 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         return vert;
     };
 
+#if defined(RC_PLATFORM_PSP)
     std::vector<u8> localGmFogPrimScratch;
     std::vector<u8>& gmFogPrimScratch =
-#if defined(RC_PLATFORM_PSP)
         frameScratch ? frameScratch->gmFogPrimitives : localGmFogPrimScratch;
 #else
-        localGmFogPrimScratch;
+    // Reused across calls: this is refilled for every fogged block every frame,
+    // so a fresh allocation per call is pure churn. Same single-threaded,
+    // non-re-entrant reasoning as vertBuf/idxBuf above.
+    static std::vector<u8> gmFogPrimScratch;
 #endif
     gmFogPrimScratch.clear();
     if (gmFogState && gmFogState->enabled && geom->gmFogWriteList && geom->gmFogColourList) {
@@ -1485,7 +1496,8 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
     // index order changes, so the legacy single-draw path is unaffected.
     if (outRealTexGroups) {
         const u32 numTris = static_cast<u32>(idxBuf.size() / 3);
-        std::vector<u32> order(numTris);
+        static std::vector<u32> order;
+        order.resize(numTris);
         for (u32 t = 0; t < numTris; t++) order[t] = t;
 
         auto keyOf = [&](u32 tri) -> u32 {
@@ -1494,7 +1506,10 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         };
         std::stable_sort(order.begin(), order.end(), [&](u32 a, u32 b) { return keyOf(a) < keyOf(b); });
 
-        std::vector<u16> groupedIndices(idxBuf.size());
+        // Static for the same reason as vertBuf/idxBuf: swapping a fresh local
+        // into idxBuf would discard the reused allocation every frame.
+        static std::vector<u16> groupedIndices;
+        groupedIndices.assign(idxBuf.size(), 0);
         outRealTexGroups->clear();
         u32 groupStart = 0;
         u32 prevKey = (numTris > 0) ? keyOf(order[0]) : 0;
@@ -1590,7 +1605,13 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         buffer = p3d::device->NewPrimBuffer(desc);
     }
 #else
-    buffer = p3d::device->NewPrimBuffer(desc);
+    buffer = reuseGeomBuffer ? geom->drawBuffer : nullptr;
+    if (!buffer) {
+        buffer = p3d::device->NewPrimBuffer(desc);
+        if (reuseGeomBuffer) {
+            geom->drawBuffer = buffer;
+        }
+    }
 #endif
     if (!buffer) {
         return nullptr;
@@ -1850,6 +1871,8 @@ pddiPrimBuffer* BuildPrimBufferFromRawPrimGeom(const u8* primData, u32 primSize
         return nullptr;
     }
 
+    // reuseGeomBuffer must stay false: geom is deleted immediately below, which
+    // would release the buffer this function returns.
     pddiPrimBuffer* buffer = BuildPrimBufferFromPrimGeom(geom, nullptr, nullptr, nullptr, nullptr, false
 #if REAL_TEXTURE_RENDERING
                                                           , outRealTexGroups
@@ -2415,10 +2438,6 @@ int RP_ZCullGClip(tGeometry* geometry, const LVector* drawPos) {
             static_cast<unsigned long>(pspClipId));
     }
 #endif
-
-#if !defined(RC_PLATFORM_PSP)
-    buffer->Release();
-#endif
     return 1;
 }
 
@@ -2497,9 +2516,6 @@ int RP_ZCullGMFog(tGeometry* geometry, const LVector* drawPos, u16 fogNear, u16 
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
 
-#if !defined(RC_PLATFORM_PSP)
-    buffer->Release();
-#endif
     return 1;
 }
 

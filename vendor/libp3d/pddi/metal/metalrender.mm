@@ -2659,6 +2659,28 @@ void mtContext::UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) {
                 bytesPerRow:(NSUInteger)(w * sizeof(u16))];
 }
 
+void mtContext::UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                                      int srcPitchTexels, const u16* data) {
+    if (!data || w <= 0 || h <= 0 || srcPitchTexels < w) return;
+    void* tex = ResolveVRAMTexture(handle);
+    if (!tex) return;
+    id<MTLTexture> mtl = mtId(tex);
+    const int clampedX = std::max(0, x);
+    const int clampedY = std::max(0, y);
+    const int clampedW = std::min<int>(x + w, (int)mtl.width) - clampedX;
+    const int clampedH = std::min<int>(y + h, (int)mtl.height) - clampedY;
+    if (clampedW <= 0 || clampedH <= 0) return;
+    // replaceRegion takes tightly packed rows, so upload one row at a time
+    // instead of staging a copy of the pitched source.
+    for (int row = 0; row < clampedH; ++row) {
+        [mtl replaceRegion:MTLRegionMake2D(clampedX, clampedY + row, clampedW, 1)
+               mipmapLevel:0
+                 withBytes:data + (size_t)(row + (clampedY - y)) * srcPitchTexels
+                           + (clampedX - x)
+               bytesPerRow:(NSUInteger)(clampedW * sizeof(u16))];
+    }
+}
+
 void* mtContext::ResolveVRAMTexture(u32 handle) {
     auto it = vramTextures.find(handle);
     return it == vramTextures.end() ? nullptr : it->second;

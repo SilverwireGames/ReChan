@@ -27,6 +27,9 @@ switch/**/*.lst
 switch/**/build_log.txt
 switch/libp3d/lib/
 
+minidumps/
+scripts/autotest-baseline/
+
 # PSP build outputs (the source-side Makefile intentionally mirrors the
 # PSPSDK sample layout, so its intermediates land beside the sources).
 psp/*.elf

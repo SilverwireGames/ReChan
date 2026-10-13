@@ -1,4 +1,5 @@
 #include "ai/activezn.h"
+#include "pc/autotest.h"
 #include "ai/behaviour.h"
 #include "ai/humanoid.h"
 #include "ai/player.h"
@@ -84,6 +85,9 @@ void ActiveZone::AddSubZoneVolume(SubZoneVolume* szv) {
 
 // PSX: AddHumanoidToOverlordMembers__10ActiveZoneP8Humanoid (ACTIVEZN.CPP:390)
 void ActiveZone::AddHumanoidToOverlordMembers(Humanoid* h) {
+    if (AutoTest_TraceSpawns()) {
+        LOG_ALWAYS("[Spawn] zone 0x%08X add member %p (count %u)", nameCRC, (void*)h, (u32)memberCount);
+    }
     if (memberCount >= 3)
         return;
     memberCount++;
@@ -99,6 +103,9 @@ void ActiveZone::AddHumanoidToOverlordMembers(Humanoid* h) {
 void ActiveZone::RemoveHumanoidFromOverlordMembers(Humanoid* h) {
     for (int i = 0; i < 3; i++) {
         if (members[i] == h) {
+            if (AutoTest_TraceSpawns()) {
+                LOG_ALWAYS("[Spawn] zone 0x%08X remove member %p (count %u)", nameCRC, (void*)h, (u32)memberCount);
+            }
             members[i] = nullptr;
             memberCount--;
             return;

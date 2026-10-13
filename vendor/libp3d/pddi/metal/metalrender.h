@@ -335,6 +335,8 @@ public:
     u32  CreateVRAMTexture(int w, int h, const u16* data) override;
     void DestroyVRAMTexture(u32 handle) override;
     void UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) override;
+    void UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                               int srcPitchTexels, const u16* data) override;
 
     void SetRealTextureMode(bool enabled) override { realTextureMode = enabled; }
     bool IsRealTextureModeEnabled() const override { return realTextureMode; }

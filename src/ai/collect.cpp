@@ -687,6 +687,11 @@ void Collectible::Draw() {
         if (alpha < 0.0f) alpha = 0.0f;
         if (alpha > 1.0f) alpha = 1.0f;
 
+        // Snap on loop wrap.
+        if (mCurrentFrame < mRenderPrevFrame) {
+            alpha = 1.0f;
+        }
+
         const s32 frameStep = mCurrentFrame - mRenderPrevFrame;
 
         if (Collectible_ShouldDriveMiscAnim(mAnimB)) {

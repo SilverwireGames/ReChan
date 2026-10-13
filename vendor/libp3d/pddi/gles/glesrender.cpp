@@ -25,525 +25,33 @@ static void LogGles(const char*, ...) {}
 
 // GLSL ES 3.00 ports of pddi/gl/glrender.cpp's shader set.
 
-static const char* kSimpleVertGLES = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec2 aUV;
-uniform mat4 uProj;
-out vec2 vUV;
-void main() {
-    vUV = aUV;
-    gl_Position = uProj * vec4(aPos, 0.0, 1.0);
-}
-)";
+// Prepended to every application-supplied shader body. Unlike desktop GL, none
+// of the optional feature blocks are enabled: cascade sampling and an integer
+// fragment output both crash the Eden/Suyu shader recompiler, and shadows are
+// force-disabled on Switch anyway. See pddi/pddishadersrc.h for the contract.
+//
+// NOPERSP stays empty. GLES has no core "noperspective" and Eden's recompiler
+// rejects GL_NV_shader_noperspective_interpolation outright (the scene goes
+// black), so UVs are perspective-correct here rather than PSX-affine. Tried and
+// rejected; do not reintroduce.
+static const char* kGLESPreamble =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "precision highp int;\n"
+    "#define NOPERSP\n"
+    "#define HIGHP highp\n"
+    "#define VRAM_FLOAT 1\n";
 
-static const char* kSimpleFragGLES = R"(#version 300 es
-precision mediump float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec4 uTint;
-out vec4 FragColor;
-void main() {
-    FragColor = texture(uTex, vUV) * uTint;
-}
-)";
-
-// Pseudo-3D tilt vertex shader
-static const char* kTiltVertGLES = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec2 aUV;
-uniform mat4 uProj;
-uniform vec4 uTiltRect;
-uniform vec4 uTiltAngles;
-out vec2 vUV;
-void main() {
-    vUV = aUV;
-
-    vec2 local = (aUV - 0.5) * 2.0 * uTiltRect.zw;
-    vec3 p = vec3(local, 0.0);
-
-    float cx = cos(uTiltAngles.x), sx = sin(uTiltAngles.x);
-    p = vec3(p.x, p.y * cx - p.z * sx, p.y * sx + p.z * cx);
-
-    float cy = cos(uTiltAngles.y), sy = sin(uTiltAngles.y);
-    p = vec3(p.x * cy + p.z * sy, p.y, -p.x * sy + p.z * cy);
-
-    float cz = cos(uTiltAngles.z), sz = sin(uTiltAngles.z);
-    p = vec3(p.x * cz - p.y * sz, p.x * sz + p.y * cz, p.z);
-
-    float focal = max(uTiltAngles.w, 1.0);
-    float perspective = focal / max(focal - p.z, 0.0001);
-    vec2 screenPos = uTiltRect.xy + p.xy * perspective;
-
-    gl_Position = uProj * vec4(screenPos, 0.0, 1.0);
-}
-)";
-
-static const char* kGodRaysFragGLES = R"(#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec4 uRayParams;
-uniform vec4 uRayMotion;
-uniform float uExposure;
-uniform float uTime;
-out vec4 FragColor;
-
-const int kSampleCount = 48;
-
-void main() {
-    vec2 origin = uRayParams.xy
-        + vec2(cos(uTime * uRayMotion.w), sin(uTime * uRayMotion.w * 1.37)) * uRayMotion.z;
-
-    vec2 uv = vUV;
-    vec4 source = texture(uTex, uv);
-    vec3 color = source.rgb * source.a;
-    float decay = 1.0;
-    float stepFrac = uRayParams.z / float(kSampleCount);
-    for (int i = 0; i < kSampleCount; ++i) {
-        vec2 step = (origin - uv) * stepFrac;
-
-        float twist = uRayMotion.x * sin(uTime * uRayMotion.y + float(i) * 0.22);
-        float ca = cos(twist);
-        float sa = sin(twist);
-        step = vec2(step.x * ca - step.y * sa, step.x * sa + step.y * ca);
-        uv += step;
-
-        vec4 tap = texture(uTex, uv);
-        color += tap.rgb * tap.a * decay;
-        decay *= uRayParams.w;
-    }
-    FragColor = vec4(color * (uExposure / float(kSampleCount)), 1.0);
-}
-)";
-
-static const char* kGlowFragGLES = R"(#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec4 uGlowParams;
-uniform vec4 uGlowMotion;
-uniform float uTime;
-out vec4 FragColor;
-
-const int kRings = 3;
-const int kDirections = 8;
-
-void main() {
-    vec2 driftedUV = vUV + vec2(cos(uTime * uGlowMotion.z), sin(uTime * uGlowMotion.z * 1.21)) * uGlowMotion.y;
-
-    vec4 center = texture(uTex, vUV);
-    vec3 color = center.rgb * center.a;
-    float alpha = center.a;
-    float total = 1.0;
-    float rot = uTime * uGlowMotion.x;
-    for (int ring = 1; ring <= kRings; ++ring) {
-        float radius = uGlowParams.x * (float(ring) / float(kRings));
-        float weight = 1.0 / float(ring);
-        for (int dir = 0; dir < kDirections; ++dir) {
-            float angle = (float(dir) / float(kDirections)) * 6.28318530718 + rot + float(ring) * 0.35;
-            vec2 offset = vec2(cos(angle), sin(angle)) * radius;
-            vec4 tap = texture(uTex, driftedUV + offset);
-            color += tap.rgb * tap.a * weight;
-            alpha += tap.a * weight;
-            total += weight;
-        }
-    }
-    color /= total;
-    alpha /= total;
-    FragColor = vec4(color * uGlowParams.y, alpha * uGlowParams.y);
-}
-)";
-
-static const char* kDotFragGLES = R"(#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform vec4 uTint;
-uniform float uShapeSeed;
-out vec4 FragColor;
-
-float hash11(float v) {
-    return fract(sin(v * 127.1) * 43758.5453123);
-}
-
-float angularNoise(float v) {
-    float cell = floor(v);
-    float blend = fract(v);
-    blend = blend * blend * (3.0 - 2.0 * blend);
-    return mix(hash11(cell), hash11(cell + 1.0), blend);
-}
-
-void main() {
-    vec2 centered = (vUV - 0.5) * 2.0;
-    float dist = length(centered);
-    float angle = atan(centered.y, centered.x);
-
-    float n1 = angularNoise(angle * 2.4 + uShapeSeed);
-    float n2 = angularNoise(angle * 5.1 - uShapeSeed * 1.7 + 4.0);
-    float wobble = (n1 * 0.6 + n2 * 0.4) - 0.5;
-    float edge = 0.74 + wobble * 0.36;
-
-    float alpha = 1.0 - smoothstep(edge - 0.18, edge, dist);
-    if (alpha <= 0.0) discard;
-    FragColor = vec4(uTint.rgb, uTint.a * alpha);
-}
-)";
-
-static const char* kMovieSharpFragGLES = R"(#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec4 uTexel;
-uniform float uSharpAmount;
-out vec4 FragColor;
-
-void main() {
-    vec3 c = texture(uTex, vUV).rgb;
-    vec3 n = texture(uTex, vUV + vec2(0.0, -uTexel.y)).rgb;
-    vec3 s = texture(uTex, vUV + vec2(0.0,  uTexel.y)).rgb;
-    vec3 e = texture(uTex, vUV + vec2( uTexel.x, 0.0)).rgb;
-    vec3 w = texture(uTex, vUV + vec2(-uTexel.x, 0.0)).rgb;
-
-    vec3 blur = (n + s + e + w) * 0.25;
-    vec3 sharp = c + (c - blur) * uSharpAmount;
-
-    FragColor = vec4(clamp(sharp, 0.0, 1.0), 1.0);
-}
-)";
-
-static const char* kMovieDenoiseFragGLES = R"(#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec4 uTexel;
-uniform float uSharpAmount;
-out vec4 FragColor;
-
-void main() {
-    vec3 c = texture(uTex, vUV).rgb;
-
-    float sigma = mix(0.02, 0.18, clamp(uSharpAmount, 0.0, 1.0));
-    float invSigma2 = 1.0 / (sigma * sigma);
-
-    vec3 result = c;
-    float totalW = 1.0;
-
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            vec2 off = vec2(float(dx), float(dy)) * uTexel.xy;
-            vec3 s = texture(uTex, vUV + off).rgb;
-            vec3 diff = c - s;
-            float w = exp(-dot(diff, diff) * invSigma2);
-            if (dx != 0 && dy != 0) w *= 0.707;
-            result += s * w;
-            totalW += w;
-        }
+static u32 CompileGLESShader(u32 type, const char* src, const char* programName, const char* stageName) {
+    if (!src) {
+        std::fprintf(stderr, "GLSL ES missing source: program=%s stage=%s\n", programName, stageName);
+        LogGles("GLSL ES missing source: program=%s stage=%s", programName, stageName);
+        return 0;
     }
 
-    FragColor = vec4(result / totalW, 1.0);
-}
-)";
-
-static const char* kMovieUpscaleFragGLES = R"(#version 300 es
-precision highp float;
-in vec2 vUV;
-uniform sampler2D uTex;
-uniform vec4 uTexel;
-out vec4 FragColor;
-
-vec4 CubicWeights(float t) {
-    float t2 = t * t;
-    float t3 = t2 * t;
-    return vec4(-0.5*t3 + t2 - 0.5*t,
-                 1.5*t3 - 2.5*t2 + 1.0,
-                -1.5*t3 + 2.0*t2 + 0.5*t,
-                 0.5*t3 - 0.5*t2);
-}
-
-void main() {
-    vec2 pos = vUV / uTexel.xy - 0.5;
-    vec2 f = fract(pos);
-    vec2 base = (floor(pos) + 0.5) * uTexel.xy;
-
-    vec4 wx = CubicWeights(f.x);
-    vec4 wy = CubicWeights(f.y);
-
-    vec3 color = vec3(0.0);
-    for (int j = 0; j < 4; j++) {
-        vec3 row = vec3(0.0);
-        for (int i = 0; i < 4; i++) {
-            vec2 off = vec2(float(i - 1), float(j - 1)) * uTexel.xy;
-            row += texture(uTex, base + off).rgb * wx[i];
-        }
-        color += row * wy[j];
-    }
-    FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
-}
-)";
-
-static const char* kBatchVertGLES = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec2 aUV;
-layout(location=2) in vec4 aColor;
-uniform mat4 uProj;
-out vec2 vUV;
-out vec4 vColor;
-void main() {
-    vUV = aUV;
-    vColor = aColor;
-    gl_Position = uProj * vec4(aPos, 0.0, 1.0);
-}
-)";
-
-static const char* kBatchFragGLES = R"(#version 300 es
-precision mediump float;
-in vec2 vUV;
-in vec4 vColor;
-uniform sampler2D uTex;
-out vec4 FragColor;
-void main() {
-    FragColor = texture(uTex, vUV) * vColor;
-}
-)";
-
-static const char* kGouraudVertGLES = R"(#version 300 es
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec4 aColor;
-uniform mat4 uProj;
-out vec4 vColor;
-void main() {
-    vColor = aColor;
-    gl_Position = uProj * vec4(aPos, 0.0, 1.0);
-}
-)";
-
-static const char* kGouraudFragGLES = R"(#version 300 es
-precision mediump float;
-in vec4 vColor;
-out vec4 FragColor;
-void main() {
-    FragColor = vColor;
-}
-)";
-
-// 3D vertex-colour shader with PSX VRAM palette lookup + shadow-cascade
-static const char* k3DVertGLES = R"(#version 300 es
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aColor;
-layout(location=2) in vec2 aUV;
-layout(location=3) in vec2 aTexInfo;
-uniform mat4 uMVP;
-out vec3 vColor;
-out vec2 vUV;
-flat out vec2 vTexInfo;
-void main() {
-    vColor = aColor;
-    vUV = aUV;
-    vTexInfo = aTexInfo;
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)";
-
-static const char* k3DFragGLES = R"(#version 300 es
-precision highp float;
-precision highp int;
-in vec3 vColor;
-in vec2 vUV;
-flat in vec2 vTexInfo;
-uniform highp usampler2D uVRAM;
-uniform float uAlphaScale;
-uniform int uUseZeroTexelKey;
-uniform int uTexInfoOverrideEnabled;
-uniform vec2 uTexInfoOverride;
-out vec4 FragColor;
-
-// R16UI + texelFetch: exact 16-bit PSX VRAM word
-uint FetchVramWord(ivec2 c) {
-    return texelFetch(uVRAM, c, 0).r;
-}
-
-// No shadow-cascade sampling here, that dead code crashed
-// Eden's/Suyu's shader recompiler even with shadows off, and shadows are
-// force-disabled on Switch anyway. Integer math is shift/mask/add only
-// (no *, /, % on uints) for the same recompiler-compatibility reason.
-void main() {
-    float tpageF = vTexInfo.x;
-    float cbaF = vTexInfo.y;
-    if (uTexInfoOverrideEnabled != 0) {
-        tpageF = uTexInfoOverride.x;
-        cbaF = uTexInfoOverride.y;
-    }
-
-    // Untextured geometry (tpage < 0): flat per-vertex colour (PSX blob shadow etc).
-    // if/else, not an early return -- an early return here crashes the recompiler.
-    if (tpageF < 0.0) {
-        FragColor = vec4(vColor, uAlphaScale);
-    }
-    else {
-        uint tpage = uint(tpageF);
-        uint cba = uint(cbaF);
-
-        uint tx = tpage & 0xFu;
-        uint ty = (tpage >> 4u) & 1u;
-        uint depth = (tpage >> 7u) & 3u;
-
-        uint pageX = tx << 6u;
-        uint pageY = ty << 8u;
-        uint clutX = (cba & 0x3Fu) << 4u;
-        uint clutY = (cba >> 6u) & 0x1FFu;
-
-        uint px = uint(mod(vUV.x + 256.0, 256.0));
-        uint py = uint(mod(vUV.y + 256.0, 256.0));
-
-        uint clutWord;
-        bool zeroTexel = false;
-        if (depth == 0u) {
-            uint word = FetchVramWord(ivec2(pageX + (px >> 2u), pageY + py));
-            uint palIdx = (word >> ((px & 3u) << 2u)) & 0xFu;
-            zeroTexel = (palIdx == 0u);
-            clutWord = FetchVramWord(ivec2(clutX + palIdx, clutY));
-        }
-        else if (depth == 1u) {
-            uint word = FetchVramWord(ivec2(pageX + (px >> 1u), pageY + py));
-            uint palIdx = (px & 1u) != 0u ? (word >> 8u) & 0xFFu : word & 0xFFu;
-            zeroTexel = (palIdx == 0u);
-            clutWord = FetchVramWord(ivec2(clutX + palIdx, clutY));
-        }
-        else {
-            clutWord = FetchVramWord(ivec2(pageX + px, pageY + py));
-            zeroTexel = (clutWord == 0u);
-        }
-
-        if (uUseZeroTexelKey != 0) {
-            if (zeroTexel) discard;
-        }
-        else {
-            if ((clutWord & 0x7FFFu) == 0x7C1Fu) discard;
-        }
-
-        float r = float(clutWord & 0x1Fu) / 31.0;
-        float g = float((clutWord >> 5u) & 0x1Fu) / 31.0;
-        float b = float((clutWord >> 10u) & 0x1Fu) / 31.0;
-
-        FragColor = vec4(vec3(r, g, b), uAlphaScale) * vec4(vColor, 1.0);
-    }
-}
-)";
-
-// Depth-only shader for shadow-map cascade passes.
-static const char* kShadowDepthVertGLES = R"(#version 300 es
-layout(location=0) in vec3 aPos;
-layout(location=2) in vec2 aUV;
-layout(location=3) in vec2 aTexInfo;
-uniform mat4 uLightMVP;
-out vec2 vShadowUV;
-flat out vec2 vShadowTexInfo;
-void main() {
-    vShadowUV = aUV;
-    vShadowTexInfo = aTexInfo;
-    gl_Position = uLightMVP * vec4(aPos, 1.0);
-}
-)";
-
-static const char* kShadowDepthFragGLES = R"(#version 300 es
-precision highp float;
-precision highp int;
-in vec2 vShadowUV;
-flat in vec2 vShadowTexInfo;
-
-uniform highp usampler2D uVRAM;
-uniform int uHasVRAM;
-uniform int uHasUV;
-uniform int uHasTexInfo;
-uniform int uUseZeroTexelKey;
-uniform int uTexInfoOverrideEnabled;
-uniform vec2 uTexInfoOverride;
-uniform int uRealTextureMode;
-uniform sampler2D uRealTex;
-uniform vec2 uRealTexOffset;
-uniform vec2 uRealTexSize;
-uniform uint uCasterInstanceId;
-out vec4 oCasterId;
-
-uint FetchVramWord(ivec2 coord) {
-    return texelFetch(uVRAM, coord, 0).r;
-}
-
-void main() {
-    oCasterId = vec4(
-        float(uCasterInstanceId & 0xFFu) / 255.0,
-        float((uCasterInstanceId >> 8u) & 0xFFu) / 255.0,
-        float((uCasterInstanceId >> 16u) & 0xFFu) / 255.0,
-        float((uCasterInstanceId >> 24u) & 0xFFu) / 255.0
-    );
-    if (uRealTextureMode != 0 && uHasUV != 0) {
-        vec2 puv = mod(vShadowUV + vec2(256.0), vec2(256.0));
-        vec2 ruv = (puv - uRealTexOffset) / uRealTexSize;
-        vec4 texColor = texture(uRealTex, ruv);
-        if (texColor.a < 0.01) discard;
-        return;
-    }
-
-    float tpageF = vShadowTexInfo.x;
-    float cbaF = vShadowTexInfo.y;
-    if (uTexInfoOverrideEnabled != 0) {
-        tpageF = uTexInfoOverride.x;
-        cbaF = uTexInfoOverride.y;
-    }
-
-    if (uHasVRAM == 0 || uHasUV == 0 || uHasTexInfo == 0 || tpageF < 0.0) {
-        return;
-    }
-
-    uint tpage = uint(tpageF);
-    uint cba = uint(cbaF);
-
-    uint tx = tpage & 0xFu;
-    uint ty = (tpage >> 4u) & 1u;
-    uint depth = (tpage >> 7u) & 3u;
-
-    uint pageX = tx << 6u;            // tx * 64
-    uint pageY = ty << 8u;            // ty * 256
-
-    uint clutX = (cba & 0x3Fu) << 4u; // (cba & 63) * 16
-    uint clutY = (cba >> 6u) & 0x1FFu;
-
-    uint px = uint(mod(vShadowUV.x + 256.0, 256.0));
-    uint py = uint(mod(vShadowUV.y + 256.0, 256.0));
-
-    uint clutWord;
-    bool zeroTexel = false;
-    if (depth == 0u) {
-        uint wordX = pageX + (px >> 2u);
-        uint word = FetchVramWord(ivec2(wordX, pageY + py));
-        uint palIdx = (word >> ((px & 3u) << 2u)) & 0xFu;
-        zeroTexel = (palIdx == 0u);
-        clutWord = FetchVramWord(ivec2(clutX + palIdx, clutY));
-    }
-    else if (depth == 1u) {
-        uint wordX = pageX + (px >> 1u);
-        uint word = FetchVramWord(ivec2(wordX, pageY + py));
-        uint palIdx = (px & 1u) != 0u ? (word >> 8u) & 0xFFu : word & 0xFFu;
-        zeroTexel = (palIdx == 0u);
-        clutWord = FetchVramWord(ivec2(clutX + palIdx, clutY));
-    }
-    else {
-        clutWord = FetchVramWord(ivec2(pageX + px, pageY + py));
-        zeroTexel = (clutWord == 0u);
-    }
-
-    if (uUseZeroTexelKey != 0) {
-        if (zeroTexel) discard;
-    }
-    else {
-        if ((clutWord & 0x7FFFu) == 0x7C1Fu) discard;
-    }
-}
-)";
-
-static u32 CompileGLESShader(u32 type, const char* src) {
+    const char* sources[2] = { kGLESPreamble, src };
     u32 shader = glCreateShader(type);
-    glShaderSource(shader, 1, &src, nullptr);
+    glShaderSource(shader, 2, sources, nullptr);
     glCompileShader(shader);
 
     int ok = GL_FALSE;
@@ -551,12 +59,55 @@ static u32 CompileGLESShader(u32 type, const char* src) {
     if (!ok) {
         char log[512];
         glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "GLSL ES compile error:\n%s\n", log);
-        LogGles("GLSL ES compile error (type=0x%x):\n%s", type, log);
+        std::fprintf(stderr, "GLSL ES compile error: program=%s stage=%s\n%s\n", programName, stageName, log);
+        LogGles("GLSL ES compile error: program=%s stage=%s\n%s", programName, stageName, log);
         glDeleteShader(shader);
         return 0;
     }
     return shader;
+}
+
+// Builds a program entirely from application-supplied GLSL. Returns 0 if the
+// application has no source for programName, which is a configuration error
+// rather than something to paper over with a fallback.
+static u32 LinkGLESProgram(const char* programName) {
+    if (!pddiShaderSource) {
+        std::fprintf(stderr, "GLSL ES no source provider installed (program=%s)\n", programName);
+        LogGles("GLSL ES no source provider installed (program=%s)", programName);
+        return 0;
+    }
+
+    u32 vs = CompileGLESShader(GL_VERTEX_SHADER,
+                               pddiShaderSource(programName, PDDI_SHADER_STAGE_VERTEX),
+                               programName, "vertex");
+    u32 fs = CompileGLESShader(GL_FRAGMENT_SHADER,
+                               pddiShaderSource(programName, PDDI_SHADER_STAGE_FRAGMENT),
+                               programName, "fragment");
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return 0;
+    }
+
+    u32 program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+
+    int ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+        std::fprintf(stderr, "GLSL ES link error: program=%s\n%s\n", programName, log);
+        LogGles("GLSL ES link error: program=%s\n%s", programName, log);
+        glDeleteProgram(program);
+        program = 0;
+    }
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return program;
 }
 
 static bool IsDepthRenderTargetFormat(pddiRenderTargetFormat format) {
@@ -726,59 +277,9 @@ glesShader::~glesShader() {
 }
 
 void glesShader::CreateProgram() {
-    const char* vertexSource = kSimpleVertGLES;
-    const char* fragmentSource = kSimpleFragGLES;
-    if (type == "godrays") {
-        fragmentSource = kGodRaysFragGLES;
-    }
-    else if (type == "glow") {
-        fragmentSource = kGlowFragGLES;
-    }
-    else if (type == "tilt") {
-        vertexSource = kTiltVertGLES;
-    }
-    else if (type == "dot") {
-        fragmentSource = kDotFragGLES;
-    }
-    else if (type == "moviesharp") {
-        fragmentSource = kMovieSharpFragGLES;
-    }
-    else if (type == "moviedenoise") {
-        fragmentSource = kMovieDenoiseFragGLES;
-    }
-    else if (type == "movieupscale") {
-        fragmentSource = kMovieUpscaleFragGLES;
-    }
-
-    u32 vs = CompileGLESShader(GL_VERTEX_SHADER, vertexSource);
-    u32 fs = CompileGLESShader(GL_FRAGMENT_SHADER, fragmentSource);
-    if (!vs || !fs) {
-        LogGles("glesShader(type=%s): vertex/fragment compile failed (vs=%u fs=%u)",
-                type.c_str(), vs, fs);
-        return;
-    }
-
-    program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glLinkProgram(program);
-
-    int ok = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512];
-        glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "GLSL ES link error (type=%s):\n%s\n", type.c_str(), log);
-        LogGles("glesShader(type=%s): link failed:\n%s", type.c_str(), log);
-        glDeleteProgram(program);
-        program = 0;
-    }
-    else {
-        LogGles("glesShader(type=%s): OK, program=%u", type.c_str(), program);
-    }
-
-    glDeleteShader(vs);
-    glDeleteShader(fs);
+    // The shader type string is the program name the application registers.
+    program = LinkGLESProgram(type.c_str());
+    LogGles("glesShader(type=%s): program=%u", type.c_str(), program);
 }
 
 void glesShader::SetTexture(u32 param, pddiTexture* t) {
@@ -877,6 +378,20 @@ void glesShader::PostRender() {
 
 // glesPrimBuffer
 
+// VAO/VBO/EBO recycling.
+//
+// The effect, trail and shadow paths build their geometry by creating a
+// pddiPrimBuffer per triangle/quad, drawing it and releasing it immediately, so
+// a busy frame runs hundreds of glGen*/glDelete* pairs. Handing the GL objects
+// back to a free list instead makes that churn disappear; the vertex layout is
+// baked into the VAO, so buffers are only reused for a matching format.
+struct glesPrimBufferPoolEntry {
+    u32 vertexFormat;
+    u32 vao, vbo, ebo;
+    u32 vertexCapacity, indexCapacity;
+};
+static std::vector<glesPrimBufferPoolEntry> s_primBufferPool;
+
 glesPrimBuffer::glesPrimBuffer(const pddiPrimBufferDesc& desc)
     : primType(desc.primType), vertexFormat(desc.vertexFormat)
     , vertexCount(desc.vertexCount), indexCount(desc.indexCount) {
@@ -885,6 +400,26 @@ glesPrimBuffer::glesPrimBuffer(const pddiPrimBufferDesc& desc)
     if (vertexFormat & PDDI_V_COLOUR)   stride += 3 * sizeof(f32);
     if (vertexFormat & PDDI_V_UV)       stride += 2 * sizeof(f32);
     if (vertexFormat & PDDI_V_TEXINFO)  stride += 2 * sizeof(f32);
+
+    for (size_t i = 0; i < s_primBufferPool.size(); i++) {
+        if (s_primBufferPool[i].vertexFormat != vertexFormat) {
+            continue;
+        }
+        const glesPrimBufferPoolEntry& entry = s_primBufferPool[i];
+        vao = entry.vao;
+        vbo = entry.vbo;
+        ebo = entry.ebo;
+        vertexCapacity = entry.vertexCapacity;
+        indexCapacity = entry.indexCapacity;
+        s_primBufferPool[i] = s_primBufferPool.back();
+        s_primBufferPool.pop_back();
+        // The GPU may still be reading the storage from the draw that used
+        // this buffer last, so the first write orphans it (glBufferData with
+        // fresh storage) instead of patching it in place with glBufferSubData
+        // and forcing the driver to sync.
+        orphanOnNextWrite = true;
+        return;
+    }
 
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
@@ -900,35 +435,55 @@ glesPrimBuffer::glesPrimBuffer(const pddiPrimBufferDesc& desc)
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, desc.indexCount * sizeof(u16), nullptr, GL_STATIC_DRAW);
 
-    glBindVertexArray(0);
+    vertexCapacity = desc.vertexCount;
+    indexCapacity = desc.indexCount;
 
-    // Logged every 10th creation so a cumulative resource leak shows up as a running total.
-    static int totalCreated = 0;
-    totalCreated++;
-    if (totalCreated == 1 || totalCreated % 10 == 0) {
-        LogGles("glesPrimBuffer: created #%d (vao=%u vbo=%u ebo=%u stride=%u vertexFormat=0x%x vertexCount=%u indexCount=%u)",
-                totalCreated, vao, vbo, ebo, stride, vertexFormat, vertexCount, indexCount);
-    }
+    glBindVertexArray(0);
 }
 
 glesPrimBuffer::~glesPrimBuffer() {
+    if (!vao) {
+        return;
+    }
+    // Cap the pool so a one-off spike doesn't pin GL objects forever.
+    if (s_primBufferPool.size() < 256) {
+        s_primBufferPool.push_back({ vertexFormat, vao, vbo, ebo, vertexCapacity, indexCapacity });
+        return;
+    }
     if (ebo) glDeleteBuffers(1, &ebo);
     if (vbo) glDeleteBuffers(1, &vbo);
-    if (vao) glDeleteVertexArrays(1, &vao);
+    glDeleteVertexArrays(1, &vao);
 }
 
 void glesPrimBuffer::SetVertexData(const void* data, u32 count) {
     vertexCount = count;
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, stride * count, data, GL_DYNAMIC_DRAW);
+    if (count <= vertexCapacity && !orphanOnNextWrite) {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, stride * count, data);
+        return;
+    }
+    const u32 capacity = (count > vertexCapacity) ? count : vertexCapacity;
+    glBufferData(GL_ARRAY_BUFFER, stride * capacity, nullptr, GL_DYNAMIC_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, stride * count, data);
+    vertexCapacity = capacity;
 }
 
 void glesPrimBuffer::SetIndices(const u16* indices, u32 count) {
     indexCount = count;
     glBindVertexArray(vao);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * sizeof(u16), indices, GL_STATIC_DRAW);
+    if (count <= indexCapacity && !orphanOnNextWrite) {
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, count * sizeof(u16), indices);
+    }
+    else {
+        const u32 capacity = (count > indexCapacity) ? count : indexCapacity;
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, capacity * sizeof(u16), nullptr, GL_DYNAMIC_DRAW);
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, count * sizeof(u16), indices);
+        indexCapacity = capacity;
+    }
     glBindVertexArray(0);
+    // Callers always fill vertices then indices, so clearing here covers both.
+    orphanOnNextWrite = false;
 }
 
 void glesPrimBuffer::SetupVertexAttribs() {
@@ -1127,6 +682,25 @@ bool glesDisplay::InitDisplay(const pddiDisplayInit& init) {
     }
     eglSwapInterval(dpy, init.vsync ? 1 : 0);
 
+    // One-shot capability dump. The depth/stencil sizes are what the driver
+    // actually handed back, not what was asked for: a 16-bit depth buffer
+    // behind a 24-bit request would explain z-fighting the desktop never sees.
+    EGLint cfgDepth = 0, cfgStencil = 0, cfgRed = 0, cfgAlpha = 0, cfgSamples = 0;
+    eglGetConfigAttrib(dpy, config, EGL_DEPTH_SIZE, &cfgDepth);
+    eglGetConfigAttrib(dpy, config, EGL_STENCIL_SIZE, &cfgStencil);
+    eglGetConfigAttrib(dpy, config, EGL_RED_SIZE, &cfgRed);
+    eglGetConfigAttrib(dpy, config, EGL_ALPHA_SIZE, &cfgAlpha);
+    eglGetConfigAttrib(dpy, config, EGL_SAMPLES, &cfgSamples);
+    GLint depthBits = 0, stencilBits = 0;
+    glGetIntegerv(GL_DEPTH_BITS, &depthBits);
+    glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
+    LogGles("GL vendor=%s renderer=%s", glGetString(GL_VENDOR), glGetString(GL_RENDERER));
+    LogGles("GL version=%s glsl=%s", glGetString(GL_VERSION), glGetString(GL_SHADING_LANGUAGE_VERSION));
+    LogGles("EGL config: red=%d alpha=%d depth=%d stencil=%d samples=%d",
+            cfgRed, cfgAlpha, cfgDepth, cfgStencil, cfgSamples);
+    LogGles("Default framebuffer: depth=%d stencil=%d bits", depthBits, stencilBits);
+    LogGles("Surface requested %dx%d", init.xSize, init.ySize);
+
     eglDisplay_ = dpy;
     eglSurface_ = surface;
     eglContext_ = context;
@@ -1153,13 +727,17 @@ bool glesDisplay::ShouldClose() {
 // glesContext
 
 glesContext::glesContext(glesDisplay* disp) : display(disp) {
+    // Pooled VAO/VBO/EBO names belong to the GL context that made them, so a
+    // fresh context must not inherit any.
+    s_primBufferPool.clear();
     static int totalContexts = 0;
     totalContexts++;
     LogGles("glesContext: constructing (#%d this run)", totalContexts);
     GetDefaultWhiteTexture();
     s_defaultWhiteTextureUsers++;
-    // No shadowCompareSampler (unlike desktop): shadow depth is compared manually
-    // in k3DFragGLES instead of via sampler2DShadow, to avoid the recompiler crash.
+    // No shadowCompareSampler (unlike desktop): the GLES preamble leaves
+    // HAS_SHADOW_CASCADES undefined, so the mesh shader compiles without any
+    // sampler2DShadow use, which the recompiler rejects.
     InitQuadMesh();
     LogGles("glesContext: InitQuadMesh done");
     InitGouraudMesh();
@@ -1172,6 +750,8 @@ glesContext::glesContext(glesDisplay* disp) : display(disp) {
 }
 
 glesContext::~glesContext() {
+    // The context owns the pooled GL names; they die with it.
+    s_primBufferPool.clear();
     if (quadVBO) glDeleteBuffers(1, &quadVBO);
     if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
     if (gouraudVBO) glDeleteBuffers(1, &gouraudVBO);
@@ -1219,6 +799,12 @@ void glesContext::Clear(int flags) {
     }
     if (flags & PDDI_BUFFER_DEPTH) {
         glClearDepthf(0.0f);
+        // glClear obeys the depth write mask. A blended draw (HUD, effects)
+        // at the end of the previous frame leaves it off, which would skip
+        // the clear and leave last frame's depth in place. stateDirty makes
+        // the next SetBlendMode restore the mask this blend mode wants.
+        glDepthMask(GL_TRUE);
+        stateDirty = true;
         mask |= GL_DEPTH_BUFFER_BIT;
     }
     if (mask)
@@ -1586,17 +1172,10 @@ void glesContext::InitGouraudMesh() {
     glEnableVertexAttribArray(1);
     glBindVertexArray(0);
 
-    u32 vs = CompileGLESShader(GL_VERTEX_SHADER, kGouraudVertGLES);
-    u32 fs = CompileGLESShader(GL_FRAGMENT_SHADER, kGouraudFragGLES);
-    if (vs && fs) {
-        gouraudProgram = glCreateProgram();
-        glAttachShader(gouraudProgram, vs);
-        glAttachShader(gouraudProgram, fs);
-        glLinkProgram(gouraudProgram);
+    gouraudProgram = LinkGLESProgram("gouraud");
+    if (gouraudProgram) {
         gouraudUProjLoc = glGetUniformLocation(gouraudProgram, "uProj");
     }
-    if (vs) glDeleteShader(vs);
-    if (fs) glDeleteShader(fs);
 }
 
 void glesContext::InitBatchMesh() {
@@ -1615,18 +1194,11 @@ void glesContext::InitBatchMesh() {
     glEnableVertexAttribArray(2);
     glBindVertexArray(0);
 
-    u32 vs = CompileGLESShader(GL_VERTEX_SHADER, kBatchVertGLES);
-    u32 fs = CompileGLESShader(GL_FRAGMENT_SHADER, kBatchFragGLES);
-    if (vs && fs) {
-        batchProgram = glCreateProgram();
-        glAttachShader(batchProgram, vs);
-        glAttachShader(batchProgram, fs);
-        glLinkProgram(batchProgram);
+    batchProgram = LinkGLESProgram("batch");
+    if (batchProgram) {
         batchUProjLoc = glGetUniformLocation(batchProgram, "uProj");
         batchUTexLoc = glGetUniformLocation(batchProgram, "uTex");
     }
-    if (vs) glDeleteShader(vs);
-    if (fs) glDeleteShader(fs);
 }
 
 void glesContext::DrawQuad(pddiBaseShader* shader,
@@ -1717,26 +1289,10 @@ void glesContext::DrawGouraudQuad(float x0, float y0, float r0, float g0, float 
 }
 
 void glesContext::Init3DShader() {
-    u32 vs = CompileGLESShader(GL_VERTEX_SHADER, k3DVertGLES);
-    u32 fs = CompileGLESShader(GL_FRAGMENT_SHADER, k3DFragGLES);
+    program3D = LinkGLESProgram("mesh");
 
-    if (!vs || !fs) {
-        LogGles("Init3DShader: vertex/fragment compile failed (vs=%u fs=%u)", vs, fs);
-        return;
-    }
-
-    program3D = glCreateProgram();
-    glAttachShader(program3D, vs);
-    glAttachShader(program3D, fs);
-    glLinkProgram(program3D);
-
-    int ok;
-    glGetProgramiv(program3D, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512];
-        glGetProgramInfoLog(program3D, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "3D shader link error:\n%s\n", log);
-        LogGles("Init3DShader: link failed:\n%s", log);
+    if (program3D == 0) {
+        LogGles("Init3DShader: unavailable; mesh rendering disabled");
     }
     else {
         LogGles("Init3DShader: OK, program3D=%u", program3D);
@@ -1772,32 +1328,13 @@ void glesContext::Init3DShader() {
         u3D.realTexOffset = glGetUniformLocation(program3D, "uRealTexOffset");
         u3D.realTexSize = glGetUniformLocation(program3D, "uRealTexSize");
     }
-
-    glDeleteShader(vs);
-    glDeleteShader(fs);
 }
 
 void glesContext::InitShadowDepthShader() {
-    u32 vs = CompileGLESShader(GL_VERTEX_SHADER, kShadowDepthVertGLES);
-    u32 fs = CompileGLESShader(GL_FRAGMENT_SHADER, kShadowDepthFragGLES);
+    shadowDepthProgram = LinkGLESProgram("shadow_depth");
 
-    if (!vs || !fs) {
-        LogGles("InitShadowDepthShader: vertex/fragment compile failed (vs=%u fs=%u)", vs, fs);
-        return;
-    }
-
-    shadowDepthProgram = glCreateProgram();
-    glAttachShader(shadowDepthProgram, vs);
-    glAttachShader(shadowDepthProgram, fs);
-    glLinkProgram(shadowDepthProgram);
-
-    int ok;
-    glGetProgramiv(shadowDepthProgram, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[512];
-        glGetProgramInfoLog(shadowDepthProgram, sizeof(log), nullptr, log);
-        std::fprintf(stderr, "Shadow depth shader link error:\n%s\n", log);
-        LogGles("InitShadowDepthShader: link failed:\n%s", log);
+    if (shadowDepthProgram == 0) {
+        LogGles("InitShadowDepthShader: unavailable; shadow casting disabled");
     }
     else {
         LogGles("InitShadowDepthShader: OK, shadowDepthProgram=%u", shadowDepthProgram);
@@ -1815,9 +1352,6 @@ void glesContext::InitShadowDepthShader() {
         uShadowDepth.realTexOffset = glGetUniformLocation(shadowDepthProgram, "uRealTexOffset");
         uShadowDepth.realTexSize = glGetUniformLocation(shadowDepthProgram, "uRealTexSize");
     }
-
-    glDeleteShader(vs);
-    glDeleteShader(fs);
 }
 
 void glesContext::SetShadowCasterPass(bool enable, const Mat4& lightVP) {
@@ -1890,10 +1424,12 @@ u32 glesContext::CreateVRAMTexture(int w, int h, const u16* data) {
     u32 tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    // R16UI, matching desktop's texelFetch read exactly. Integer textures can't be
-    // filtered (NEAREST only); UNPACK_ALIGNMENT=2 for the u16 element size.
+    // RG8 rather than desktop's R16UI: each halfword is uploaded as its two
+    // little-endian bytes (R = low, G = high) and recombined in the shader with
+    // float maths. See kVramDecode -- the integer sampler path is not evaluated
+    // faithfully by the Switch emulators' shader recompilers.
     glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16UI, w, h, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, data);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, w, h, 0, GL_RG, GL_UNSIGNED_BYTE, data);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -1908,12 +1444,25 @@ void glesContext::DestroyVRAMTexture(u32 handle) {
 }
 
 void glesContext::UpdateVRAMTexture(u32 handle, int w, int h, const u16* data) {
-    // In-place R16UI re-upload (no realloc) -- called every frame by
+    // In-place RG8 re-upload (no realloc) -- called every frame by
     // Director::updateVramAnims while a VRAM flipbook animates.
     if (!handle || !data || w <= 0 || h <= 0) return;
     glBindTexture(GL_TEXTURE_2D, handle);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RED_INTEGER, GL_UNSIGNED_SHORT, data);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RG, GL_UNSIGNED_BYTE, data);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void glesContext::UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                                        int srcPitchTexels, const u16* data) {
+    if (!handle || !data || w <= 0 || h <= 0) return;
+    glBindTexture(GL_TEXTURE_2D, handle);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+    // Rows of the rect are srcPitchTexels apart in the source buffer.
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, srcPitchTexels);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RG, GL_UNSIGNED_BYTE, data);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -1982,9 +1531,15 @@ void glesContext::DrawPrimBuffer(pddiPrimBuffer* buffer, u32 indexOffset, u32 in
     glUseProgram(program3D);
 
     const float alphaScale = (cachedBlendMode == PDDI_BLEND_ALPHA) ? 0.5f : 1.0f;
-    glUniform1f(u3D.alphaScale, alphaScale);
+    if (prog3DCache.alphaScale != alphaScale) {
+        glUniform1f(u3D.alphaScale, alphaScale);
+        prog3DCache.alphaScale = alphaScale;
+    }
     const int useZeroTexelKey = (cachedBlendMode != PDDI_BLEND_NONE) ? 1 : 0;
-    glUniform1i(u3D.useZeroTexelKey, useZeroTexelKey);
+    if (prog3DCache.useZeroTexelKey != useZeroTexelKey) {
+        glUniform1i(u3D.useZeroTexelKey, useZeroTexelKey);
+        prog3DCache.useZeroTexelKey = useZeroTexelKey;
+    }
 
     Mat4 mvp = projection * (viewMatrix * worldMatrix);
     glUniformMatrix4fv(u3D.mvp, 1, GL_FALSE, mvp.Data());
@@ -1997,9 +1552,20 @@ void glesContext::DrawPrimBuffer(pddiPrimBuffer* buffer, u32 indexOffset, u32 in
     }
 
     const int receiveShadows = (receiveShadowsEnabled && shadowCascadeCount > 0) ? 1 : 0;
-    glUniform1i(u3D.receiveShadows, receiveShadows);
-    glUniform1i(u3D.shadowCascadeCount, receiveShadows ? shadowCascadeCount : 0);
-    glUniform1i(u3D.shadowFilterQuality, receiveShadows ? shadowFilterQuality : 0);
+    const int activeCascadeCount = receiveShadows ? shadowCascadeCount : 0;
+    const int activeFilterQuality = receiveShadows ? shadowFilterQuality : 0;
+    if (prog3DCache.receiveShadows != receiveShadows) {
+        glUniform1i(u3D.receiveShadows, receiveShadows);
+        prog3DCache.receiveShadows = receiveShadows;
+    }
+    if (prog3DCache.shadowCascadeCount != activeCascadeCount) {
+        glUniform1i(u3D.shadowCascadeCount, activeCascadeCount);
+        prog3DCache.shadowCascadeCount = activeCascadeCount;
+    }
+    if (prog3DCache.shadowFilterQuality != activeFilterQuality) {
+        glUniform1i(u3D.shadowFilterQuality, activeFilterQuality);
+        prog3DCache.shadowFilterQuality = activeFilterQuality;
+    }
     if (shadowConstUniformsDirty) {
         glUniform1fv(u3D.shadowBias, kShadowCascadeCount, shadowBias);
         glUniform3f(u3D.shadowLightDir, shadowLightDir[0], shadowLightDir[1], shadowLightDir[2]);
@@ -2028,17 +1594,25 @@ void glesContext::DrawPrimBuffer(pddiPrimBuffer* buffer, u32 indexOffset, u32 in
     }
 
     const int texInfoOverride = texInfoOverrideEnabled ? 1 : 0;
-    glUniform1i(u3D.texInfoOverrideEnabled, texInfoOverride);
-    if (texInfoOverride != 0) {
-        const float tpage = static_cast<float>((texInfoOverrideWord >> 16) & 0xFFFFu);
-        const float cba = static_cast<float>(texInfoOverrideWord & 0xFFFFu);
-        glUniform2f(u3D.texInfoOverride, tpage, cba);
+    if (prog3DCache.texInfoOverrideEnabled != texInfoOverride) {
+        glUniform1i(u3D.texInfoOverrideEnabled, texInfoOverride);
+        prog3DCache.texInfoOverrideEnabled = texInfoOverride;
     }
-    else {
-        glUniform2f(u3D.texInfoOverride, -1.0f, 0.0f);
+    const float tpage = (texInfoOverride != 0)
+        ? static_cast<float>((texInfoOverrideWord >> 16) & 0xFFFFu) : -1.0f;
+    const float cba = (texInfoOverride != 0)
+        ? static_cast<float>(texInfoOverrideWord & 0xFFFFu) : 0.0f;
+    if (prog3DCache.texInfoTpage != tpage || prog3DCache.texInfoCba != cba) {
+        glUniform2f(u3D.texInfoOverride, tpage, cba);
+        prog3DCache.texInfoTpage = tpage;
+        prog3DCache.texInfoCba = cba;
     }
 
-    glUniform1i(u3D.hasVRAM, vramHandle ? 1 : 0);
+    const int hasVRAM = vramHandle ? 1 : 0;
+    if (prog3DCache.hasVRAM != hasVRAM) {
+        glUniform1i(u3D.hasVRAM, hasVRAM);
+        prog3DCache.hasVRAM = hasVRAM;
+    }
     if (vramHandle) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, vramHandle);
@@ -2046,7 +1620,10 @@ void glesContext::DrawPrimBuffer(pddiPrimBuffer* buffer, u32 indexOffset, u32 in
     }
 
     const int useRealTexture = (realTextureModeEnabled && currentTexture) ? 1 : 0;
-    glUniform1i(u3D.realTextureMode, useRealTexture);
+    if (prog3DCache.realTextureMode != useRealTexture) {
+        glUniform1i(u3D.realTextureMode, useRealTexture);
+        prog3DCache.realTextureMode = useRealTexture;
+    }
     if (useRealTexture) {
         static_cast<glesTexture*>(currentTexture)->Bind(1);
         glUniform1i(u3D.realTex, 1);

@@ -174,6 +174,11 @@ public:
     virtual void Move();
     virtual void CreateModel(const char* name);
     virtual void DeleteModel();
+
+    // PC: display-only model (widescreen).
+    bool pcVisualModelOnly = false;
+    virtual void OnVisualModelPromoted();
+    virtual void OnVisualModelDemoted();
     virtual void HandleCollision(Thing* other, s32 damage, ...);
     virtual void AnalyzeMesh(DBRoot* root);
     virtual void GetViewSpot(LVector* outPos, LVector* outTarget);

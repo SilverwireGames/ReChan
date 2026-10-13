@@ -120,7 +120,11 @@ static void PsxToRGBA(u16 c, u8& r, u8& g, u8& b, u8& a) {
     r = static_cast<u8>((r5 << 3) | (r5 >> 2));
     g = static_cast<u8>((g5 << 3) | (g5 >> 2));
     b = static_cast<u8>((b5 << 3) | (b5 >> 2));
-    a = (c == 0) ? 0 : 255;
+    // 0x7C1F is the magenta colour key the GL/GLES fragment shaders discard.
+    // This decoder feeds PsxVRAM::DecodePage (real textures, backgrounds), the
+    // same world geometry the shaders key, so the two must agree. Deliberately
+    // NOT applied to PsxAbgr1555ToRgba8888, which serves fonts/TIM/xclib.
+    a = (c == 0 || (c & 0x7FFFu) == 0x7C1Fu) ? 0 : 255;
 }
 
 void PsxVRAM::DecodePage(u16 tpage, u16 cba, u8* out) const {
@@ -4864,9 +4868,77 @@ bool World::Load(const std::string& lcfPath) {
     return blockMgr.GetNumBlocks() > 0;
 }
 
+static u32 s_vramUploadTraceBudget = 64;
+
 void World::UploadToVRAM(s16 x, s16 y, s16 w, s16 h, const u8* raw) {
-    LOG("[VRAM] ext upload: x=%d y=%d w=%d h=%d", x, y, w, h);
+    if (s_vramUploadTraceBudget > 0) {
+        LOG("[VRAM] ext upload: x=%d y=%d w=%d h=%d", x, y, w, h);
+        s_vramUploadTraceBudget--;
+    }
     vram.Upload(x, y, w, h, raw);
+
+    // PSX LoadImage takes effect immediately, so a CLUT written mid-frame is
+    // live for the primitives drawn after it. PaletteData::TransferVram runs
+    // from WEffect::Display, i.e. after World::Render already flushed, so
+    // deferring this to the next frame would leave every palette-cycled
+    // surface a frame behind. The rect is small (a CLUT is 256x1), so push it
+    // now rather than coalescing.
+    if (vramHandle) {
+        MarkVRAMDirtyRect(x, y, w, h);
+        FlushDirtyVRAM();
+        return;
+    }
+
+    // No GPU texture yet; the pending rect is folded into the initial upload.
+    MarkVRAMDirtyRect(x, y, w, h);
+}
+
+void World::MarkVRAMDirtyRect(s32 x, s32 y, s32 w, s32 h) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    s32 minX = x < 0 ? 0 : x;
+    s32 minY = y < 0 ? 0 : y;
+    s32 maxX = x + w > 1024 ? 1024 : x + w;
+    s32 maxY = y + h > 512 ? 512 : y + h;
+    if (minX >= maxX || minY >= maxY) {
+        return;
+    }
+
+    if (vramDirtyMinX >= vramDirtyMaxX) {
+        vramDirtyMinX = minX;
+        vramDirtyMinY = minY;
+        vramDirtyMaxX = maxX;
+        vramDirtyMaxY = maxY;
+        return;
+    }
+
+    if (minX < vramDirtyMinX) vramDirtyMinX = minX;
+    if (minY < vramDirtyMinY) vramDirtyMinY = minY;
+    if (maxX > vramDirtyMaxX) vramDirtyMaxX = maxX;
+    if (maxY > vramDirtyMaxY) vramDirtyMaxY = maxY;
+}
+
+void World::FlushDirtyVRAM() {
+    if (vramDirtyMinX >= vramDirtyMaxX) {
+        return;
+    }
+
+    if (!vramHandle) {
+        RefreshVRAMTexture();
+        return;
+    }
+
+    const s32 rectW = vramDirtyMaxX - vramDirtyMinX;
+    const s32 rectH = vramDirtyMaxY - vramDirtyMinY;
+    p3d::context->UpdateVRAMTextureRect(vramHandle,
+                                        vramDirtyMinX, vramDirtyMinY, rectW, rectH,
+                                        1024,
+                                        vram.data + (size_t)vramDirtyMinY * 1024 + vramDirtyMinX);
+
+    vramDirtyMinX = vramDirtyMaxX = 0;
+    vramDirtyMinY = vramDirtyMaxY = 0;
 }
 
 void World::RefreshVRAMTexture() {
@@ -4886,6 +4958,9 @@ void World::RefreshVRAMTexture() {
             vram.IsDirty() ? 1u : 0u);
     }
 #endif
+    // A full-surface refresh subsumes any pending dirty rect.
+    vramDirtyMinX = vramDirtyMaxX = 0;
+    vramDirtyMinY = vramDirtyMaxY = 0;
     if (vramHandle) {
 #if defined(RC_PLATFORM_PSP)
         s16 dirtyX = 0;
@@ -4938,6 +5013,7 @@ void World::Render(const LVector* playerPos) {
             static_cast<void*>(g_blockManager), static_cast<const void*>(playerPos));
     }
 #endif
+    FlushDirtyVRAM();
     p3d::context->SetVRAMHandle(vramHandle);
     const f64 t0 = Time::GetTimeInSeconds();
 #if defined(RC_PLATFORM_PSP) && !defined(NDEBUG)

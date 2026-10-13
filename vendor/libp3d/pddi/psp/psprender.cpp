@@ -3085,14 +3085,30 @@ void pspContext::UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
                                          int w, int h) {
     VramImage* image = GetVram(handle);
     if (!image || !data || textureW != image->width || textureH != image->height ||
-        w <= 0 || h <= 0) {
+        w <= 0 || h <= 0 || x >= textureW || y >= textureH) {
+        return;
+    }
+
+    const int startX = std::max(0, x);
+    const int startY = std::max(0, y);
+    UpdateVRAMTextureRect(handle, startX, startY, (x + w) - startX, (y + h) - startY,
+                          textureW,
+                          data + static_cast<size_t>(startY) * textureW + startX);
+}
+
+void pspContext::UpdateVRAMTextureRect(u32 handle, int x, int y, int w, int h,
+                                       int srcPitchTexels, const u16* data) {
+    VramImage* image = GetVram(handle);
+    if (!image || !data || w <= 0 || h <= 0 || srcPitchTexels < w) {
         return;
     }
 
     const int minX = std::max(0, x);
     const int minY = std::max(0, y);
-    const int maxX = static_cast<int>(std::min<int64_t>(textureW, static_cast<int64_t>(x) + w));
-    const int maxY = static_cast<int>(std::min<int64_t>(textureH, static_cast<int64_t>(y) + h));
+    const int maxX =
+        static_cast<int>(std::min<int64_t>(image->width, static_cast<int64_t>(x) + w));
+    const int maxY =
+        static_cast<int>(std::min<int64_t>(image->height, static_cast<int64_t>(y) + h));
     if (minX >= maxX || minY >= maxY) {
         return;
     }
@@ -3106,7 +3122,8 @@ void pspContext::UpdateVRAMTextureRegion(u32 handle, int textureW, int textureH,
     const size_t rowBytes = static_cast<size_t>(maxX - minX) * sizeof(u16);
     for (int row = minY; row < maxY; ++row) {
         u16* const destination = image->pixels + row * image->width + minX;
-        const u16* const source = data + row * textureW + minX;
+        const u16* const source =
+            data + static_cast<size_t>(row - y) * srcPitchTexels + (minX - x);
         std::memcpy(destination, source, rowBytes);
         // Any palette read from this row must be converted again.
         if (handle == 1u && static_cast<u32>(row) < kVramRows) {

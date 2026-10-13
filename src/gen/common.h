@@ -68,14 +68,14 @@ static inline int rcStricmp(const char* lhs, const char* rhs) {
 #define SCALE_AND_CENTER_X(x) SCREEN_STRETCH_X(x)
 #endif
 
-static f32 HudSafeWidth() {
+static inline f32 HudSafeWidth() {
     const f32 screenW = SCREEN_WIDTH;
     const f32 screenH = SCREEN_HEIGHT;
     const f32 maxW16x9 = screenH * TARGET_ASPECT_RATIO;
     return (screenW > maxW16x9) ? maxW16x9 : screenW;
 }
 
-static f32 HudSafeOffsetX() {
+static inline f32 HudSafeOffsetX() {
     const f32 safeW = HudSafeWidth();
     const f32 screenW = SCREEN_WIDTH;
     if (screenW > safeW) {
@@ -84,19 +84,19 @@ static f32 HudSafeOffsetX() {
     return 0.0f;
 }
 
-[[maybe_unused]] static f32 HudX(f32 x) {
+[[maybe_unused]] static inline f32 HudX(f32 x) {
     return HudSafeOffsetX() + (x / DEFAULT_SCREEN_WIDTH) * HudSafeWidth();
 }
 
-[[maybe_unused]] static f32 HudY(f32 y) {
+[[maybe_unused]] static inline f32 HudY(f32 y) {
     return SCREEN_SCALE_Y(y);
 }
 
-[[maybe_unused]] static f32 HudW(f32 w) {
+[[maybe_unused]] static inline f32 HudW(f32 w) {
     return (w / DEFAULT_SCREEN_WIDTH) * HudSafeWidth();
 }
 
-[[maybe_unused]] static f32 HudH(f32 h) {
+[[maybe_unused]] static inline f32 HudH(f32 h) {
     return SCREEN_SCALE_Y(h);
 }
 

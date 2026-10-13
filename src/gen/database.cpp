@@ -114,16 +114,19 @@ u32* DBRoot::Process(u32* data, const u32* end) {
     stream16 += 2;
 
     u8* cursor = reinterpret_cast<u8*>(stream16);
+    // count comes straight from file data. Every attrib costs at least an 8-byte
+    // header, so anything beyond that is corrupt -- clamp rather than trusting it
+    // into new DBAttrib[count] (a corrupt count otherwise causes a huge heap
+    // allocation on the PSP before the record is rejected).
     if (endBytes) {
         const size_t remaining = cursor <= endBytes
             ? static_cast<size_t>(endBytes - cursor)
             : 0u;
-        if (cursor > endBytes ||
-            count > remaining / (2u * sizeof(u32))) {
-            // Every attribute needs at least a header and a byte-count word.
-            // This also prevents a corrupt count from causing a huge PSP
-            // heap allocation before the record is rejected.
-            return const_cast<u32*>(end);
+        const u32 maxAttribs = static_cast<u32>(remaining / (2u * sizeof(u32)));
+        if (cursor > endBytes || count > maxAttribs) {
+            LOG("[DBRoot::Process] attribCount %u exceeds %u possible in remaining bytes; clamping",
+                count, maxAttribs);
+            count = maxAttribs;
         }
     }
 
@@ -364,14 +367,26 @@ DBMesh::~DBMesh() {
 }
 
 // PSX: SetFileName__6DBMeshPCc (DATABASE.CPP:532)
-void DBMesh::SetFileName(const char* name) {
+void DBMesh::SetFileName(const char* name, u32 length) {
     MARKFUNCTION(0x80038804);
     if (fileName) {
         delete[] fileName;
+        fileName = nullptr;
     }
-    u32 len = static_cast<u32>(strlen(name));
+    if (!name) {
+        return;
+    }
+
+    u32 len = 0;
+    while (len < length && name[len] != '\0') {
+        len++;
+    }
+
     fileName = new char[len + 1];
-    memcpy(fileName, name, len + 1);
+    if (len > 0) {
+        memcpy(fileName, name, len);
+    }
+    fileName[len] = '\0';
 }
 
 // DBPath
@@ -581,8 +596,17 @@ void Database::Scan(const u8* data, u32 size) {
 
                 // Read filename length and string
                 u32 fnLen = *stream++;
+                const u32 fnBytesAvailable = static_cast<u32>(
+                    reinterpret_cast<const u8*>(end) - reinterpret_cast<const u8*>(stream));
+                if (fnLen > fnBytesAvailable) {
+                    LOG("[Database] Scan: mesh filename length %u exceeds %u remaining bytes at offset 0x%X",
+                        fnLen, fnBytesAvailable, (u32)((const u8*)stream - data));
+                    delete obj;
+                    goto done;
+                }
+
                 const char* fnStr = reinterpret_cast<const char*>(stream);
-                obj->SetFileName(fnStr);
+                obj->SetFileName(fnStr, fnLen);
 
                 // Advance past filename (PSX rounds DOWN to u32 boundary)
                 u32 fnWords = fnLen / 4;

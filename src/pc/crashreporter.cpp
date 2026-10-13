@@ -27,7 +27,6 @@ static void WriteHandle(HANDLE file, const char* text) {
     WriteFile(file, text, static_cast<DWORD>(std::strlen(text)), &written, nullptr);
 }
 
-#if !defined(NDEBUG)
 static void AppendFileToHandle(HANDLE output, const char* path) {
     HANDLE input = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -41,7 +40,6 @@ static void AppendFileToHandle(HANDLE output, const char* path) {
     }
     CloseHandle(input);
 }
-#endif
 
 static bool EnsureMinidumpDirectory() {
     if (CreateDirectoryA("minidumps", nullptr)) return true;
@@ -179,12 +177,10 @@ static void WriteCrashReport(EXCEPTION_POINTERS* exceptionInfo, const char* reas
                 "\r\nPlease open an issue at:\r\n"
                 "https://github.com/SilverwireGames/ReChan/issues/new\r\n"
                 "Attach this report and its matching .dmp file.\r\n");
-#if !defined(NDEBUG)
     WriteHandle(report,
                 "\r\nrechan.log\r\n"
                 "==========\r\n");
     AppendFileToHandle(report, "rechan.log");
-#endif
     CloseHandle(report);
 }
 
@@ -238,6 +234,14 @@ void CrashReporter::Install() {
     std::signal(SIGABRT, CrtSignalHandler);
 }
 
+void CrashReporter::ShowFatalMessage(const char* title, const char* message) {
+    std::fprintf(stderr, "%s: %s\n", title, message);
+#if !defined(RC_PLATFORM_NULL)
+    if (std::getenv("RECHAN_CRASH_REPORTER_NO_DIALOG")) return;
+    MessageBoxA(nullptr, message, title, MB_OK | MB_ICONERROR | MB_TASKMODAL);
+#endif
+}
+
 #elif defined(RC_PLATFORM_SWITCH)
 
 // Deliberately minimal no-op for this toolchain-validation milestone: no
@@ -247,6 +251,10 @@ void CrashReporter::Install() {
 // reporting here would hook libnx's own fatal-error/diagFatal path instead,
 // left for a later pass once there's an actual Switch build to crash).
 void CrashReporter::Install() {}
+
+void CrashReporter::ShowFatalMessage(const char* title, const char* message) {
+    std::printf("%s: %s\n", title, message);
+}
 
 #else
 
@@ -388,12 +396,10 @@ static void FatalSignalHandler(int signalNumber, siginfo_t* signalInfo, void*) {
                 "\nPlease open an issue at:\n"
                 "https://github.com/SilverwireGames/ReChan/issues/new\n"
                 "Attach this crash report.\n");
-#if !defined(NDEBUG)
         WriteFd(report,
                 "\nrechan.log\n"
                 "==========\n");
         AppendFileToFd(report, "rechan.log");
-#endif
         fsync(report);
         close(report);
     }
@@ -416,6 +422,21 @@ static void FatalSignalHandler(int signalNumber, siginfo_t* signalInfo, void*) {
 [[noreturn]] static void TerminateHandler() {
     raise(SIGABRT);
     _exit(134);
+}
+
+void CrashReporter::ShowFatalMessage(const char* title, const char* message) {
+    std::fprintf(stderr, "%s: %s\n", title, message);
+#if !defined(RC_PLATFORM_NULL)
+    if (std::getenv("RECHAN_CRASH_REPORTER_NO_DIALOG")) return;
+
+    const pid_t child = fork();
+    if (child == 0) {
+        execlp("zenity", "zenity", "--error", "--title", title,
+               "--width=520", "--text", message, static_cast<char*>(nullptr));
+        execlp("xmessage", "xmessage", "-center", message, static_cast<char*>(nullptr));
+        _exit(127);
+    }
+#endif
 }
 
 void CrashReporter::Install() {

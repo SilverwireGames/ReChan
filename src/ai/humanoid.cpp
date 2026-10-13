@@ -97,6 +97,7 @@ static s32 s_throwPickupReleaseForce = 0x59D8;
 // PSX gp+0x73C (0x800DD088), release-frame threshold for _TableThrow.
 static s32 s_tableThrowReleaseFrame = 0xD;
 static u32 s_humanoidSuitTraceBudget = 64;
+static u32 s_nonSTreeHumanoidModelBudget = 16;
 static constexpr s32 DROP_PICKUP_DAMAGE_THRESHOLD = 14;
 static constexpr s32 BACK_GRAB_MIN_RELATIVE_ANGLE = 5461;
 static constexpr u32 BACK_GRAB_RELATIVE_ANGLE_RANGE = 0xD8E3;
@@ -325,11 +326,11 @@ static void UpdateHumanoidRenderAnimPose(HumanoidModel* model, HumanoidRenderSmo
         smoothState->curAnimFrame,
         alpha);
 
-    anim->flip->SetFrameReal(frameReal);
-    anim->flip->UpdateJoints();
+    anim->ApplyFlipPose(frameReal);
 }
 
 struct HumanoidRenderAnimPoseBackup {
+    AnimStructure* animStructure = nullptr;
     TransformFlip* flip = nullptr;
     TransformAnim* anim = nullptr;
     s32 frameReal = 0;
@@ -350,6 +351,7 @@ static HumanoidRenderAnimPoseBackup ApplyHumanoidRenderAnimPose(
         return backup;
     }
 
+    backup.animStructure = anim;
     backup.flip = anim->flip;
     backup.anim = anim->flip->anim;
     backup.frameReal = anim->flip->frameReal;
@@ -368,6 +370,12 @@ static void RestoreHumanoidRenderAnimPose(const HumanoidRenderAnimPoseBackup& ba
         backup.flip->anim = backup.anim;
         backup.flip->dirty = 1;
     }
+
+    if (backup.animStructure && !backup.animStructure->sequence && backup.animStructure->flip == backup.flip) {
+        backup.animStructure->ApplyFlipPose(backup.frameReal);
+        return;
+    }
+
     backup.flip->SetFrameReal(backup.frameReal);
     backup.flip->UpdateJoints();
 }
@@ -1215,6 +1223,7 @@ Humanoid::~Humanoid() {
 #endif
     // PSX: KillDialog, DeleteModel, DeleteRightHandObj, DeleteLeftHandObj, etc.
     KillDialog(0, 0, 512);
+    pcDestroying = true;
     DeleteModel();
     DeleteRightHandObj();
     DeleteLeftHandObj();
@@ -1483,51 +1492,59 @@ void Humanoid::Draw() {
             leftHandObj->Draw();
         }
 
-        if (hm->animMatrices && hm->animMatrices->Copy()) {
-            collBboxMin.x = 175;
-            collBboxMin.y = 0;
-            collBboxMax.x = 175;
-
-            const s32* rootMatrix = hm->animMatrices->GetMatrix(0);
-            if (rootMatrix) {
-                collBboxMin.z = rootMatrix[6] - pos.y + HEAD_RISE;
-            }
-            else {
-                collBboxMin.z = HEAD_RISE;
-            }
-
-            const s32 state = actionState;
-            if ((u32)(state - 57) < 2u || state == 53 || state == AS_THROW_FREE_FALL) {
-                s32 maxRadius = 0;
-                for (u32 i = 0; i < 5; i++) {
-                    const s32* matrix = hm->animMatrices->GetMatrix(i);
-                    if (!matrix) {
-                        continue;
-                    }
-                    const s32 radius = (s32)rmMag2((f32)(matrix[5] - pos.x), (f32)(matrix[7] - pos.z));
-                    if (maxRadius < radius) {
-                        maxRadius = radius;
-                    }
-                }
-                collBboxMax.x = maxRadius;
-            }
-
-            if (state == AS_DIVE_ROLL) {
-                if (thingType != 10) {
-                    collBboxMin.z = HUMANOID_DIVE_ROLL_Y_RISE;
-                }
-            }
-            else if (state == AS_LEDGE_LATCH) {
-                if (collBboxMin.z < HUMANOID_LEDGE_LATCH_MIN_Y_RISE) {
-                    collBboxMin.z = HUMANOID_LEDGE_LATCH_MIN_Y_RISE;
-                }
-            }
-        }
+        UpdateCollisionBoundsFromJoints();
 
         return;
     }
     // No model: fallback to debug wireframe
     Thing::Draw();
+}
+
+// PSX: tail of Draw__8Humanoid.
+void Humanoid::UpdateCollisionBoundsFromJoints() {
+    HumanoidModel* hm = static_cast<HumanoidModel*>(model);
+    if (!hm || !hm->animMatrices || !hm->animMatrices->Copy()) {
+        return;
+    }
+
+    collBboxMin.x = 175;
+    collBboxMin.y = 0;
+    collBboxMax.x = 175;
+
+    const s32* rootMatrix = hm->animMatrices->GetMatrix(0);
+    if (rootMatrix) {
+        collBboxMin.z = rootMatrix[6] - pos.y + HEAD_RISE;
+    }
+    else {
+        collBboxMin.z = HEAD_RISE;
+    }
+
+    const s32 state = actionState;
+    if ((u32)(state - 57) < 2u || state == 53 || state == AS_THROW_FREE_FALL) {
+        s32 maxRadius = 0;
+        for (u32 i = 0; i < 5; i++) {
+            const s32* matrix = hm->animMatrices->GetMatrix(i);
+            if (!matrix) {
+                continue;
+            }
+            const s32 radius = (s32)rmMag2((f32)(matrix[5] - pos.x), (f32)(matrix[7] - pos.z));
+            if (maxRadius < radius) {
+                maxRadius = radius;
+            }
+        }
+        collBboxMax.x = maxRadius;
+    }
+
+    if (state == AS_DIVE_ROLL) {
+        if (thingType != 10) {
+            collBboxMin.z = HUMANOID_DIVE_ROLL_Y_RISE;
+        }
+    }
+    else if (state == AS_LEDGE_LATCH) {
+        if (collBboxMin.z < HUMANOID_LEDGE_LATCH_MIN_Y_RISE) {
+            collBboxMin.z = HUMANOID_LEDGE_LATCH_MIN_Y_RISE;
+        }
+    }
 }
 
 // PSX: Reset__8Humanoid (HUMANOID.CPP:513)
@@ -1881,15 +1898,10 @@ void Humanoid::CreateModel(const char* name) {
         hm->backPtr = this;
     }
 
-    if (field452 != 0 && activeZone) {
-        activeZone->AddHumanoidToOverlordMembers(this);
+    // PC: display-only models get gameplay state on promotion.
+    if (!pcVisualModelOnly) {
+        CreateGameplayState();
     }
-
-    if (!behaviour) {
-        behaviour = new Behaviour(this, thingType, field452);
-    }
-
-    field444 = 1;
 
     // PSX: calls Thing::CreateModel which does the LevelManager lookup
     Thing::CreateModel(name);
@@ -1900,8 +1912,16 @@ void Humanoid::CreateModel(const char* name) {
 
     // PSX: ApplyAnimToModel(thingType, 0, 2, 0, 0) then InitSemiTransMode
     Model* m = static_cast<Model*>(model);
-    if (m) {
-        SModel* sm = static_cast<SModel*>(m);
+    SModel* sm = dynamic_cast<SModel*>(m);
+    if (m && !sm && s_nonSTreeHumanoidModelBudget > 0) {
+        LOG("[Humanoid::CreateModel] Non-STree model attached to humanoid thingType=%u name=%s drawableType=%d",
+            thingType,
+            GetName() ? GetName() : "null",
+            m->drawableType);
+        s_nonSTreeHumanoidModelBudget--;
+    }
+
+    if (sm) {
         m->ApplyAnimToModel(thingType, 0, 2, 0, 0);
         sm->SetupModelCallbacks();
         m->SetAnim(22, 0, 1, 0);
@@ -1921,8 +1941,7 @@ void Humanoid::CreateModel(const char* name) {
     orientation = spawnOrientation;
     faceAngle = spawnOrientation.y;
 
-    if (m) {
-        SModel* sm = static_cast<SModel*>(m);
+    if (sm) {
         sm->scale = GetCharSubTypeScale(characterSubType);
 
         if (m->drawableType == 2 && m->drawable) {
@@ -1945,14 +1964,69 @@ void Humanoid::CreateModel(const char* name) {
     CreateSound();
 }
 
-// PSX: DeleteModel__8Humanoid (HUMANOID.CPP:910)
-void Humanoid::DeleteModel() {
-    MARKFUNCTION(0x80063514);
-    Thing::DeleteModel();
+// PSX: the zone-member and Behaviour part of CreateModel__8HumanoidPCc (0x800632B4).
+void Humanoid::CreateGameplayState() {
+    if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
+        activeZone->AddHumanoidToOverlordMembers(this);
+    }
 
+    if (!behaviour) {
+        behaviour = new Behaviour(this, thingType, field452);
+        if (field444 != 0) {
+            behaviour->handlerThisOffset = 0;
+            behaviour->handlerDispatch = -1;
+            behaviour->handler = (spawnCount != 0) ? Behaviour::Idle : Behaviour::NDMS;
+        }
+        field444 = 1;
+    }
+}
+
+// PSX: the zone-member and Behaviour part of DeleteModel__8Humanoid (0x80063514).
+void Humanoid::DestroyGameplayState() {
     // Host safety: AI teardown can clear activeZoneList before humanoids are destroyed.
     if (field452 != 0 && activeZone && IsActiveZoneStillRegistered(activeZone)) {
         activeZone->RemoveHumanoidFromOverlordMembers(this);
+    }
+
+    // PC: the player's Behaviour is never rebuilt.
+    if (behaviour && this != Player::s_player) {
+        spawnCount = (behaviour->handlerDispatch == -1 && behaviour->handler == Behaviour::Idle) ? 1 : 0;
+        delete behaviour;
+        behaviour = nullptr;
+    }
+}
+
+void Humanoid::OnVisualModelPromoted() {
+    CreateGameplayState();
+}
+
+void Humanoid::OnVisualModelDemoted() {
+    DestroyGameplayState();
+    flags2 &= ~8u;
+
+    Model* m = static_cast<Model*>(model);
+    if (m) {
+        m->SetAnim(22, 0, 1, 0);
+    }
+    SetActionState((field364 != 0) ? (u32)field364 : (u32)AS_STAND_ANIM, 0);
+    orientation = spawnOrientation;
+    faceAngle = spawnOrientation.y;
+}
+
+// PSX: DeleteModel__8Humanoid (HUMANOID.CPP:910)
+void Humanoid::DeleteModel() {
+    MARKFUNCTION(0x80063514);
+    const bool wasVisualOnly = pcVisualModelOnly;
+    Thing::DeleteModel();
+
+    if (!wasVisualOnly) {
+        DestroyGameplayState();
+    }
+
+    // PSX: SetActionState(0, 0), then clear flags2 bit 3.
+    if (!pcDestroying && this != Player::s_player) {
+        SetActionState(AS_INACTIVE_IDLE, 0);
+        flags2 &= ~8u;
     }
 
     ReleaseSound();
