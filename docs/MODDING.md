@@ -47,6 +47,44 @@ Dialogue audio is exported from `RSDIALOG.DLG` as
 `sounds/dialog/cCC_dDDD_vVV.wav`: character index, dialog ID, and randomized
 variant index. Keep that filename to replace exactly that spoken variant.
 
+## Subtitles
+
+Movie subtitle overrides are loaded from `.srt` files in a mod. The runtime
+matches the subtitle by the movie filename stem, so a file named like
+`intro.srt` will override the movie `intro.str`, `intro.avi`, `intro.mkv`, or similar aslong as the base name matches.
+
+Put the file anywhere under the mod folder; it does not need a specific
+folder layout. The important part is the filename itself.
+
+```text
+~mods/MyMod/
+  movies/
+    intro.srt
+```
+
+Examples:
+- `credits.srt` overrides `credits.*`
+- `factory.srt` overrides `factory.*`
+- `making.srt` overrides `making.*`
+- `prolog.srt` overrides `prolog.*`
+- `victory.srt` overrides `victory.*`
+
+Use a standard SRT file with timecodes and UTF-8 text. A BOM is accepted as
+well; the loader strips a UTF-8 BOM automatically.
+
+```srt
+1
+00:00:10,000 --> 00:00:14,000
+Hello there.
+
+2
+00:00:15,000 --> 00:00:18,500
+This is a subtitle override.
+```
+
+If the movie file has a different extension but the same base name, the same
+`.srt` file still applies. In other words: same stem, same subtitle.
+
 ## Level parameters
 
 The DebugUI exporter writes one `parameters_petalNN.json` file for each WDB

@@ -276,6 +276,7 @@ void ModLoader::Init() {
     m_modelIndex.clear();
     m_soundIndex.clear();
     m_dataIndex.clear();
+    m_subtitleIndex.clear();
     m_mods.clear();
 
     if (!std::filesystem::is_directory(kModsDir)) {
@@ -341,6 +342,7 @@ void ModLoader::Shutdown() {
     m_modelIndex.clear();
     m_soundIndex.clear();
     m_dataIndex.clear();
+    m_subtitleIndex.clear();
     m_mods.clear();
     m_enabled = true;
     m_verbose = false;
@@ -365,6 +367,7 @@ void ModLoader::ScanModFolder(const std::string& folderPath, const std::string& 
     info.modelCount = ScanCategory(folderPath, modName, ".glb", m_modelIndex);
     info.soundCount = ScanCategory(folderPath, modName, ".wav", m_soundIndex);
     info.dataCount = ScanCategory(folderPath, modName, ".json", m_dataIndex);
+    ScanCategory(folderPath, modName, ".srt", m_subtitleIndex);
 
     m_mods.push_back(std::move(info));
 }
@@ -720,6 +723,14 @@ const std::string* ModLoader::FindModelOverridePath(const char* scope, const cha
 
 const std::string* ModLoader::FindDataOverridePath(const char* scope, const char* name) const {
     return FindScopedPath(m_dataIndex, scope, name);
+}
+
+const std::string* ModLoader::FindSubtitleOverridePath(const char* name) const {
+    if (!name || !name[0]) return nullptr;
+    std::string lowerName(name);
+    for (char& c : lowerName) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto it = m_subtitleIndex.find(p3dHash(lowerName.c_str()));
+    return it != m_subtitleIndex.end() ? &it->second : nullptr;
 }
 
 const std::string* ModLoader::FindSoundOverridePath(const char* scope, const char* name) const {

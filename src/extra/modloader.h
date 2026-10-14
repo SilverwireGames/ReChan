@@ -47,6 +47,7 @@ public:
     // A file outside a recognized scope is a global fallback by filename.
     [[nodiscard]] const std::string* FindModelOverridePath(const char* scope, const char* name) const;
     [[nodiscard]] const std::string* FindDataOverridePath(const char* scope, const char* name) const;
+    [[nodiscard]] const std::string* FindSubtitleOverridePath(const char* name) const;
 
     // Two-pass texture lookup: tries "{scope}/{name}" first, then "{name}" alone.
     // Use scope = character/level name so jackie/face.png wins over face.png for Jackie,
@@ -118,6 +119,7 @@ public:
     std::unordered_map<u32, std::string> m_modelIndex;
     std::unordered_map<u32, std::string> m_soundIndex;
     std::unordered_map<u32, std::string> m_dataIndex;
+    std::unordered_map<u32, std::string> m_subtitleIndex;
     std::vector<ModInfo> m_mods;
 };
 
