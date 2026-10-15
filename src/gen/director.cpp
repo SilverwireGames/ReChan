@@ -1309,6 +1309,15 @@ bool Director::TriggerDeathVolume(s32 newDeathType) {
         return false;
     }
 
+    // Do not allow a death volume to interrupt a door NIS.
+    if (g_codeSnipThing) {
+        u16 thingType = g_codeSnipThing->thingType;
+        if (thingType == AITypes::TT_DOOR) {
+            LOG("[Director] TriggerDeathVolume ignored (door NIS in progress) deathType=%d", newDeathType);
+            return false;
+        }
+    }
+
     LOG("[Director] TriggerDeathVolume deathType=%d", newDeathType);
     deathType = newDeathType;
     SetCodeSnip(deathVolScript, nullptr);
@@ -1386,11 +1395,15 @@ void Director::Process() {
             return;
         }
 
+        s32* const codeSnipBeforeDispatch = codeSnipPtr;
         const DirectorOpcode opcode = static_cast<DirectorOpcode>(*scriptPtr);
+
         switch (opcode) {
             case DirectorOpcode::End:
                 // PSX: clear director state, clear NIS flags, destroy directorSound
                 scriptPtr = nullptr;
+                codeSnipPtr = nullptr;
+                g_codeSnipThing = nullptr;
                 scriptState = ToScriptStateValue(DirectorScriptState::Idle);
                 ClearDirectorFlagsOnMoveList();
                 if (directorSound) {
@@ -1416,6 +1429,8 @@ void Director::Process() {
                     }
                 }
                 scriptPtr = nullptr;
+                codeSnipPtr = nullptr;
+                g_codeSnipThing = nullptr;
                 scriptState = ToScriptStateValue(DirectorScriptState::Idle);
                 ClearDirectorFlagsOnMoveList();
                 if (directorSound) {
@@ -2253,6 +2268,14 @@ void Director::Process() {
                 field68 = 1;
                 break;
         }
+
+        // A handler may cause a collision callback which replaces the script via
+        // SetCodeSnip. Its normal pointer advance then applies to the new script.
+        // Restart that snippet on the next frame instead of consuming its prefix.
+        if (codeSnipPtr != codeSnipBeforeDispatch) {
+            scriptPtr = codeSnipPtr;
+            return;
+        }
     }
 
     field68 = 1;
@@ -2889,8 +2912,13 @@ void Director::ProcessDoorFunc() {
         return;
     }
 
+    if (!g_selectedDoorOrLadder && g_codeSnipThing) {
+        g_selectedDoorOrLadder = g_codeSnipThing;
+    }
+
     for (s32 i = 0; i < 128; i++) {
         const DirectorDoorCmd op = static_cast<DirectorDoorCmd>(*scriptPtr);
+
         if (op == DirectorDoorCmd::End) {
             scriptPtr += 1;
             return;

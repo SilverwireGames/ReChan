@@ -351,27 +351,26 @@ void Door::HandleHumanoidCollision(Humanoid* hum) {
         return;
     }
 
-    // PSX: check if humanoid is a valid player for cutscene triggering
     s32 isValidPlayer = 0;
     if (hum->thingType == 0) {
-        // Player type - check actionState (1, 2, 3, 10, 11 are valid)
-        s32 as = hum->actionState;
-        if (as == 1 || as == 2 || as == 3 || as == 10 || as == 11) {
-            // Check combat bits (bit 7 or bit 15 of commandBits)
-            s32 bits = hum->commandBits;
-            if (((bits >> 7) & 1) || ((bits >> 15) & 1)) {
+        const s32 actionState = hum->actionState;
+        if (actionState == 1 || actionState == 2 || actionState == 3
+            || actionState == 10 || actionState == 11) {
+            const s32 commandBits = hum->commandBits;
+            if (((commandBits >> 7) & 1) || ((commandBits >> 15) & 1)) {
                 isValidPlayer = 1;
             }
         }
     }
 
     if (isValidPlayer && doorState == 1) {
+        // Start the actual opening transition before any director cutscene logic.
+        doorState = 2;
+        CSoundDirect::PlayTransient(156, static_cast<void*>(&pos), 0, 0);
+
         // PSX: state 1 + valid player  trigger door cutscene via Director
         if (g_director) {
-            // PSX: if killTarget exists, use NISdoor1WithDialog; else NISdoor1
-            s32* doorScript = killTarget
-                ? Director::GetNISDoor1WithDialogScript()
-                : Director::GetNISDoor1Script();
+            s32* doorScript = Director::GetNISDoor1Script();
             g_director->SetCodeSnip(doorScript, this);
         }
         cutsceneTriggered = 1;
