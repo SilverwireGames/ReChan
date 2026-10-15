@@ -148,6 +148,9 @@ Italien
 [FE_LSPA]
 Espagnol
 
+[FE_LPOR]
+Portugais
+
 [FE_CTL]
 Parametres Manette
 

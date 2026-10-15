@@ -148,6 +148,9 @@ Italiano
 [FE_LSPA]
 Espanol
 
+[FE_LPOR]
+Portugues
+
 [FE_CTL]
 Configuracion de Mando
 
