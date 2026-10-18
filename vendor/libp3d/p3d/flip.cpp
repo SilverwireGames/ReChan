@@ -575,6 +575,25 @@ void TransformFlip::EvalRotChannel(const TransformAnim::Channel& ch, STreeJoint&
         s32 frameDelta = frameReal - ((s32)t0 << 16);
         s32 frac16 = (s32)(((s64)frameDelta << 16) / ((s64)timeDelta << 16));
 
+        // Rx * Rz * Ry also represents the same orientation as
+        // (x + 180, y + 180, 180 - z). Exported keys can switch between these
+        // Euler branches near z = +/-90; lerping axes independently then twists
+        // the joint between otherwise nearby poses (visible at fractional frames).
+        auto distanceSquared = [=](s32 x, s32 y, s32 z) -> s64 {
+            const s32 dx = (s16)(x - rx0);
+            const s32 dy = (s16)(y - ry0);
+            const s32 dz = (s16)(z - rz0);
+            return (s64)dx * dx + (s64)dy * dy + (s64)dz * dz;
+        };
+        const s32 alternateX = (s16)(rx1 + 0x8000);
+        const s32 alternateY = (s16)(ry1 + 0x8000);
+        const s32 alternateZ = (s16)(0x8000 - rz1);
+        if (distanceSquared(alternateX, alternateY, alternateZ) < distanceSquared(rx1, ry1, rz1)) {
+            rx1 = alternateX;
+            ry1 = alternateY;
+            rz1 = alternateZ;
+        }
+
         // Lerp: v0 + (v1 - v0) * frac16 >> 16
         joint.rotationX = LerpAngle16((s16)rx0, (s16)rx1, frac16);
         joint.rotationY = LerpAngle16((s16)ry0, (s16)ry1, frac16);
