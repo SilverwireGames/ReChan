@@ -275,6 +275,7 @@ void ModLoader::Init() {
     m_textureIndex.clear();
     m_modelIndex.clear();
     m_soundIndex.clear();
+    m_soundOverrideIndex.clear();
     m_dataIndex.clear();
     m_mods.clear();
 
@@ -340,6 +341,7 @@ void ModLoader::Shutdown() {
     m_textureIndex.clear();
     m_modelIndex.clear();
     m_soundIndex.clear();
+    m_soundOverrideIndex.clear();
     m_dataIndex.clear();
     m_mods.clear();
     m_enabled = true;
@@ -363,7 +365,8 @@ void ModLoader::ScanModFolder(const std::string& folderPath, const std::string& 
     // Asset identity = filename stem only; any nesting depth is supported.
     info.textureCount = ScanCategory(folderPath, modName, ".png", m_textureIndex);
     info.modelCount = ScanCategory(folderPath, modName, ".glb", m_modelIndex);
-    info.soundCount = ScanCategory(folderPath, modName, ".wav", m_soundIndex);
+    info.soundCount = ScanCategory(
+        folderPath, modName, ".wav", m_soundIndex, &m_soundOverrideIndex);
     info.dataCount = ScanCategory(folderPath, modName, ".json", m_dataIndex);
 
     m_mods.push_back(std::move(info));
@@ -373,7 +376,8 @@ int ModLoader::ScanCategory(
     const std::string& categoryPath,
     const std::string& modName,
     const std::string& extension,
-    std::unordered_map<u32, std::string>& index) {
+    std::unordered_map<u32, std::string>& index,
+    std::unordered_map<std::string, std::string>* exactKeyIndex) {
     if (!std::filesystem::is_directory(categoryPath)) return 0;
 
     std::vector<std::filesystem::path> files;
@@ -411,14 +415,29 @@ int ModLoader::ScanCategory(
         const u32 crc = p3dHash(key.c_str());
 
         if (m_verbose) {
-            auto existing = index.find(crc);
-            if (existing != index.end() && existing->second != absPath) {
+            const std::string* existingPath = nullptr;
+            if (exactKeyIndex) {
+                auto existing = exactKeyIndex->find(key);
+                if (existing != exactKeyIndex->end()) {
+                    existingPath = &existing->second;
+                }
+            }
+            else {
+                auto existing = index.find(crc);
+                if (existing != index.end()) {
+                    existingPath = &existing->second;
+                }
+            }
+            if (existingPath && *existingPath != absPath) {
                 LOG("[ModLoader] '%s' overrides '%s' (was '%s')",
-                    modName.c_str(), key.c_str(), existing->second.c_str());
+                    modName.c_str(), key.c_str(), existingPath->c_str());
             }
         }
 
         index[crc] = absPath;
+        if (exactKeyIndex) {
+            (*exactKeyIndex)[key] = absPath;
+        }
         ++scanned;
     }
     return scanned;
@@ -733,13 +752,13 @@ const std::string* ModLoader::FindSoundOverridePath(const char* scope, const cha
 
     if (scope && scope[0]) {
         std::string scopedKey = toLower(std::string(scope) + "/" + name);
-        auto it = m_soundIndex.find(p3dHash(scopedKey.c_str()));
-        if (it != m_soundIndex.end()) return &it->second;
+        auto it = m_soundOverrideIndex.find(scopedKey);
+        if (it != m_soundOverrideIndex.end()) return &it->second;
     }
 
     std::string lowerName = toLower(name);
-    auto it = m_soundIndex.find(p3dHash(lowerName.c_str()));
-    return it != m_soundIndex.end() ? &it->second : nullptr;
+    auto it = m_soundOverrideIndex.find(lowerName);
+    return it != m_soundOverrideIndex.end() ? &it->second : nullptr;
 }
 
 // Minimal RIFF/WAVE reader for 16-bit PCM (mono or stereo) -- the exact

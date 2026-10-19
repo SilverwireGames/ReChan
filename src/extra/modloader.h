@@ -75,8 +75,10 @@ public:
     [[nodiscard]] const std::string* FindTextureOverridePath(const char* scope, const char* name) const;
     [[nodiscard]] bool IsUnmodifiedTextureDump(const char* path) const;
 
-    // Two-pass sound lookup (same "{scope}/{name}" then "{name}" convention as
-    // textures), decoded into 16-bit PCM via a small built-in WAV reader.
+    // Two-pass sound lookup by exact normalized key (same "{scope}/{name}" then
+    // "{name}" convention as textures), decoded into 16-bit PCM via a small
+    // built-in WAV reader. Exact keys avoid aliasing distinct files with the
+    // same 32-bit p3dHash.
     // Matches the asset exporter's own output layout exactly, so a dumped and
     // re-encoded WAV can be dropped straight back in as a mod:
     //   WAX bank sample:  scope="rs0000", name="sample00"  (rs0000/sample00.wav)
@@ -109,7 +111,8 @@ public:
         const std::string& categoryPath,
         const std::string& modName,
         const std::string& extension,
-        std::unordered_map<u32, std::string>& index);
+        std::unordered_map<u32, std::string>& index,
+        std::unordered_map<std::string, std::string>* exactKeyIndex = nullptr);
 
     bool m_initialized = false;
     bool m_enabled = true;
@@ -117,6 +120,9 @@ public:
     std::unordered_map<u32, std::string> m_textureIndex;
     std::unordered_map<u32, std::string> m_modelIndex;
     std::unordered_map<u32, std::string> m_soundIndex;
+    // Exact path identity for WAV override reads; m_soundIndex remains for the
+    // legacy APIs that are explicitly passed a 32-bit CRC/hash.
+    std::unordered_map<std::string, std::string> m_soundOverrideIndex;
     std::unordered_map<u32, std::string> m_dataIndex;
     std::vector<ModInfo> m_mods;
 };
