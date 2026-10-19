@@ -3065,6 +3065,11 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             }
             break;
         case AS_SPIN_BACK:
+            // PSX: when Jackie enters state 56, preload his "hurt" line
+            // (dialog 28, priority 0x35) for playback during get-up.
+            if (this == static_cast<Humanoid*>(Player::s_player)) {
+                LoadDialog(0x1C, 0x35);
+            }
             combatFlag = 0;
             if (model) {
                 Model* m = static_cast<Model*>(model);
@@ -3081,6 +3086,10 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             }
             break;
         case AS_FLYING_BACK:
+            // PSX: state 57 preloads the same player-only "hurt" line.
+            if (this == static_cast<Humanoid*>(Player::s_player)) {
+                LoadDialog(0x1C, 0x35);
+            }
             if (model) {
                 Model* m = static_cast<Model*>(model);
                 m->SetAnim(14, param, 1, 0);
