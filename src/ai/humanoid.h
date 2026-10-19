@@ -165,6 +165,8 @@ enum StateDispatch : u16 {
     SD_BUTCH_CHARGE = 276,
     SD_BUTCH_THROW_POT = 277,
     SD_GOT_HIT_CRUSHER = 278,
+    // PC-only route: Grontar's AI combo selector (_DiveRoll).
+    SD_GRONTAR_COMBO = 279,
 };
 
 // Humanoid - DynamicThing with combat, animation, and AI state

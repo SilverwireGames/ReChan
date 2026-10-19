@@ -34,6 +34,7 @@ public:
     ~Grontar() override;
 
     void SetActionState(u32 state, s32 param) override;
+    void ProcessAction() override;
 
     void _Stand() override;
     void _Run() override;

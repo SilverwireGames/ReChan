@@ -779,13 +779,31 @@ void Behaviour::GrontarDMS(Behaviour* self) {
         comboStateB = 0;
     };
 
-    if (!self->InActiveZone() && distanceToPlayer >= GRONTAR_FAR_ATTACK_DIST) {
+    if (!self->InActiveZone()) {
+        if (distanceToPlayer < GRONTAR_CLOSE_ATTACK_DIST
+            && !IsPlayerAggressiveCombatState(player->actionState)) {
+            const s32 playerInField = IsPointInFieldOf(player->pos, owner->pos, owner->orientation.y, 0x2AAA, 0x2AAA);
+            const s32 randomAction = (s32)rmRangedRandom(100);
+            if (playerInField != 0 && randomAction < 75) {
+                owner->RequestAction(15);
+            }
+            else {
+                self->ComplexAttack();
+            }
+
+            resetComboState();
+            return;
+        }
+
         LVector zoneCenter = {};
         owner->activeZone->GetActiveZoneCenterPoint(zoneCenter);
+        // _Straif captures faceAngle as the movement heading, then turns
+        // toward field256 while strafe-moving. Keep Jackie as that target and
+        // use the zone center only for the captured movement heading.
         owner->SetTarget(player);
         owner->FacePointDesired(zoneCenter);
-        owner->moveSpeed = (s16)self->animConfigPtr->runningSpeed;
-        owner->RequestAction(2);
+        owner->moveSpeed = (s16)self->animConfigPtr->strafingSpeed;
+        owner->RequestAction(6);
 
         resetComboState();
         return;
@@ -812,6 +830,19 @@ void Behaviour::GrontarDMS(Behaviour* self) {
     }
 
     if (distanceToPlayer < GRONTAR_FAR_ATTACK_DIST) {
+        // Keep the isolated Grontar weapon attack in the midrange band.
+        // The original port placed this 20% check in the far-distance
+        // fallback below, which made him repeatedly start anim 63 from
+        // across the room while the player was running or strafing.
+        const bool comboPending = closeCombatState != 0 || comboStateA != 0 || comboStateB != 0;
+        if (!comboPending
+            && (player->actionState == (s32)AS_STRAFE || player->actionState == (s32)AS_RUN)
+            && IsPointInFieldOf(player->pos, owner->pos, owner->orientation.y, 0x1555, 0x1555)
+            && (s32)rmRangedRandom(100) < 20) {
+            owner->RequestAction(14);
+            return;
+        }
+
         if (player->actionState == (s32)AS_STRAFE) {
             owner->RequestAction(7);
             resetComboState();
@@ -868,23 +899,11 @@ void Behaviour::GrontarDMS(Behaviour* self) {
             return;
         }
 
-        owner->moveSpeed = (s16)self->animConfigPtr->runningSpeed;
-        owner->RequestAction(2);
+        owner->RequestAction(1);
         return;
     }
 
-    s32 playerInField = 0;
-    if (player->actionState == (s32)AS_STRAFE || player->actionState == (s32)AS_RUN) {
-        playerInField = IsPointInFieldOf(player->pos, owner->pos, owner->orientation.y, 0x1555, 0x1555);
-    }
-
-    if (playerInField != 0 && (s32)rmRangedRandom(100) < 20) {
-        owner->RequestAction(14);
-        return;
-    }
-
-    owner->moveSpeed = (s16)self->animConfigPtr->runningSpeed;
-    owner->RequestAction(2);
+    owner->RequestAction(1);
 }
 
 // PSX: _PaulDMS__9Behaviour (BEHAVEB.CPP:950, 0x8001D7CC)

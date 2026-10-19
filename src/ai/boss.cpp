@@ -518,7 +518,8 @@ void Grontar::SetActionState(u32 state, s32 param) {
     }
 
     field344 = 0;
-    stateDispatch = SD_DIVE_ROLL;
+    // AI request 5 starts Grontar's combo selector; request 6 remains ordinary strafe.
+    stateDispatch = HasAction(GA_DIVE_ROLL) ? SD_GRONTAR_COMBO : SD_STRAFE;
     field348 = 8;
     field488 = 0;
 
@@ -540,6 +541,16 @@ void Grontar::SetActionState(u32 state, s32 param) {
 
     actionState = static_cast<s32>(state);
     stateTimer = 0;
+}
+
+void Grontar::ProcessAction() {
+    if (stateDispatch == SD_GRONTAR_COMBO) {
+        // Keep this route active while _DiveRoll waits for the following 8/9 request.
+        _DiveRoll();
+        return;
+    }
+
+    Humanoid::ProcessAction();
 }
 
 // PSX: _Stand__7Grontar (BOSS.CPP:652)
