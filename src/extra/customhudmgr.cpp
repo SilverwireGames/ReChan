@@ -1552,7 +1552,10 @@ void CustomHudMgr::DrawGameplayHud(const HUD& hud) {
         m_foeAnimTarget = nullptr;
     }
 
-    if (hud.visible || hud.takes.isPlaying || hud.dragon.isPlaying) {
+    // The original HUD's status-display toggle controls the dragon and lives
+    // counters. The custom inventory card also contains the level timer, so
+    // follow the same state for the whole card.
+    if (hud.dragonShowState && (hud.visible || hud.takes.isPlaying || hud.dragon.isPlaying)) {
         DrawInventoryCard(hud);
     }
 

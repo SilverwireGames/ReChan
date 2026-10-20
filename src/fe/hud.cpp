@@ -86,7 +86,9 @@ HUD::HUD() {
     currentFoe = nullptr;
     bossHandle = nullptr;
     visible = 1;
-    dragonShowState = 0;
+    // The custom HUD starts with its inventory/status panel visible, so keep
+    // the toggle state in sync with that initial presentation.
+    dragonShowState = CUSTOM_MENU ? 1 : 0;
     foeTracking = 0;
 }
 
