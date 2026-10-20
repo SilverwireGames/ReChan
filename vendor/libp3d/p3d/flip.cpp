@@ -201,7 +201,10 @@ static bool IsValidTransformAnimHeader(const u8* rawData, u32 rawSize, u32 offse
         && numFrames >= 1 && numFrames <= 512
         && targetType >= 0 && targetType <= 3
         && numRot >= 1 && numRot <= 100
-        && numTrans >= 0 && numTrans <= 10;
+        // The retail HHEAD stun-stars animation has 13 translation channels.
+        // Keep this plausibility cap aligned with rotations so valid clips are not
+        // discarded before TransformAnim::Parse can validate their array bounds.
+        && numTrans >= 0 && numTrans <= 100;
 }
 
 void* TransformAnim::ParseMulti(u8* rawData, u32 rawSize) {
