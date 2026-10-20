@@ -188,7 +188,6 @@ public:
     virtual void _Teetering();
     virtual void _WallJump();
     virtual void _DoStand();
-    virtual void _DoRun();
     virtual void _HorizontalPoleSwing();
     virtual void _LedgeLatch();
     virtual void _LedgePullup();

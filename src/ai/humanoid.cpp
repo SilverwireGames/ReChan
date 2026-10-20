@@ -138,6 +138,7 @@ struct HumanoidRenderSmoothState {
     LVector curOrient = {};
     bool animInitialized = false;
     s32 animEnum = -1;
+    s32 animLoopType = ANIM_LOOP;
     s32 prevAnimFrame = 0;
     s32 curAnimFrame = 0;
 };
@@ -353,7 +354,10 @@ static HumanoidRenderAnimPoseBackup ApplyHumanoidRenderAnimPose(
     backup.animStructure = anim;
     backup.flip = anim->flip;
     backup.anim = anim->flip->anim;
-    backup.frameReal = anim->flip->frameReal;
+    // Blend2's flip holds the destination sample, not the blend clock.
+    // Restore using the clock so the saved pose gets its original blend weight.
+    backup.frameReal = anim->mode == 0 && anim->loopTypeField == ANIM_BLEND2
+        ? anim->currentFrame : anim->flip->frameReal;
     backup.valid = true;
 
     UpdateHumanoidRenderAnimPose(model, smoothState, alpha);
@@ -420,9 +424,15 @@ void Humanoid::AdvanceRenderInterpolationTick() {
         smoothState->curAnimFrame = currentFrame;
     }
     else {
-        smoothState->prevAnimFrame = smoothState->curAnimFrame;
+        // Blend2's clock is unrelated to the destination clip's frame number.
+        // Its last pose was field56, so interpolate from that pose when playback
+        // resumes, rather than rewinding through destination frames 5..1.
+        const bool finishedBlend = smoothState->animLoopType == ANIM_BLEND2
+            && anim->loopTypeField != ANIM_BLEND2;
+        smoothState->prevAnimFrame = finishedBlend ? anim->field56 : smoothState->curAnimFrame;
         smoothState->curAnimFrame = currentFrame;
     }
+    smoothState->animLoopType = anim->loopTypeField;
 }
 #else
 void Humanoid::ResetRenderInterpolation() {}

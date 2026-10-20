@@ -1809,8 +1809,10 @@ void SModel::Animate() {
     MARKFUNCTION(0x8006F640);
     if (animStructure) {
         AnimStructure* anim = (AnimStructure*)animStructure;
-        anim->ExecuteHandler(1);
+        const s32 doFlip = (modelFlags >> 6) & 1;
+        anim->ExecuteHandler(doFlip);
     }
+    modelFlags &= ~0x40u;
 }
 
 // PSX: InitBlendPose__6SModel (MODEL.CPP:1328, 0x8006F438)
@@ -2419,6 +2421,14 @@ void HumanoidModel::SetAnim(s32 animEnum, s32 a3, s32 force, s32 extra) {
             as->humanoidCB.offsetLo = (s16)(4063232 & 0xFFFF);
             as->humanoidCB.offsetHi = (s16)(4063232 >> 16);
             as->humanoidCB.funcPtr = reinterpret_cast<void*>(static_cast<intptr_t>(8));
+
+            // Landing anim 37 is selected during the logic step, before the
+            // animation update that runs later in the same frame. ResetCountsToAnim
+            // leaves prevTick one tick behind, which advances frame 0 to frame 1
+            // before the first draw. Keep frame 0 for its first presentation tick.
+            if (animEnum == 37 && as->loopTypeField == ANIM_RUN_TO_LAST) {
+                as->prevTick = as->currentTick;
+            }
         }
         return;
     }
