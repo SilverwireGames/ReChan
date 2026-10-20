@@ -2713,14 +2713,6 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             field348 = 8;
             break;
         case AS_DIVE_ROLL:
-            // State 12 is player dive-roll; non-player callers are normalized to strafe.
-            if (this != static_cast<Humanoid*>(Player::s_player)) {
-                state = AS_STRAFE;
-                field344 = 0;
-                stateDispatch = SD_STRAFE;
-                field348 = 8;
-                break;
-            }
             field344 = 0;
             stateDispatch = SD_DIVE_ROLL_CHAIN;
             field348 = 8;
@@ -3478,8 +3470,10 @@ s32 Humanoid::GetStraifPhase() {
     }
 
     if (animWord2C == 1) {
+        // PSX: keep reverse strafe active until it returns to frame 0;
+        // only then use loopCount to decide whether another reverse pass runs.
         if (animHalf3E != 0) {
-            return 0;
+            return 1;
         }
         return (animWord54 < 2) ? 1 : 0;
     }
