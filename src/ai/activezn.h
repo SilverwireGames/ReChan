@@ -3,6 +3,7 @@
 #include "ai/simplbox.h"
 
 class Humanoid;
+class EnemyGenerator;
 struct LinearPath;
 struct DBVolume;
 
@@ -18,7 +19,7 @@ public:
     bool IsInSubZoneVolume(class Thing* thing) const;
 };
 
-// ActiveZone (104 bytes) - manages an area with overlord AI, paths, and sub-zones
+// ActiveZone (104-byte PSX prefix) - manages an area with overlord AI, paths, and sub-zones
 // PSX layout:
 //   +0:  ccNode base (24 bytes)
 //   +24: SimpleBox (24 bytes)
@@ -30,6 +31,7 @@ public:
 //   +84: memberCount (u8)
 //   +88: members[3] (Humanoid* x3 = 12 bytes)
 //   +100: specialFlag (s32)
+// PC: Encounter counts follow the original 104-byte layout.
 // PSX source: C:\CHAN\GAME\SRC\AI\ACTIVEZN.CPP
 class ActiveZone : public ccNode {
 public:
@@ -43,6 +45,11 @@ public:
     Humanoid* members[3] = {};  // +88
     s32 specialFlag = 0;    // +100
 
+    // PC: Encounter state. Unlike members[], these counts include
+    // authored enemies that have not been activated by streaming yet.
+    s32 encounterHumanoidsRemaining = 0;
+    s32 pendingEnemySpawns = 0;
+
     ActiveZone(DBVolume* vol);
     ~ActiveZone() override;
 
@@ -51,6 +58,17 @@ public:
     void AddSubZoneVolume(SubZoneVolume* szv);
     void AddHumanoidToOverlordMembers(Humanoid* h);
     void RemoveHumanoidFromOverlordMembers(Humanoid* h);
+    void RegisterEncounterHumanoid(const Humanoid* humanoid);
+    void ResolveEncounterHumanoid(const Humanoid* humanoid);
+    void RegisterPendingEnemySpawns(const EnemyGenerator* generator, s32 count);
+    void ResolvePendingEnemySpawn(const EnemyGenerator* generator);
+    void RemovePendingEnemySpawns(const EnemyGenerator* generator, s32 count);
+    s32 GetEncounterHumanoidsRemaining() const { return encounterHumanoidsRemaining; }
+    s32 GetPendingEnemySpawns() const { return pendingEnemySpawns; }
+    s32 GetUnresolvedEncounterCount() const {
+        return encounterHumanoidsRemaining + pendingEnemySpawns;
+    }
+    bool HasUnresolvedEncounter() const { return GetUnresolvedEncounterCount() > 0; }
     s32 GetNumberOfThinkingMembers() const;
     s32 AllowedToMoveIn(Humanoid* humanoid);
     bool IsInActiveZone(class Thing* thing) const;

@@ -1,6 +1,7 @@
 #include "ai/activezn.h"
 #include "pc/autotest.h"
 #include "ai/behaviour.h"
+#include "ai/generator.h"
 #include "ai/humanoid.h"
 #include "ai/player.h"
 #include "ai/thing.h"
@@ -111,6 +112,36 @@ void ActiveZone::RemoveHumanoidFromOverlordMembers(Humanoid* h) {
             return;
         }
     }
+}
+
+void ActiveZone::RegisterEncounterHumanoid(const Humanoid*) {
+    encounterHumanoidsRemaining++;
+}
+
+void ActiveZone::ResolveEncounterHumanoid(const Humanoid*) {
+    if (encounterHumanoidsRemaining > 0) {
+        encounterHumanoidsRemaining--;
+    }
+}
+
+void ActiveZone::RegisterPendingEnemySpawns(const EnemyGenerator*, s32 count) {
+    if (count <= 0) {
+        return;
+    }
+    pendingEnemySpawns += count;
+}
+
+void ActiveZone::ResolvePendingEnemySpawn(const EnemyGenerator*) {
+    if (pendingEnemySpawns > 0) {
+        pendingEnemySpawns--;
+    }
+}
+
+void ActiveZone::RemovePendingEnemySpawns(const EnemyGenerator*, s32 count) {
+    if (count <= 0) {
+        return;
+    }
+    pendingEnemySpawns -= (count < pendingEnemySpawns) ? count : pendingEnemySpawns;
 }
 
 // PSX: GetNumberOfThinkingMembers__10ActiveZone (ACTIVEZN.CPP:433, 0x800A6E30)

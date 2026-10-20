@@ -1233,6 +1233,7 @@ Humanoid::~Humanoid() {
     // PSX: KillDialog, DeleteModel, DeleteRightHandObj, DeleteLeftHandObj, etc.
     KillDialog(0, 0, 512);
     pcDestroying = true;
+    UnregisterEncounterPopulation();
     DeleteModel();
     DeleteRightHandObj();
     DeleteLeftHandObj();
@@ -1573,6 +1574,7 @@ void Humanoid::Reset() {
     // PSX: flags |= 4 (needs activation), flags &= ~0x100
     flags |= TF_NEEDS_ACTIVATION;
     flags &= ~TF_BIT8;
+    RegisterEncounterPopulation();
 }
 
 // PSX: Activate__8Humanoid (HUMANOID.CPP:760)
@@ -1967,6 +1969,44 @@ void Humanoid::CreateModel(const char* name) {
 
     // PSX: vtable+212 call -> CreateSound
     CreateSound();
+}
+
+// PC: Bookkeeping for authored and generated encounter members.
+void Humanoid::RegisterEncounterPopulation() {
+    if (thingType == AITypes::TT_PLAYER || field452 == 0 || !activeZone ||
+        !IsActiveZoneStillRegistered(activeZone)) {
+        return;
+    }
+
+    if (!encounterPopulationRegistered) {
+        activeZone->RegisterEncounterHumanoid(this);
+        encounterPopulationRegistered = true;
+        encounterPopulationResolved = false;
+    }
+    else if (encounterPopulationResolved) {
+        activeZone->RegisterEncounterHumanoid(this);
+        encounterPopulationResolved = false;
+    }
+}
+
+void Humanoid::ResolveEncounterPopulation() {
+    if (!encounterPopulationRegistered || encounterPopulationResolved) {
+        return;
+    }
+
+    if (activeZone && IsActiveZoneStillRegistered(activeZone)) {
+        activeZone->ResolveEncounterHumanoid(this);
+    }
+    encounterPopulationResolved = true;
+}
+
+void Humanoid::UnregisterEncounterPopulation() {
+    if (!encounterPopulationRegistered) {
+        return;
+    }
+
+    ResolveEncounterPopulation();
+    encounterPopulationRegistered = false;
 }
 
 // PSX: the zone-member and Behaviour part of CreateModel__8HumanoidPCc (0x800632B4).
@@ -2510,6 +2550,8 @@ void Humanoid::AnalyzeMesh(DBRoot* root) {
     if (subTypeBehaviourHash != 0) {
         behaviourNameHash = subTypeBehaviourHash;
     }
+
+    RegisterEncounterPopulation();
 
     if (thingType == 2) {
         s32 activeZonePathCount = 0;
@@ -3429,6 +3471,7 @@ void Humanoid::Kill() {
     }
 
     flags |= TF_DEAD;
+    ResolveEncounterPopulation();
 }
 
 // PSX: Killed__8Humanoid (HUMANOID.CPP:9440)
@@ -3441,6 +3484,7 @@ void Humanoid::Killed() {
     }
 
     flags |= TF_DEAD;
+    ResolveEncounterPopulation();
 }
 
 // PSX: GetStraifPhase__8Humanoid (HUMANOID.CPP:9476, 0x8006CF7C)

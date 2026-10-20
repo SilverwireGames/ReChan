@@ -167,10 +167,13 @@ void Door::Reset() {
     // PSX: reset animation and state fields
     currentOpen = 0;
     cutsceneTriggered = 0;
-    // Guarded doors wait for their encounter to become active before counting
-    // an empty target zone as cleared. A negative value is the unarmed state;
-    // the first active member restores the normal three-frame countdown.
-    deathCountdown = (doorState == 0 && killThingsCRC != 0) ? -1 : 3;
+    ActiveZone* encounterZone = (doorState == 0 && killThingsCRC != 0 && g_ai)
+        ? static_cast<ActiveZone*>(g_ai->activeZoneList.FindNodeCRC(static_cast<u32>(killThingsCRC), nullptr))
+        : nullptr;
+    const bool hasExpectedEncounter = encounterZone && encounterZone->HasUnresolvedEncounter();
+    // Preserve the original three-frame counter, but hold it unarmed while
+    // authored enemies or an enemy generator still belong to this zone.
+    deathCountdown = (doorState == 0 && hasExpectedEncounter) ? -1 : 3;
     drawRot.y = baseRotY;
 
     LOG("[Door::Reset] name=%s state=%d pos=(%d,%d,%d) baseRotY=%d targetCRC=0x%08X model=%p flags=0x%X blockNum=%d",
@@ -458,14 +461,21 @@ void Door::DeathCheck() {
         // 0x800A6E30 = ActiveZone::GetNumberOfThinkingMembers
         ActiveZone* az = static_cast<ActiveZone*>(static_cast<ccNode*>(killTarget));
         s32 thinkingCount = az->GetNumberOfThinkingMembers();
+        s32 unresolvedEncounterCount = az->GetUnresolvedEncounterCount();
 
         if (thinkingCount > 0) {
             // Still alive - reset countdown
             deathCountdown = 3;
         }
+        else if (unresolvedEncounterCount > 0) {
+            // Members may not be activated yet because their blocks are not
+            // active. Keep the existing countdown parked until they are killed.
+            deathCountdown = -1;
+            return;
+        }
         else if (deathCountdown < 0) {
-            // The target zone has not had an active member yet. Do not interpret
-            // its initial empty state as a completed encounter.
+            // No combatants or pending waves remain: start the original delay.
+            deathCountdown = 3;
             return;
         }
         else {

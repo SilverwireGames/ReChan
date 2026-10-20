@@ -433,6 +433,11 @@ public:
     void CreateGameplayState();
     void DestroyGameplayState();
     bool pcDestroying = false;
+    bool encounterPopulationRegistered = false;
+    bool encounterPopulationResolved = false;
+    void RegisterEncounterPopulation();
+    void ResolveEncounterPopulation();
+    void UnregisterEncounterPopulation();
     void OnVisualModelPromoted() override;
     void OnVisualModelDemoted() override;
     void AdvanceRenderInterpolationTick();
