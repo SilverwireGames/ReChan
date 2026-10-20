@@ -167,7 +167,10 @@ void Door::Reset() {
     // PSX: reset animation and state fields
     currentOpen = 0;
     cutsceneTriggered = 0;
-    deathCountdown = 3;
+    // Guarded doors wait for their encounter to become active before counting
+    // an empty target zone as cleared. A negative value is the unarmed state;
+    // the first active member restores the normal three-frame countdown.
+    deathCountdown = (doorState == 0 && killThingsCRC != 0) ? -1 : 3;
     drawRot.y = baseRotY;
 
     LOG("[Door::Reset] name=%s state=%d pos=(%d,%d,%d) baseRotY=%d targetCRC=0x%08X model=%p flags=0x%X blockNum=%d",
@@ -459,6 +462,11 @@ void Door::DeathCheck() {
         if (thinkingCount > 0) {
             // Still alive - reset countdown
             deathCountdown = 3;
+        }
+        else if (deathCountdown < 0) {
+            // The target zone has not had an active member yet. Do not interpret
+            // its initial empty state as a completed encounter.
+            return;
         }
         else {
             // No thinking members - decrement countdown
