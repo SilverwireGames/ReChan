@@ -1290,36 +1290,36 @@ void Humanoid::Think() {
     if (humanoidSound) {
         humanoidSound->Think();
     }
+    // PSX Think draws this every frame before checking the thing type. Keep
+    // the shared RNG stream aligned because dialogue clip selection uses it.
+    const s32 tauntRoll = (s32)rmRangedRandom(100);
     // PSX step 2-3 (0x80063834-0x80063934): boss types (Grontar/Paul/Oscar/
     // Dante/Butch) call LoadEnemyTaunts unconditionally every Think tick;
     // other types only roll for it while not AS_STAND_ANIM. PSX also gates
     // non-boss rolls on a shared last-taunt-frame cooldown (gp+0x6E8/+0x6F8)
     //
-    // PC: skip this while the actor is under explicit director/NIS control
-    if (!isDirectorControlledNis) {
-        bool isBossTypeForTaunt = false;
-        switch (thingType) {
-            case AITypes::TT_GRONTAR:
-            case AITypes::TT_PAUL:
-            case AITypes::TT_OSCAR:
-            case AITypes::TT_DANTE:
-            case AITypes::TT_BUTCH:
-                isBossTypeForTaunt = true;
-                break;
-        }
+    bool isBossTypeForTaunt = false;
+    switch (thingType) {
+        case AITypes::TT_GRONTAR:
+        case AITypes::TT_PAUL:
+        case AITypes::TT_OSCAR:
+        case AITypes::TT_DANTE:
+        case AITypes::TT_BUTCH:
+            isBossTypeForTaunt = true;
+            break;
+    }
 
-        if (isBossTypeForTaunt) {
+    if (isBossTypeForTaunt) {
+        LoadEnemyTaunts();
+    }
+    else if (!isDirectorControlledNis) {
+        static u32 s_lastNonBossTauntFrame = 0;
+        const u32 currentFrame = g_time ? g_time->GetFrameCounter() : 0;
+        if (actionState != (s32)AS_STAND_ANIM
+            && tauntRoll < 20
+            && (currentFrame - s_lastNonBossTauntFrame) >= NON_BOSS_TAUNT_COOLDOWN_FRAMES) {
+            s_lastNonBossTauntFrame = currentFrame;
             LoadEnemyTaunts();
-        }
-        else {
-            static u32 s_lastNonBossTauntFrame = 0;
-            const u32 currentFrame = g_time ? g_time->GetFrameCounter() : 0;
-            if (actionState != (s32)AS_STAND_ANIM
-                && (s32)rmRangedRandom(100) < 20
-                && (currentFrame - s_lastNonBossTauntFrame) >= NON_BOSS_TAUNT_COOLDOWN_FRAMES) {
-                s_lastNonBossTauntFrame = currentFrame;
-                LoadEnemyTaunts();
-            }
         }
     }
 
@@ -2771,7 +2771,6 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             if (model) {
                 Model* m = static_cast<Model*>(model);
                 m->SetAnim(24, param, 1, 0);
-                SetCallNextActionCallback(m);
             }
             field488 = 0;
             break;
@@ -4125,7 +4124,7 @@ void Humanoid::_Stand() {
 
         case 5:
             FaceAngleY(faceAngle, 0);
-            SetActionState(AS_STRAFE, 0);
+            SetActionState(AS_DIVE_ROLL, 0);
             return;
 
         case 6:
@@ -4491,10 +4490,10 @@ void Humanoid::_Run() {
         return;
     }
 
-    // Strafe (bit 5) -> face and strafe
+    // Dive-roll action (bit 5) -> face and enter action state 12.
     if (sd & 0x0020) {
         FaceAngleY(faceAngle, 0);
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
     }
 }
 
@@ -4622,11 +4621,11 @@ void Humanoid::_Straif() {
         return;
     }
 
-    // Strafe (bit 5) -> face + strafe
+    // Dive-roll action (bit 5) -> face and enter action state 12.
     if (sd & 0x0020) {
         FaceAngleY(faceAngle, 0);
         ReleaseTarget();
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
         return;
     }
 

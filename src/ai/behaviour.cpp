@@ -761,7 +761,7 @@ void Behaviour::GrontarDMS(Behaviour* self) {
         return;
     }
 
-    const s32 distanceToPlayer = owner->DistanceFromPointXZ(player->pos);
+    const s32 distanceToPlayer = owner->DistanceFromPoint(player->pos);
     if ((u32)(owner->actionState - 0x20) >= 5u) {
         self->comboScriptIndex = -1;
         self->comboScriptCursor = 0;
@@ -830,20 +830,7 @@ void Behaviour::GrontarDMS(Behaviour* self) {
     }
 
     if (distanceToPlayer < GRONTAR_FAR_ATTACK_DIST) {
-        // Keep the isolated Grontar weapon attack in the midrange band.
-        // The original port placed this 20% check in the far-distance
-        // fallback below, which made him repeatedly start anim 63 from
-        // across the room while the player was running or strafing.
-        const bool comboPending = closeCombatState != 0 || comboStateA != 0 || comboStateB != 0;
-        if (!comboPending
-            && (player->actionState == (s32)AS_STRAFE || player->actionState == (s32)AS_RUN)
-            && IsPointInFieldOf(player->pos, owner->pos, owner->orientation.y, 0x1555, 0x1555)
-            && (s32)rmRangedRandom(100) < 20) {
-            owner->RequestAction(14);
-            return;
-        }
-
-        if (player->actionState == (s32)AS_STRAFE) {
+        if (player->actionState == (s32)AS_DIVE_ROLL) {
             owner->RequestAction(7);
             resetComboState();
             return;
@@ -901,6 +888,20 @@ void Behaviour::GrontarDMS(Behaviour* self) {
 
         owner->RequestAction(1);
         return;
+    }
+
+    if (player->actionState == (s32)AS_STRAFE || player->actionState == (s32)AS_RUN) {
+        // PSX IsInMyDesiredFieldOf(player, owner, ...): check Grontar against
+        // Jackie's desired facing, then leave the current action unchanged
+        // when the 20% roll misses.
+        if (IsPointInFieldOf(owner->pos, player->pos, player->faceAngle, 0x1555, 0x1555)) {
+            if ((s32)rmRangedRandom(100) >= 20) {
+                return;
+            }
+
+            owner->RequestAction(14);
+            return;
+        }
     }
 
     owner->RequestAction(1);

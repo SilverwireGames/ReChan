@@ -513,23 +513,21 @@ void Grontar::SetActionState(u32 state, s32 param) {
 
     Boss::SetActionState(state, param);
 
-    if (state != AS_STRAFE) {
+    if (state != AS_DIVE_ROLL) {
         return;
     }
 
     field344 = 0;
-    // AI request 5 starts Grontar's combo selector; request 6 remains ordinary strafe.
-    stateDispatch = HasAction(GA_DIVE_ROLL) ? SD_GRONTAR_COMBO : SD_STRAFE;
+    // PSX vtable slot 27 resolves to Grontar::_DiveRoll.
+    stateDispatch = SD_GRONTAR_COMBO;
     field348 = 8;
     field488 = 0;
 
     if (model) {
         Model* m = static_cast<Model*>(model);
-        // force=1: re-entering AS_STRAFE while anim 24 is already showing (held
-        // at its last frame from a prior ANIM_RUN_TO_LAST cycle) must not skip
-        // the reset, or AnimStructure::loopCount stays stuck nonzero and
-        // Humanoid::_Taunt() dispatches off stale state instead of replaying it.
-        m->SetAnim(24, param, 1, 0);
+        // The base case for AS_DIVE_ROLL already forces anim 24. The original
+        // Grontar override then repeats SetAnim with force=0.
+        m->SetAnim(24, param, 0, 0);
 
         if (m->drawableType == 2 && m->drawable) {
             DrawableSTree* drawable = static_cast<DrawableSTree*>(m->drawable);
@@ -559,7 +557,7 @@ void Grontar::_Stand() {
 
     if (((static_cast<u32>(commandBits) >> 5) & 1u) != 0) {
         FaceAngleY(faceAngle, 0);
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
     }
 
     Humanoid::_Stand();
@@ -571,7 +569,7 @@ void Grontar::_Run() {
 
     if (((static_cast<u32>(commandBits) >> 5) & 1u) != 0) {
         FaceAngleY(faceAngle, 0);
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
     }
 
     Humanoid::_Run();
@@ -583,7 +581,7 @@ void Grontar::_Taunt() {
 
     if (((static_cast<u32>(commandBits) >> 5) & 1u) != 0) {
         FaceAngleY(faceAngle, 0);
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
     }
 
     Humanoid::_Taunt();
@@ -595,7 +593,7 @@ void Grontar::_Straif() {
 
     if (((static_cast<u32>(commandBits) >> 5) & 1u) != 0) {
         FaceAngleY(faceAngle, 0);
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
     }
 
     Humanoid::_Straif();
