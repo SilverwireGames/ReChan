@@ -2756,6 +2756,7 @@ bool ComEffect::ApplyClutAnimFrame(ClutAnimData* clutAnimData, s32 frame) {
     }
 
     const u16 clut = clutAnimData->GetFrameValue(frame);
+    bool hasMaterialOwnership = false;
 
     auto applyMaterialToGeo = [&](OriginalGeo* geo) -> bool {
         if (!GeoSupportsDynamicUV(geo)
@@ -2763,6 +2764,8 @@ bool ComEffect::ApplyClutAnimFrame(ClutAnimData* clutAnimData, s32 frame) {
             || geo->dynamicPrimCount == 0) {
             return false;
         }
+
+        hasMaterialOwnership = true;
 
         bool wrote = false;
         const f32 cbaWord = static_cast<f32>(clut);
@@ -2921,8 +2924,14 @@ bool ComEffect::ApplyClutAnimFrame(ClutAnimData* clutAnimData, s32 frame) {
             }
         }
 
-        if (appliedMaterial) {
-            geoWord0Slot = kFastWordInactive;
+        // A resolved material table with no match is a valid no-op. Composite
+        // animations include channels for sibling resources (RIPPOST1/2/3).
+        // Falling through here would repaint unrelated materials, including
+        // RIPPOST's water base, with the ripple CLUT.
+        if (appliedMaterial || hasMaterialOwnership) {
+            if (appliedMaterial) {
+                geoWord0Slot = kFastWordInactive;
+            }
             return true;
         }
     }
