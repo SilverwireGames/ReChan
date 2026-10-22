@@ -1313,19 +1313,16 @@ void Platform::HandleHumanoidCollision(Humanoid* hum) {
 
                 s32 sinY = rmSin16(orientation.y);
                 s32 cosY = rmSin16(orientation.y + 0x4000);
-                s32 localX = (s32)(((s64)cosY * slopeDelta.x + (s64)(-sinY) * slopeDelta.z) >> 16);
                 s32 localZ = (s32)(((s64)sinY * slopeDelta.x + (s64)cosY * slopeDelta.z) >> 16);
 
                 s32 sinX = rmSin16(orientation.x);
                 s32 cosX = rmSin16(orientation.x + 0x4000);
-                s32 heightAdj = (s32)(((s64)sinX * (s64)localX) >> 16);
-                if (cosX != 0) {
-                    heightAdj = rmDiv16i(heightAdj, cosX);
-                }
+                const s32 tanX = rmDiv16i(sinX, cosX);
+                const s32 heightAdj = PsxMulShift16Signed(tanX, localZ);
 
                 // PSX: loads localCollBox into local box, adjusts maxY and humPrevPos.y
                 box = localCollBox;
-                box.maxY = (s16)((s32)box.maxY + 0x80);
+                box.maxY = (s16)((s32)box.maxY + heightAdj + 0x80);
                 humPrevPos.y += 0x100;
 
                 s32 tiltZ = (s32)(((s64)cosX * (s64)(s32)((s16)box.maxZ << 16 >> 16)) >> 16);
