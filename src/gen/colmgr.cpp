@@ -746,7 +746,12 @@ void HandleThingEnvironmentCollisions(ccList& thingList) {
                     }
                 }
             }
-            else {
+            // PSX 0x800A9358 initializes non-player height to 0x300. The
+            // branch at 0x800A936C skips straight to 0x800A9470 when the
+            // animated height is >= 256; it does NOT copy that height.
+            // Only the player path (0x800A9560) uses the animated height.
+            // In particular, state 59 keeps 768 even below the threshold.
+            else if (thing == static_cast<DynamicThing*>(Player::s_player)) {
                 checkHeight = hum->collBboxMin.z;
             }
 
