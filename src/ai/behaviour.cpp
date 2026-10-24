@@ -1372,13 +1372,13 @@ void Behaviour::OscarDMS(Behaviour* self) {
         return;
     }
 
-    // PSX: this wall probe's navDecision==2 comparison reuses $v0 left over
-    // from the floor-delta range check above (always 0 here), not a fresh
-    // load of the sentinel 2 like the earlier navDecision branch has. So in
-    // the shipped binary this branch is dead code -- it always takes the
-    // +0x4000/+0x6000 probe, regardless of navDecision. Confirmed in both
-    // OscarDMS (0x8001E6E8) and OscarHenchmanDMS (0x8001ECEC).
-    if (wallCheck(owner, ownerFacing + 0x4000) != 0 || wallCheck(owner, ownerFacing + 0x6000) != 0) {
+    // PSX at 0x8001E6E8: the floor-range branch's delay slot loads 2 before
+    // this navDecision comparison, so the selected side is live. The old
+    // port always probed the + side, even when navDecision selected -.
+    const s32 wallCheckSide = self->navDecision == 2 ? -0x4000 : 0x4000;
+    const s32 wallCheckFarSide = self->navDecision == 2 ? -0x6000 : 0x6000;
+    if (wallCheck(owner, ownerFacing + wallCheckSide) != 0
+        || wallCheck(owner, ownerFacing + wallCheckFarSide) != 0) {
         owner->FaceThingDesired(player);
         owner->RequestAction(0x15);
         return;
@@ -1560,13 +1560,13 @@ void Behaviour::OscarHenchmanDMS(Behaviour* self) {
         return;
     }
 
-    // PSX: this wall probe's navDecision==2 comparison reuses $v0 left over
-    // from the floor-delta range check above (always 0 here), not a fresh
-    // load of the sentinel 2 like the earlier navDecision branch has. So in
-    // the shipped binary this branch is dead code -- it always takes the
-    // +0x4000/+0x6000 probe, regardless of navDecision. Confirmed in both
-    // OscarDMS (0x8001E6E8) and OscarHenchmanDMS (0x8001ECEC).
-    if (wallCheck(owner, ownerFacing + 0x4000) != 0 || wallCheck(owner, ownerFacing + 0x6000) != 0) {
+    // PSX at 0x8001ECEC: the floor-range branch's delay slot loads 2 before
+    // this navDecision comparison, so the selected side is live. The old
+    // port always probed the + side, even when navDecision selected -.
+    const s32 wallCheckSide = self->navDecision == 2 ? -0x4000 : 0x4000;
+    const s32 wallCheckFarSide = self->navDecision == 2 ? -0x6000 : 0x6000;
+    if (wallCheck(owner, ownerFacing + wallCheckSide) != 0
+        || wallCheck(owner, ownerFacing + wallCheckFarSide) != 0) {
         owner->FaceThingDesired(player);
         owner->RequestAction(0x15);
         return;
