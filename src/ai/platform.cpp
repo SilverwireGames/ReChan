@@ -1739,7 +1739,12 @@ const LVector* Platform::GetInitialPos() const {
 
 s32 Platform::GetFloorMaterial() const {
     MARKFUNCTION(0x80024CD0);
-    return 0;
+    // PSX defaults platforms to metal and lets their sound definition override it.
+    s32 material = 2;
+    if (platformSound != nullptr) {
+        platformSound->GetMaterial(&material);
+    }
+    return material;
 }
 
 void Platform::DeathCheck() {

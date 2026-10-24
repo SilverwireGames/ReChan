@@ -38,6 +38,7 @@ public:
     s32 Tilt();
     s32 Impact();
     s32 HitHumanoid();
+    void GetMaterial(s32* outMaterial) const;
     void Think();
     s32 Load(const void* data);
 };
