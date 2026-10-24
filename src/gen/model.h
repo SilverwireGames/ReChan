@@ -4,9 +4,9 @@
 #include "gen/cclist.h"
 #include "gen/shadows.h"
 #include "gen/config.h"
+#include <vector>
 #ifdef REAL_TEXTURE_RENDERING
 #include "extra/realtexture.h"
-#include <vector>
 #endif
 
 // Original hierarchy (data containers stored in LevelManager):
@@ -181,11 +181,21 @@ struct OriginalSTree : public OriginalBasic {
     s32 ChangeSuit(struct DrawableSTree* drawable, s16 suitIndex);
 };
 
+struct GeoBlendRange {
+    u32 startIndex = 0;
+    u32 indexCount = 0;
+    bool semiTrans = false;
+    u8 semiTransMode = 0;
+};
+
 // OriginalGeo - static/dynamic geometry model data (40 bytes on PSX)
 // Stored in LevelManager geo lists, looked up by nameCRC.
 // PC: stores a PC-ready prim buffer built from tDynGeom polygon data.
 struct OriginalGeo : public OriginalBasic {
     pddiPrimBuffer* meshBuffer = nullptr;
+    // Contiguous primitive runs retain their own PSX blend state. A single
+    // geometry can contain an opaque surface and additive overlays.
+    std::vector<GeoBlendRange> blendRanges;
 #ifdef REAL_TEXTURE_RENDERING
     // Index-buffer ranges grouped by (tpage, cba), built once alongside
     // meshBuffer, for the real-texture rendering path's sub-range draws.
