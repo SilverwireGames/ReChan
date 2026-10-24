@@ -28,6 +28,13 @@ s32 g_floorStandingTol = 640;        // gp+2856 (0x280): landing detection toler
 s32 g_colDefaultHeight = 256;        // gp+2904 (0x100): short humanoid height threshold
 s32 g_colMaxRadius = 512;            // gp+2908 (0x200): max skeletal collision radius
 s32 g_colDefaultRadius = 192;        // gp+2912 (0xC0): default collision radius
+// PSX gp+0xB60 is a separate adaptive player radius. It starts at 192 and
+// grows to 256 only while the player is moving less than 3 units per axis.
+static s32 g_playerCollisionRadius = 192;
+static constexpr s32 PLAYER_COLLISION_RADIUS_MOVE_THRESHOLD = 3; // PSX gp+0xB64
+static constexpr s32 PLAYER_COLLISION_RADIUS_RAMP_STEP = 2;     // PSX gp+0xB6C
+static constexpr s32 PLAYER_COLLISION_RADIUS_MAX = 256;         // PSX gp+0xB70
+static constexpr s32 PLAYER_COLLISION_HEIGHT_MIN = 128;
 s32 g_colSlopeTol = 0xB50B;          // gp+2884: slope tolerance (~cos 45)
 s32 g_colSlopeForce = 0x4E0000;      // gp+2888: slope sliding force
 s32 g_colFallVelDivisor = 2;         // gp+2900: fall velocity divisor (s16)
@@ -704,7 +711,41 @@ void HandleThingEnvironmentCollisions(ccList& thingList) {
         s32 yMinOffset = 0;
         s32 checkHeight = 768;
 
-        if (thing->thingType >= 29) {
+        if (thing == static_cast<DynamicThing*>(Player::s_player)) {
+            Humanoid* player = static_cast<Humanoid*>(thing);
+
+            s32 moveX = thing->homePos.x - thing->pos.x;
+            s32 moveZ = thing->homePos.z - thing->pos.z;
+            if (moveX < 0) moveX = -moveX;
+            if (moveZ < 0) moveZ = -moveZ;
+
+            // PSX keeps the player's wall radius compact while moving. The
+            // generic short-humanoid path below instead assigns radius 512,
+            // which prevents the table-roll pose from entering narrow gaps.
+            if (moveX < PLAYER_COLLISION_RADIUS_MOVE_THRESHOLD &&
+                moveZ < PLAYER_COLLISION_RADIUS_MOVE_THRESHOLD) {
+                g_playerCollisionRadius += PLAYER_COLLISION_RADIUS_RAMP_STEP;
+                if (g_playerCollisionRadius > PLAYER_COLLISION_RADIUS_MAX) {
+                    g_playerCollisionRadius = PLAYER_COLLISION_RADIUS_MAX;
+                }
+            }
+            else {
+                g_playerCollisionRadius = g_colDefaultRadius;
+            }
+
+            radius = g_playerCollisionRadius;
+            yMinOffset = player->collBboxMin.y;
+            checkHeight = player->collBboxMin.z;
+            if (checkHeight < PLAYER_COLLISION_HEIGHT_MIN) {
+                checkHeight = PLAYER_COLLISION_HEIGHT_MIN;
+            }
+
+            if (player->actionState == AS_LEDGE_LATCH ||
+                player->actionState == AS_LEDGE_PULLUP) {
+                skipWall = 1;
+            }
+        }
+        else if (thing->thingType >= 29) {
             if (thing->thingType >= 301 && thing->thingType < 329) {
                 yMinOffset = static_cast<Pickup*>(thing)->GetCollisionYMin();
             }
@@ -746,15 +787,6 @@ void HandleThingEnvironmentCollisions(ccList& thingList) {
                     }
                 }
             }
-            // PSX 0x800A9358 initializes non-player height to 0x300. The
-            // branch at 0x800A936C skips straight to 0x800A9470 when the
-            // animated height is >= 256; it does NOT copy that height.
-            // Only the player path (0x800A9560) uses the animated height.
-            // In particular, state 59 keeps 768 even below the threshold.
-            else if (thing == static_cast<DynamicThing*>(Player::s_player)) {
-                checkHeight = hum->collBboxMin.z;
-            }
-
             if (state == AS_LEDGE_LATCH || state == AS_LEDGE_PULLUP) {
                 skipWall = 1;
             }
@@ -781,11 +813,11 @@ void HandleThingEnvironmentCollisions(ccList& thingList) {
     // Post-loop: re-process combat targets with their collision bbox
     if (g_combatTarget1 != nullptr) {
         Humanoid* h = (Humanoid*)g_combatTarget1;
-        HandleThingWall(g_combatTarget1, g_colDefaultRadius, h->collBboxMin.y, h->collBboxMin.z);
+        HandleThingWall(g_combatTarget1, g_playerCollisionRadius, h->collBboxMin.y, h->collBboxMin.z);
     }
     if (g_combatTarget2 != nullptr) {
         Humanoid* h = (Humanoid*)g_combatTarget2;
-        HandleThingWall(g_combatTarget2, g_colDefaultRadius, h->collBboxMin.y, h->collBboxMin.z);
+        HandleThingWall(g_combatTarget2, g_playerCollisionRadius, h->collBboxMin.y, h->collBboxMin.z);
     }
 }
 
