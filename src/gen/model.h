@@ -207,6 +207,7 @@ struct OriginalGeo : public OriginalBasic {
     bool usesSemiTrans = false;
     u8 semiTransMode = 0;
     u32 fastRenderWord1 = 0xFFFFFFFFu;
+    bool cullEffectBackfaces = false;
     GeoRenderVertex* dynamicVerts = nullptr;
     u32 dynamicVertCount = 0;
     u16* dynamicVertSourceIndex = nullptr;

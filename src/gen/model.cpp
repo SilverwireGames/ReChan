@@ -816,7 +816,9 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         return;
     }
 
-    p3d::context->SetCullMode(PDDI_CULL_NONE);
+    // Lens-flare geometry uses the PSX NCLIP face rejection. Keep this
+    // scoped to those effects; other port geometry has mixed winding.
+    p3d::context->SetCullMode(geo->cullEffectBackfaces ? PDDI_CULL_NORMAL : PDDI_CULL_NONE);
 
     if (geo->usesSemiTrans) {
         pddiBlendMode blendMode = PDDI_BLEND_ALPHA;
@@ -874,6 +876,7 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     if (geo->usesSemiTrans) {
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
+    p3d::context->SetCullMode(PDDI_CULL_NONE);
 }
 
 CompositeAnimData::~CompositeAnimData() {

@@ -75,6 +75,8 @@ struct LateComEffectRender {
     bool hasRotation = false;
     u32 flags = 0;
     s32 frame = 0;
+    s32 colourLane = -1;
+    u32 colourWord = 0;
 };
 
 static std::vector<LateComEffectRender> s_lateComEffectQueue;
@@ -216,7 +218,7 @@ void ComEffect_FlushLateRenderQueue(s32 blockNum) {
             queued.pos,
             queued.hasScale ? &queued.scale : nullptr,
             queued.hasRotation ? &queued.rotation : nullptr,
-            queued.flags);
+            queued.flags, queued.colourLane, queued.colourWord);
     }
 
     s_lateComEffectQueue = std::move(remaining);
@@ -3519,7 +3521,8 @@ bool ComEffect::PointInView(const LVector& pos, s32 radius) const {
     return true;
 }
 
-void ComEffect::Render(const LVector& pos, const LVector* scale, const LVector* rotation, u32 flags) {
+void ComEffect::Render(const LVector& pos, const LVector* scale, const LVector* rotation, u32 flags,
+                       s32 colourLane, u32 colourWord) {
     MARKFUNCTION(0x8004E950);
 
     if (!model || !model->drawable || !p3d::context) {
@@ -3541,6 +3544,8 @@ void ComEffect::Render(const LVector& pos, const LVector* scale, const LVector* 
         }
         queued.flags = flags;
         queued.frame = currentFrame;
+        queued.colourLane = colourLane;
+        queued.colourWord = colourWord;
         s_lateComEffectQueue.push_back(queued);
         return;
     }
@@ -3712,7 +3717,27 @@ void ComEffect::Render(const LVector& pos, const LVector* scale, const LVector* 
     }
 #endif
     p3d::context->SetPolygonOffset(true, 1.0f, 24.0f);
+    // The PSX reads the mutable colour table for each draw. Preserve the
+    // lens-flare streak's individual colour through deferred rendering.
+    OriginalGeo* colourGeo = colourLane >= 0 ? GetGeo(0) : nullptr;
+    std::vector<GeoRenderVertex> savedColourVerts;
+    if (colourGeo && colourGeo->dynamicVerts && colourGeo->dynamicVertSourceIndex) {
+        savedColourVerts.assign(colourGeo->dynamicVerts,
+                                colourGeo->dynamicVerts + colourGeo->dynamicVertCount);
+        for (u32 i = 0; i < colourGeo->dynamicVertCount; ++i) {
+            if (colourGeo->dynamicVertSourceIndex[i] == colourLane) {
+                DecodePackedColour24Fast(colourWord, &colourGeo->dynamicVerts[i].r,
+                                        &colourGeo->dynamicVerts[i].g, &colourGeo->dynamicVerts[i].b);
+            }
+        }
+        colourGeo->meshBuffer->SetVertexData(colourGeo->dynamicVerts, colourGeo->dynamicVertCount);
+    }
     model->drawable->Display(flags);
+    if (!savedColourVerts.empty()) {
+        memcpy(colourGeo->dynamicVerts, savedColourVerts.data(),
+               savedColourVerts.size() * sizeof(GeoRenderVertex));
+        colourGeo->meshBuffer->SetVertexData(colourGeo->dynamicVerts, colourGeo->dynamicVertCount);
+    }
     p3d::context->SetPolygonOffset(false);
 #if MODERN_GRAPHICS
     if (receiveMappedShadows) {
@@ -5622,6 +5647,11 @@ s32 LensFlare::InitLensFlare(s32 mode, DBPath* path) {
         if (loaded) {
             initResult = 1;
 
+            for (s32 i = 0; i < 3; ++i) {
+                OriginalGeo* geo = flareComEffects[i].GetGeo(0);
+                if (geo) geo->cullEffectBackfaces = true;
+            }
+
             // PSX InitLensFlare stores (GetGeo(secondComEffect)+68) + 4*laneIndex,
             // with laneIndex coming from gp+0xB98 (value 4 in this build).
             OriginalGeo* clampGeo = flareComEffects[1].GetGeo();
@@ -6575,9 +6605,9 @@ void LensFlare::Display(s32 inBlockNum) {
         const s32 divStep = rmDiv16i(fadeScale, ((clampSpan * 2) + 1) << 16);
 
         s32 step = divStep * clampSpan;
-        // PSX Display__9LensFlarei reads backup from *(clampPtr + lane), then
-        // writes active colour to *clampPtr in the streak loop.
-        const u32 oldColour = clampColourEntry ? clampColourEntry[kLensFlareClampColourLane] : 0;
+        // clampColourEntry already points at the centre colour lane. Save
+        // that entry rather than indexing past the five-entry colour table.
+        const u32 oldColour = clampColourEntry ? *clampColourEntry : 0;
 
         for (s32 i = -clampSpan; i < clampSpan; i++) {
             if (clampColourEntry) {
@@ -6595,7 +6625,9 @@ void LensFlare::Display(s32 inBlockNum) {
             streakPos.y += flarePos.y;
             streakPos.z += flarePos.z;
 
-            streakEffect->Render(streakPos, &streakScale, &mainRotation, trackingFlags | 6u);
+            streakEffect->Render(streakPos, &streakScale, &mainRotation, trackingFlags | 6u,
+                                 clampColourEntry ? kLensFlareClampColourLane : -1,
+                                 clampColourEntry ? *clampColourEntry : 0);
         }
 
         if (clampColourEntry) {
