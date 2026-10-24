@@ -5809,7 +5809,7 @@ void WEffect::EnablePath(s32 enable) {
     MARKFUNCTION(0x8008BA08);
 
     if (pathInfo) {
-        pathInfo->allowMove = enable;
+        pathInfo->state = enable;
     }
 }
 
