@@ -343,6 +343,13 @@ void Player::Think() {
 
     ProcessControl();
 
+    // Match PSX Think__6Player: update runSpeed from movement before
+    // ProcessAction, since wall-context kicks use it to reject idle kicks.
+    s64 dt = (s64)moveSpeed * (s64)deltaTime;
+    s32 scaledRange = (s32)((u64)dt >> 16);
+    runSpeed = scaledRange;
+    deltaTime = FIX16_ONE;
+
     ProcessAction();
     Move();
 
