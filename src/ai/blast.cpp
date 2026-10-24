@@ -1,5 +1,6 @@
 #include "ai/blast.h"
 #include "ai/humanoid.h"
+#include "ai/player.h"
 #include "gen/common.h"
 #include "gen/database.h"
 #include "gen/colvol.h"
@@ -480,6 +481,17 @@ void Blast::Think() {
         hitCooldownTimer = hitCooldownFrames;
     }
     hitCooldownTimer--;
+
+    // PSX OL1: Blast::Think loads the player's damage reaction dialog every
+    // frame for presets 1 and 2 (D093 and D092, respectively), at priority 60.
+    if (Player::s_player) {
+        if (damagePreset == 2) {
+            Player::s_player->LoadDialog(92, 0x3C);
+        }
+        else if (damagePreset == 1) {
+            Player::s_player->LoadDialog(93, 0x3C);
+        }
+    }
 }
 
 void Blast::Trigger() {
@@ -527,6 +539,17 @@ void Blast::HandleHumanoidCollision(Humanoid* hum) {
     }
 
     hum->SubtractHitPoints(static_cast<u16>(collisionDamage));
+
+    // PSX OL1: Blast::HandleHumanoidCollision plays a player reaction line
+    // for damage presets 1 and 2 (D093 and D092, respectively).
+    if (hum->thingType == AITypes::TT_PLAYER) {
+        if (damagePreset == 2) {
+            hum->PlayDialog(92, 10);
+        }
+        else if (damagePreset == 1) {
+            hum->PlayDialog(93, 10);
+        }
+    }
 
     if (hasForce) {
         hum->HandleCollision(
