@@ -1451,12 +1451,14 @@ void Behaviour::OscarHenchmanDMS(Behaviour* self) {
 
     const s32 ownerFacing = owner->orientation.y;
     const s32 ownerToPlayerFacing = PsxClipAngle360(ownerFacing - player->orientation.y);
-    const s32 forwardPressure = ((u32)(ownerToPlayerFacing - OSCAR_HENCH_ANGLE_WINDOW_START)
-                                 <= (u32)OSCAR_HENCH_ANGLE_WINDOW_RANGE)
-        ? 1
-        : 0;
+    // PSX 0x8001E97C: the wide angle window updates navDecision and falls
+    // through to the circling/ComplexAttack path. Direct pressure is the
+    // narrow range outside that window; the previous port had this reversed.
+    const bool inCirclingAngleWindow =
+        (u32)(ownerToPlayerFacing - OSCAR_HENCH_ANGLE_WINDOW_START)
+        <= (u32)OSCAR_HENCH_ANGLE_WINDOW_RANGE;
 
-    if (forwardPressure == 0) {
+    if (inCirclingAngleWindow) {
         self->navDecision = (ownerToPlayerFacing > 0x8000) ? 2 : 3;
     }
 
@@ -1475,7 +1477,7 @@ void Behaviour::OscarHenchmanDMS(Behaviour* self) {
         return;
     }
 
-    if (forwardPressure != 0) {
+    if (!inCirclingAngleWindow) {
         if (distanceToPlayer <= OSCAR_CLOSE_DIST) {
             if (bossOscar && bossOscar->actionState == (s32)AS_COMBAT_IDLE) {
                 owner->RequestAction(1);
