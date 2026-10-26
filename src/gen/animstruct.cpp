@@ -366,19 +366,24 @@ void AnimStructure::ApplyFlipPose(s32 frameReal) {
         return;
     }
 
-    flip->SetFrameReal(frameReal);
-    flip->UpdateJoints();
-
-    if (mode == 0 && loopTypeField == ANIM_BLEND2) {
+    const bool isBlend2 = mode == 0 && loopTypeField == ANIM_BLEND2;
+    s32 blendWeight = FIX16_ONE + 1;
+    if (isBlend2) {
         const s32 blendDuration = endFrame + FIX16_ONE;
-        s32 blendWeight = FIX16_ONE + 1;
         if (blendDuration != 0) {
             blendWeight = rmDiv16i(frameReal + FIX16_ONE, blendDuration);
         }
+    }
 
-        if (blendWeight <= FIX16_ONE) {
-            BlendTreePose(blendWeight, blendPose, flip->tree);
-        }
+    // PSX ExecuteHandler (0x8007101C and 0x8007107C) samples +0x38
+    // in BOTH Blend2 branches. The blend clock is only used for the weight;
+    // even at full weight the displayed pose is the destination resume frame.
+    const s32 sampledFrame = isBlend2 ? field56 : frameReal;
+    flip->SetFrameReal(sampledFrame);
+    flip->UpdateJoints();
+
+    if (isBlend2 && blendWeight < FIX16_ONE) {
+        BlendTreePose(blendWeight, blendPose, flip->tree);
     }
 }
 
@@ -483,6 +488,7 @@ void AnimStructure::RunToLastBlend() {
 
         SetLoopType(loopType, 1);
         humanoidCB = savedCB;
+        // PSX 0x80071470: the full-weight Blend2 tick already showed startFrame.
         currentFrame = startFrame + FIX16_ONE;
     }
 }

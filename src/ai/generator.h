@@ -71,6 +71,11 @@ public:
     // PSX +296 (s32): pending spawn trigger flag
     s32 field296 = 0;
 
+    // PC: Encounter tracking; the original AI counters remain intact.
+    ActiveZone* encounterZone = nullptr;
+    bool encounterPopulationTracked = false;
+    s32 encounterSpawnsRemaining = 0;
+
     EnemyGenerator(const LVector* pos, u16 type);
     ~EnemyGenerator() override;
 

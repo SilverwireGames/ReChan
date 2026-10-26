@@ -320,8 +320,8 @@ static void ProcessHandlerList(ccMinList& list) {
 }
 
 static void UpdateSpatialAudioListener() {
-    // PSX updates the 3D audio listener from player/camera every gameplay frame.
-    // PC derives the listener from the current camera inside the sound backend.
+    // PSX updates the 3D audio listener from player position and camera yaw.
+    // The PC sound backend reads those same live values when refreshing audio.
     rsEvent(21, 0, 0, 0);
 }
 
@@ -1449,8 +1449,8 @@ bool Game::gsPrePlayState(Game* game) {
     }
 
     // PSX: rsEvent(21, player+28, theCamera+384, 0) - set 3D audio listener
-    // The args are pointers to player position and camera matrix for 3D audio.
-    // On PC we pass zeros - audio spatialization not yet wired.
+    // The PSX args are pointers to player position and camera yaw. The PC
+    // backend reads the corresponding live values from Player and Camera.
     rsEvent(21, 0, 0, 0);
 
     // PSX: if CheckpointInfo::IsValid(player+636): theCamera->lookAtMode = 1
@@ -2143,9 +2143,6 @@ bool Game::gsDetermineNextGameState(Game* game) {
             game->SetState(GameState::EndGame);
         }
         else {
-            if (World* world = game->GetWorld()) {
-                world->RequestPlayerResetOnLoad();
-            }
             game->SetState(GameState::QueuePetalLoad);
         }
     }

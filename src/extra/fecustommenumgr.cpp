@@ -23,6 +23,7 @@
 #include "pddi/pddishad.h"
 #include "p3d/context.h"
 #include "p3d/input.h"
+#include "ai/player.h"
 #if NEW_CHEATS
 #include "extra/cheats.h"
 #endif
@@ -266,6 +267,12 @@ static bool ResolveLocationRuntimeInfo(LocationRuntimeInfo* outInfo) {
 static void BeginNewGameReset() {
     if (g_scoreManager) {
         g_scoreManager->HandleGameBegin();
+    }
+
+    // A new game starts with three displayed lives (four in the internal
+    // livesLeft count, which includes the current life).
+    if (Player::s_player) {
+        Player::s_player->SetLivesLeft(Player::kMaxLives);
     }
 
     if (g_game) {

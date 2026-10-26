@@ -101,7 +101,7 @@ enum StateDispatch : u16 {
     SD_PAUSE = 24,
     SD_RUN = 25,
     SD_STRAFE = 26,
-    // Slot 27: Humanoid -> _Straif, Player -> _DiveRoll.
+    // Slot 27: Humanoid -> _Straif, Player/Grontar -> _DiveRoll.
     SD_DIVE_ROLL_CHAIN = 27,
     SD_JUMP = 28,
     SD_FALL = 29,
@@ -165,6 +165,8 @@ enum StateDispatch : u16 {
     SD_BUTCH_CHARGE = 276,
     SD_BUTCH_THROW_POT = 277,
     SD_GOT_HIT_CRUSHER = 278,
+    // PC-only route: Grontar's AI combo selector (_DiveRoll).
+    SD_GRONTAR_COMBO = 279,
 };
 
 // Humanoid - DynamicThing with combat, animation, and AI state
@@ -253,9 +255,9 @@ public:
     // PSX +348 (u16): vtable pointer offset (always 8 on PSX)
     u16 field348 = 8;
 
-    // PSX +352 (s32): input command bitfield (set by AI/controls, read by action handlers)
-    // Bits: 1=guard, 2=kick, 3=punch, 4=taunt, 5=strafe, 6=strafe alternate,
-    //        7=combat, 8-20=combos, 21=dive roll, 30=env hit, 31=explosion
+    // PSX +352 (s32): command bits (RequestAction IDs from inputaction.h).
+    // Handler meanings are state/class-specific: in Humanoid movement handlers,
+    // bit 5 selects AS_DIVE_ROLL (12), while bit 6 selects AS_STRAFE (11).
     s32 commandBits = 0;
 
     // Action query helpers - read commandBits by named action.
@@ -431,6 +433,11 @@ public:
     void CreateGameplayState();
     void DestroyGameplayState();
     bool pcDestroying = false;
+    bool encounterPopulationRegistered = false;
+    bool encounterPopulationResolved = false;
+    void RegisterEncounterPopulation();
+    void ResolveEncounterPopulation();
+    void UnregisterEncounterPopulation();
     void OnVisualModelPromoted() override;
     void OnVisualModelDemoted() override;
     void AdvanceRenderInterpolationTick();

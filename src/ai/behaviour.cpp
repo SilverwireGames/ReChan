@@ -761,7 +761,7 @@ void Behaviour::GrontarDMS(Behaviour* self) {
         return;
     }
 
-    const s32 distanceToPlayer = owner->DistanceFromPointXZ(player->pos);
+    const s32 distanceToPlayer = owner->DistanceFromPoint(player->pos);
     if ((u32)(owner->actionState - 0x20) >= 5u) {
         self->comboScriptIndex = -1;
         self->comboScriptCursor = 0;
@@ -779,13 +779,31 @@ void Behaviour::GrontarDMS(Behaviour* self) {
         comboStateB = 0;
     };
 
-    if (!self->InActiveZone() && distanceToPlayer >= GRONTAR_FAR_ATTACK_DIST) {
+    if (!self->InActiveZone()) {
+        if (distanceToPlayer < GRONTAR_CLOSE_ATTACK_DIST
+            && !IsPlayerAggressiveCombatState(player->actionState)) {
+            const s32 playerInField = IsPointInFieldOf(player->pos, owner->pos, owner->orientation.y, 0x2AAA, 0x2AAA);
+            const s32 randomAction = (s32)rmRangedRandom(100);
+            if (playerInField != 0 && randomAction < 75) {
+                owner->RequestAction(15);
+            }
+            else {
+                self->ComplexAttack();
+            }
+
+            resetComboState();
+            return;
+        }
+
         LVector zoneCenter = {};
         owner->activeZone->GetActiveZoneCenterPoint(zoneCenter);
+        // _Straif captures faceAngle as the movement heading, then turns
+        // toward field256 while strafe-moving. Keep Jackie as that target and
+        // use the zone center only for the captured movement heading.
         owner->SetTarget(player);
         owner->FacePointDesired(zoneCenter);
-        owner->moveSpeed = (s16)self->animConfigPtr->runningSpeed;
-        owner->RequestAction(2);
+        owner->moveSpeed = (s16)self->animConfigPtr->strafingSpeed;
+        owner->RequestAction(6);
 
         resetComboState();
         return;
@@ -812,7 +830,7 @@ void Behaviour::GrontarDMS(Behaviour* self) {
     }
 
     if (distanceToPlayer < GRONTAR_FAR_ATTACK_DIST) {
-        if (player->actionState == (s32)AS_STRAFE) {
+        if (player->actionState == (s32)AS_DIVE_ROLL) {
             owner->RequestAction(7);
             resetComboState();
             return;
@@ -868,23 +886,25 @@ void Behaviour::GrontarDMS(Behaviour* self) {
             return;
         }
 
-        owner->moveSpeed = (s16)self->animConfigPtr->runningSpeed;
-        owner->RequestAction(2);
+        owner->RequestAction(1);
         return;
     }
 
-    s32 playerInField = 0;
     if (player->actionState == (s32)AS_STRAFE || player->actionState == (s32)AS_RUN) {
-        playerInField = IsPointInFieldOf(player->pos, owner->pos, owner->orientation.y, 0x1555, 0x1555);
+        // PSX IsInMyDesiredFieldOf(player, owner, ...): check Grontar against
+        // Jackie's desired facing, then leave the current action unchanged
+        // when the 20% roll misses.
+        if (IsPointInFieldOf(owner->pos, player->pos, player->faceAngle, 0x1555, 0x1555)) {
+            if ((s32)rmRangedRandom(100) >= 20) {
+                return;
+            }
+
+            owner->RequestAction(14);
+            return;
+        }
     }
 
-    if (playerInField != 0 && (s32)rmRangedRandom(100) < 20) {
-        owner->RequestAction(14);
-        return;
-    }
-
-    owner->moveSpeed = (s16)self->animConfigPtr->runningSpeed;
-    owner->RequestAction(2);
+    owner->RequestAction(1);
 }
 
 // PSX: _PaulDMS__9Behaviour (BEHAVEB.CPP:950, 0x8001D7CC)
@@ -1352,13 +1372,13 @@ void Behaviour::OscarDMS(Behaviour* self) {
         return;
     }
 
-    // PSX: this wall probe's navDecision==2 comparison reuses $v0 left over
-    // from the floor-delta range check above (always 0 here), not a fresh
-    // load of the sentinel 2 like the earlier navDecision branch has. So in
-    // the shipped binary this branch is dead code -- it always takes the
-    // +0x4000/+0x6000 probe, regardless of navDecision. Confirmed in both
-    // OscarDMS (0x8001E6E8) and OscarHenchmanDMS (0x8001ECEC).
-    if (wallCheck(owner, ownerFacing + 0x4000) != 0 || wallCheck(owner, ownerFacing + 0x6000) != 0) {
+    // PSX at 0x8001E6E8: the floor-range branch's delay slot loads 2 before
+    // this navDecision comparison, so the selected side is live. The old
+    // port always probed the + side, even when navDecision selected -.
+    const s32 wallCheckSide = self->navDecision == 2 ? -0x4000 : 0x4000;
+    const s32 wallCheckFarSide = self->navDecision == 2 ? -0x6000 : 0x6000;
+    if (wallCheck(owner, ownerFacing + wallCheckSide) != 0
+        || wallCheck(owner, ownerFacing + wallCheckFarSide) != 0) {
         owner->FaceThingDesired(player);
         owner->RequestAction(0x15);
         return;
@@ -1431,12 +1451,14 @@ void Behaviour::OscarHenchmanDMS(Behaviour* self) {
 
     const s32 ownerFacing = owner->orientation.y;
     const s32 ownerToPlayerFacing = PsxClipAngle360(ownerFacing - player->orientation.y);
-    const s32 forwardPressure = ((u32)(ownerToPlayerFacing - OSCAR_HENCH_ANGLE_WINDOW_START)
-                                 <= (u32)OSCAR_HENCH_ANGLE_WINDOW_RANGE)
-        ? 1
-        : 0;
+    // PSX 0x8001E97C: the wide angle window updates navDecision and falls
+    // through to the circling/ComplexAttack path. Direct pressure is the
+    // narrow range outside that window; the previous port had this reversed.
+    const bool inCirclingAngleWindow =
+        (u32)(ownerToPlayerFacing - OSCAR_HENCH_ANGLE_WINDOW_START)
+        <= (u32)OSCAR_HENCH_ANGLE_WINDOW_RANGE;
 
-    if (forwardPressure == 0) {
+    if (inCirclingAngleWindow) {
         self->navDecision = (ownerToPlayerFacing > 0x8000) ? 2 : 3;
     }
 
@@ -1455,7 +1477,7 @@ void Behaviour::OscarHenchmanDMS(Behaviour* self) {
         return;
     }
 
-    if (forwardPressure != 0) {
+    if (!inCirclingAngleWindow) {
         if (distanceToPlayer <= OSCAR_CLOSE_DIST) {
             if (bossOscar && bossOscar->actionState == (s32)AS_COMBAT_IDLE) {
                 owner->RequestAction(1);
@@ -1540,13 +1562,13 @@ void Behaviour::OscarHenchmanDMS(Behaviour* self) {
         return;
     }
 
-    // PSX: this wall probe's navDecision==2 comparison reuses $v0 left over
-    // from the floor-delta range check above (always 0 here), not a fresh
-    // load of the sentinel 2 like the earlier navDecision branch has. So in
-    // the shipped binary this branch is dead code -- it always takes the
-    // +0x4000/+0x6000 probe, regardless of navDecision. Confirmed in both
-    // OscarDMS (0x8001E6E8) and OscarHenchmanDMS (0x8001ECEC).
-    if (wallCheck(owner, ownerFacing + 0x4000) != 0 || wallCheck(owner, ownerFacing + 0x6000) != 0) {
+    // PSX at 0x8001ECEC: the floor-range branch's delay slot loads 2 before
+    // this navDecision comparison, so the selected side is live. The old
+    // port always probed the + side, even when navDecision selected -.
+    const s32 wallCheckSide = self->navDecision == 2 ? -0x4000 : 0x4000;
+    const s32 wallCheckFarSide = self->navDecision == 2 ? -0x6000 : 0x6000;
+    if (wallCheck(owner, ownerFacing + wallCheckSide) != 0
+        || wallCheck(owner, ownerFacing + wallCheckFarSide) != 0) {
         owner->FaceThingDesired(player);
         owner->RequestAction(0x15);
         return;

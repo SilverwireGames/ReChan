@@ -110,6 +110,12 @@ s32 CPlatformSound::HitHumanoid() {
     return PlayTransient(hitHumanoidSfx, 8, 0);
 }
 
+// PSX: GetMaterial__14CPlatformSoundPl (0x800ACB70)
+void CPlatformSound::GetMaterial(s32* outMaterial) const {
+    MARKFUNCTION(0x800ACB70);
+    *outMaterial = material;
+}
+
 // PSX: Think__14CPlatformSound (0x800ACAFC)
 void CPlatformSound::Think() {
     MARKFUNCTION(0x800ACAFC);

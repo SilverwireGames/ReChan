@@ -343,6 +343,13 @@ void Player::Think() {
 
     ProcessControl();
 
+    // Match PSX Think__6Player: update runSpeed from movement before
+    // ProcessAction, since wall-context kicks use it to reject idle kicks.
+    s64 dt = (s64)moveSpeed * (s64)deltaTime;
+    s32 scaledRange = (s32)((u64)dt >> 16);
+    runSpeed = scaledRange;
+    deltaTime = FIX16_ONE;
+
     ProcessAction();
     Move();
 
@@ -2569,15 +2576,6 @@ void Player::_DoStand() {
     SetActionState(AS_STAND, 0);
     velocity = {};
 }
-
-
-void Player::_DoRun() {
-    Humanoid::_DoRun();
-    if (model) {
-        RemovePlayerMirrorFlag(static_cast<Model*>(model));
-    }
-}
-
 // PSX: _HorizontalPoleSwing__6Player (PLAYER.CPP:3802, 0x80032F8C)
 // Pendulum swing physics on horizontal pole. Builds rotation matrix from
 // orientation, applies angular velocity driven by gravity torque,

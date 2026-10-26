@@ -86,7 +86,9 @@ HUD::HUD() {
     currentFoe = nullptr;
     bossHandle = nullptr;
     visible = 1;
-    dragonShowState = 0;
+    // The custom HUD starts with its inventory/status panel visible, so keep
+    // the toggle state in sync with that initial presentation.
+    dragonShowState = CUSTOM_MENU ? 1 : 0;
     foeTracking = 0;
 }
 
@@ -475,7 +477,9 @@ void HUD::UpdateHealth(s32 playerHP, s32 foeHP) {
 // PSX: SetFoe__3HUDP8Humanoid (HUD.CPP:767, 0x8003FFF4)
 void HUD::SetFoe(Humanoid* foe) {
     MARKFUNCTION(0x8003FFF4);
-    if (!foe) {
+    // The player is a Humanoid too, but only NPCs can own the foe health bar.
+    // Pickup collisions can call SetFoe for any humanoid, including the player.
+    if (!foe || foe == static_cast<Humanoid*>(Player::s_player)) {
         return;
     }
     // Check if foe is a boss type - bosses don't use the foe health bar

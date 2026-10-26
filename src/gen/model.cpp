@@ -38,7 +38,7 @@ static void DrawTexturedMesh(pddiPrimBuffer* buffer
 #ifdef REAL_TEXTURE_RENDERING
                               , const std::vector<RealTextureGroup>* groups
 #endif
-                              ) {
+                              , u32 indexOffset = 0, u32 indexCount = 0) {
     if (!buffer) return;
 
 #ifdef REAL_TEXTURE_RENDERING
@@ -49,6 +49,11 @@ static void DrawTexturedMesh(pddiPrimBuffer* buffer
     // don't pick up a stale real texture left bound from this mesh.
     if (groups && !groups->empty() && p3d::context->IsRealTextureModeEnabled()) {
         for (const RealTextureGroup& group : *groups) {
+            const u32 start = std::max(indexOffset, group.startIndex);
+            const u32 end = indexCount != 0
+                ? std::min(indexOffset + indexCount, group.startIndex + group.indexCount)
+                : group.startIndex + group.indexCount;
+            if (start >= end) continue;
             const RealTextureEntry* entry = RealTextureRegistry::Instance().Find(group.tpage, group.cba);
             if (entry && entry->texture) {
                 p3d::context->SetTexture(entry->texture);
@@ -57,14 +62,14 @@ static void DrawTexturedMesh(pddiPrimBuffer* buffer
             else {
                 p3d::context->SetTexture(nullptr);
             }
-            p3d::context->DrawPrimBuffer(buffer, group.startIndex, group.indexCount);
+            p3d::context->DrawPrimBuffer(buffer, start, end - start);
         }
         p3d::context->SetTexture(nullptr);
         return;
     }
 #endif
 
-    p3d::context->DrawPrimBuffer(buffer);
+    p3d::context->DrawPrimBuffer(buffer, indexOffset, indexCount);
 }
 
 #if MODERN_GRAPHICS
@@ -811,7 +816,9 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         return;
     }
 
-    p3d::context->SetCullMode(PDDI_CULL_NONE);
+    // Lens-flare geometry uses the PSX NCLIP face rejection. Keep this
+    // scoped to those effects; other port geometry has mixed winding.
+    p3d::context->SetCullMode(geo->cullEffectBackfaces ? PDDI_CULL_NORMAL : PDDI_CULL_NONE);
 
     if (geo->usesSemiTrans) {
         pddiBlendMode blendMode = PDDI_BLEND_ALPHA;
@@ -832,11 +839,35 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
         geo->meshBuffer->SetVertexData(litVerts.data(), geo->dynamicVertCount);
     }
 
-    DrawTexturedMesh(geo->meshBuffer
+    if (geo->blendRanges.empty()) {
+        DrawTexturedMesh(geo->meshBuffer
 #ifdef REAL_TEXTURE_RENDERING
                       , &geo->realTexGroups
 #endif
                       );
+    }
+    else {
+        // Preserve packet order, changing only at material blend boundaries.
+        // RIPPOST_01, for example, has six opaque GT3s followed by five
+        // additive GT4s; making the entire mesh additive loses the water base.
+        for (const GeoBlendRange& range : geo->blendRanges) {
+            pddiBlendMode mode = PDDI_BLEND_NONE;
+            if (range.semiTrans) {
+                switch (range.semiTransMode & 3u) {
+                    case 1: mode = PDDI_BLEND_ADD; break;
+                    case 2: mode = PDDI_BLEND_SUBTRACT; break;
+                    case 3: mode = PDDI_BLEND_PSX_QUARTER; break;
+                    default: mode = PDDI_BLEND_ALPHA; break;
+                }
+            }
+            p3d::context->SetBlendMode(mode);
+            DrawTexturedMesh(geo->meshBuffer
+#ifdef REAL_TEXTURE_RENDERING
+                            , &geo->realTexGroups
+#endif
+                            , range.startIndex, range.indexCount);
+        }
+    }
 
     if (litVertsApplied) {
         geo->meshBuffer->SetVertexData(geo->dynamicVerts, geo->dynamicVertCount);
@@ -845,6 +876,7 @@ static void DrawGeoPartMesh(OriginalGeo* geo, bool applyLighting) {
     if (geo->usesSemiTrans) {
         p3d::context->SetBlendMode(PDDI_BLEND_NONE);
     }
+    p3d::context->SetCullMode(PDDI_CULL_NONE);
 }
 
 CompositeAnimData::~CompositeAnimData() {
@@ -1809,8 +1841,10 @@ void SModel::Animate() {
     MARKFUNCTION(0x8006F640);
     if (animStructure) {
         AnimStructure* anim = (AnimStructure*)animStructure;
-        anim->ExecuteHandler(1);
+        const s32 doFlip = (modelFlags >> 6) & 1;
+        anim->ExecuteHandler(doFlip);
     }
+    modelFlags &= ~0x40u;
 }
 
 // PSX: InitBlendPose__6SModel (MODEL.CPP:1328, 0x8006F438)
@@ -2419,6 +2453,14 @@ void HumanoidModel::SetAnim(s32 animEnum, s32 a3, s32 force, s32 extra) {
             as->humanoidCB.offsetLo = (s16)(4063232 & 0xFFFF);
             as->humanoidCB.offsetHi = (s16)(4063232 >> 16);
             as->humanoidCB.funcPtr = reinterpret_cast<void*>(static_cast<intptr_t>(8));
+
+            // Landing anim 37 is selected during the logic step, before the
+            // animation update that runs later in the same frame. ResetCountsToAnim
+            // leaves prevTick one tick behind, which advances frame 0 to frame 1
+            // before the first draw. Keep frame 0 for its first presentation tick.
+            if (animEnum == 37 && as->loopTypeField == ANIM_RUN_TO_LAST) {
+                as->prevTick = as->currentTick;
+            }
         }
         return;
     }

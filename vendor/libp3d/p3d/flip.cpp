@@ -201,7 +201,10 @@ static bool IsValidTransformAnimHeader(const u8* rawData, u32 rawSize, u32 offse
         && numFrames >= 1 && numFrames <= 512
         && targetType >= 0 && targetType <= 3
         && numRot >= 1 && numRot <= 100
-        && numTrans >= 0 && numTrans <= 10;
+        // The retail HHEAD stun-stars animation has 13 translation channels.
+        // Keep this plausibility cap aligned with rotations so valid clips are not
+        // discarded before TransformAnim::Parse can validate their array bounds.
+        && numTrans >= 0 && numTrans <= 100;
 }
 
 void* TransformAnim::ParseMulti(u8* rawData, u32 rawSize) {
@@ -571,6 +574,25 @@ void TransformFlip::EvalRotChannel(const TransformAnim::Channel& ch, STreeJoint&
         // Fraction in 16.16: (frameReal - t0<<16) / (timeDelta<<16)
         s32 frameDelta = frameReal - ((s32)t0 << 16);
         s32 frac16 = (s32)(((s64)frameDelta << 16) / ((s64)timeDelta << 16));
+
+        // Rx * Rz * Ry also represents the same orientation as
+        // (x + 180, y + 180, 180 - z). Exported keys can switch between these
+        // Euler branches near z = +/-90; lerping axes independently then twists
+        // the joint between otherwise nearby poses (visible at fractional frames).
+        auto distanceSquared = [=](s32 x, s32 y, s32 z) -> s64 {
+            const s32 dx = (s16)(x - rx0);
+            const s32 dy = (s16)(y - ry0);
+            const s32 dz = (s16)(z - rz0);
+            return (s64)dx * dx + (s64)dy * dy + (s64)dz * dz;
+        };
+        const s32 alternateX = (s16)(rx1 + 0x8000);
+        const s32 alternateY = (s16)(ry1 + 0x8000);
+        const s32 alternateZ = (s16)(0x8000 - rz1);
+        if (distanceSquared(alternateX, alternateY, alternateZ) < distanceSquared(rx1, ry1, rz1)) {
+            rx1 = alternateX;
+            ry1 = alternateY;
+            rz1 = alternateZ;
+        }
 
         // Lerp: v0 + (v1 - v0) * frac16 >> 16
         joint.rotationX = LerpAngle16((s16)rx0, (s16)rx1, frac16);

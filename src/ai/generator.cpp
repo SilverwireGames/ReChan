@@ -16,6 +16,20 @@
 #include <cmath>
 #include <cstring>
 
+static bool IsActiveZoneStillRegistered(const ActiveZone* zone) {
+    if (!zone || !g_ai) {
+        return false;
+    }
+
+    for (ccMinNode* node = g_ai->activeZoneList.head; node; node = node->next) {
+        if (node == static_cast<const ccMinNode*>(zone)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 Generator::Generator(const LVector* pos, u16 type)
     : Obstacle(pos, type) {
     MARKFUNCTION(0x80010D54);
@@ -227,6 +241,10 @@ EnemyGenerator::EnemyGenerator(const LVector* pos, u16 type)
 
 EnemyGenerator::~EnemyGenerator() {
     MARKFUNCTION(0x80012274);
+    if (encounterPopulationTracked && encounterSpawnsRemaining > 0 &&
+        IsActiveZoneStillRegistered(encounterZone)) {
+        encounterZone->RemovePendingEnemySpawns(this, encounterSpawnsRemaining);
+    }
 }
 
 void EnemyGenerator::GenerateObject(s32 param) {
@@ -273,10 +291,28 @@ void EnemyGenerator::GenerateObject(s32 param) {
 
     generateCount++;
     FightingCollision::InsertHumanoid(static_cast<Humanoid*>(generated));
+
+    if (encounterPopulationTracked && encounterSpawnsRemaining > 0) {
+        if (IsActiveZoneStillRegistered(encounterZone)) {
+            encounterZone->ResolvePendingEnemySpawn(this);
+        }
+        encounterSpawnsRemaining--;
+    }
 }
 
 void EnemyGenerator::Reset() {
     MARKFUNCTION(0x8001157C);
+
+    if (encounterPopulationTracked && IsActiveZoneStillRegistered(encounterZone)) {
+        const s32 pendingDelta = field200 - encounterSpawnsRemaining;
+        if (pendingDelta > 0) {
+            encounterZone->RegisterPendingEnemySpawns(this, pendingDelta);
+        }
+        else if (pendingDelta < 0) {
+            encounterZone->RemovePendingEnemySpawns(this, -pendingDelta);
+        }
+        encounterSpawnsRemaining = field200;
+    }
 
     field296 = 0;
     activeZone = nullptr;
@@ -364,6 +400,23 @@ void EnemyGenerator::AnalyzeMesh(DBRoot* root) {
         }
 
         field176++;
+    }
+
+    encounterZone = (g_ai && activeZoneHash != 0)
+        ? static_cast<ActiveZone*>(g_ai->activeZoneList.FindNodeCRC(activeZoneHash, nullptr))
+        : nullptr;
+    if (field200 > 0 && encounterZone && IsActiveZoneStillRegistered(encounterZone)) {
+        if (!encounterPopulationTracked) {
+            encounterPopulationTracked = true;
+        }
+        const s32 pendingDelta = field200 - encounterSpawnsRemaining;
+        if (pendingDelta > 0) {
+            encounterZone->RegisterPendingEnemySpawns(this, pendingDelta);
+        }
+        else if (pendingDelta < 0) {
+            encounterZone->RemovePendingEnemySpawns(this, -pendingDelta);
+        }
+        encounterSpawnsRemaining = field200;
     }
 }
 

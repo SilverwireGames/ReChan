@@ -464,7 +464,10 @@ static void ComputeSpatialGains(
     const f32 cosYaw = std::cos(yawRad);
     const f32 localX = dirX * cosYaw - dirZ * sinYaw;
     const f32 localZ = dirX * sinYaw + dirZ * cosYaw;
-    const f32 side = clampf(localX, -1.0f, 1.0f);
+    // The PSX listener basis places its left virtual microphone along
+    // (cos(yaw), -sin(yaw)); localX is positive in that direction. AudioEngine
+    // uses positive pan for the right channel, so invert the sign here.
+    const f32 side = clampf(-localX * 0.45f, -1.0f, 1.0f);
     const f32 front = clampf(localZ, -1.0f, 1.0f);
     const f32 rear = clampf(-front, 0.0f, 1.0f);
     const f32 frontAmount = clampf(front, 0.0f, 1.0f);

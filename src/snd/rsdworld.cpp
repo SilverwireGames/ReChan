@@ -6,6 +6,7 @@
 #include "gen/display.h"
 #include "gen/camera.h"
 #include "gen/psxmath_helpers.h"
+#include "ai/player.h"
 #include "p3d/p3dmath.h"
 #include "pc/audio.h"
 #include <vector>
@@ -34,8 +35,11 @@ static bool GetListenerState(LVector& outPos, s32& outYaw) {
         return false;
     }
 
-    outPos = cam->GetPosition();
-    outYaw = cam->GetOrientY();
+    // PSX jcsSetListener receives &player->pos and &camera->camAngleY.
+    // Using the camera position here can put a nearby voice outside the
+    // audible range when the camera is pulled away from the player.
+    outPos = Player::s_player ? Player::s_player->pos : cam->GetPosition();
+    outYaw = cam->GetCamAngleY();
     return true;
 }
 

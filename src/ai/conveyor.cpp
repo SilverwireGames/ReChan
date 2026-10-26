@@ -168,18 +168,15 @@ void Conveyor::HandleHumanoidCollision(Humanoid* hum) {
         return;
     }
 
-    if ((hum->flags & TF_ON_GROUND) == 0) {
-        if (hum->actionState == (s32)AS_LEDGE_LATCH) {
-            hum->LetGoOfLedge();
+    if ((hum->flags & TF_ON_GROUND) != 0) {
+        if (hum->actionState != (s32)AS_LEDGE_LATCH) {
+            hum->homePos.x += field116;
+            hum->homePos.y += field120;
+            hum->homePos.z += beltSpeed;
         }
-        return;
     }
 
     if (hum->actionState == (s32)AS_LEDGE_LATCH) {
-        return;
+        hum->LetGoOfLedge();
     }
-
-    hum->homePos.x += field116;
-    hum->homePos.y += field120;
-    hum->homePos.z += beltSpeed;
 }

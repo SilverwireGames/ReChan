@@ -138,6 +138,7 @@ struct HumanoidRenderSmoothState {
     LVector curOrient = {};
     bool animInitialized = false;
     s32 animEnum = -1;
+    s32 animLoopType = ANIM_LOOP;
     s32 prevAnimFrame = 0;
     s32 curAnimFrame = 0;
 };
@@ -353,7 +354,10 @@ static HumanoidRenderAnimPoseBackup ApplyHumanoidRenderAnimPose(
     backup.animStructure = anim;
     backup.flip = anim->flip;
     backup.anim = anim->flip->anim;
-    backup.frameReal = anim->flip->frameReal;
+    // Blend2's flip holds the destination sample, not the blend clock.
+    // Restore using the clock so the saved pose gets its original blend weight.
+    backup.frameReal = anim->mode == 0 && anim->loopTypeField == ANIM_BLEND2
+        ? anim->currentFrame : anim->flip->frameReal;
     backup.valid = true;
 
     UpdateHumanoidRenderAnimPose(model, smoothState, alpha);
@@ -420,9 +424,15 @@ void Humanoid::AdvanceRenderInterpolationTick() {
         smoothState->curAnimFrame = currentFrame;
     }
     else {
-        smoothState->prevAnimFrame = smoothState->curAnimFrame;
+        // Blend2's clock is unrelated to the destination clip's frame number.
+        // Its last pose was field56, so interpolate from that pose when playback
+        // resumes, rather than rewinding through destination frames 5..1.
+        const bool finishedBlend = smoothState->animLoopType == ANIM_BLEND2
+            && anim->loopTypeField != ANIM_BLEND2;
+        smoothState->prevAnimFrame = finishedBlend ? anim->field56 : smoothState->curAnimFrame;
         smoothState->curAnimFrame = currentFrame;
     }
+    smoothState->animLoopType = anim->loopTypeField;
 }
 #else
 void Humanoid::ResetRenderInterpolation() {}
@@ -1223,6 +1233,7 @@ Humanoid::~Humanoid() {
     // PSX: KillDialog, DeleteModel, DeleteRightHandObj, DeleteLeftHandObj, etc.
     KillDialog(0, 0, 512);
     pcDestroying = true;
+    UnregisterEncounterPopulation();
     DeleteModel();
     DeleteRightHandObj();
     DeleteLeftHandObj();
@@ -1279,36 +1290,36 @@ void Humanoid::Think() {
     if (humanoidSound) {
         humanoidSound->Think();
     }
+    // PSX Think draws this every frame before checking the thing type. Keep
+    // the shared RNG stream aligned because dialogue clip selection uses it.
+    const s32 tauntRoll = (s32)rmRangedRandom(100);
     // PSX step 2-3 (0x80063834-0x80063934): boss types (Grontar/Paul/Oscar/
     // Dante/Butch) call LoadEnemyTaunts unconditionally every Think tick;
     // other types only roll for it while not AS_STAND_ANIM. PSX also gates
     // non-boss rolls on a shared last-taunt-frame cooldown (gp+0x6E8/+0x6F8)
     //
-    // PC: skip this while the actor is under explicit director/NIS control
-    if (!isDirectorControlledNis) {
-        bool isBossTypeForTaunt = false;
-        switch (thingType) {
-            case AITypes::TT_GRONTAR:
-            case AITypes::TT_PAUL:
-            case AITypes::TT_OSCAR:
-            case AITypes::TT_DANTE:
-            case AITypes::TT_BUTCH:
-                isBossTypeForTaunt = true;
-                break;
-        }
+    bool isBossTypeForTaunt = false;
+    switch (thingType) {
+        case AITypes::TT_GRONTAR:
+        case AITypes::TT_PAUL:
+        case AITypes::TT_OSCAR:
+        case AITypes::TT_DANTE:
+        case AITypes::TT_BUTCH:
+            isBossTypeForTaunt = true;
+            break;
+    }
 
-        if (isBossTypeForTaunt) {
+    if (isBossTypeForTaunt) {
+        LoadEnemyTaunts();
+    }
+    else if (!isDirectorControlledNis) {
+        static u32 s_lastNonBossTauntFrame = 0;
+        const u32 currentFrame = g_time ? g_time->GetFrameCounter() : 0;
+        if (actionState != (s32)AS_STAND_ANIM
+            && tauntRoll < 20
+            && (currentFrame - s_lastNonBossTauntFrame) >= NON_BOSS_TAUNT_COOLDOWN_FRAMES) {
+            s_lastNonBossTauntFrame = currentFrame;
             LoadEnemyTaunts();
-        }
-        else {
-            static u32 s_lastNonBossTauntFrame = 0;
-            const u32 currentFrame = g_time ? g_time->GetFrameCounter() : 0;
-            if (actionState != (s32)AS_STAND_ANIM
-                && (s32)rmRangedRandom(100) < 20
-                && (currentFrame - s_lastNonBossTauntFrame) >= NON_BOSS_TAUNT_COOLDOWN_FRAMES) {
-                s_lastNonBossTauntFrame = currentFrame;
-                LoadEnemyTaunts();
-            }
         }
     }
 
@@ -1563,6 +1574,7 @@ void Humanoid::Reset() {
     // PSX: flags |= 4 (needs activation), flags &= ~0x100
     flags |= TF_NEEDS_ACTIVATION;
     flags &= ~TF_BIT8;
+    RegisterEncounterPopulation();
 }
 
 // PSX: Activate__8Humanoid (HUMANOID.CPP:760)
@@ -1957,6 +1969,44 @@ void Humanoid::CreateModel(const char* name) {
 
     // PSX: vtable+212 call -> CreateSound
     CreateSound();
+}
+
+// PC: Bookkeeping for authored and generated encounter members.
+void Humanoid::RegisterEncounterPopulation() {
+    if (thingType == AITypes::TT_PLAYER || field452 == 0 || !activeZone ||
+        !IsActiveZoneStillRegistered(activeZone)) {
+        return;
+    }
+
+    if (!encounterPopulationRegistered) {
+        activeZone->RegisterEncounterHumanoid(this);
+        encounterPopulationRegistered = true;
+        encounterPopulationResolved = false;
+    }
+    else if (encounterPopulationResolved) {
+        activeZone->RegisterEncounterHumanoid(this);
+        encounterPopulationResolved = false;
+    }
+}
+
+void Humanoid::ResolveEncounterPopulation() {
+    if (!encounterPopulationRegistered || encounterPopulationResolved) {
+        return;
+    }
+
+    if (activeZone && IsActiveZoneStillRegistered(activeZone)) {
+        activeZone->ResolveEncounterHumanoid(this);
+    }
+    encounterPopulationResolved = true;
+}
+
+void Humanoid::UnregisterEncounterPopulation() {
+    if (!encounterPopulationRegistered) {
+        return;
+    }
+
+    ResolveEncounterPopulation();
+    encounterPopulationRegistered = false;
 }
 
 // PSX: the zone-member and Behaviour part of CreateModel__8HumanoidPCc (0x800632B4).
@@ -2501,6 +2551,8 @@ void Humanoid::AnalyzeMesh(DBRoot* root) {
         behaviourNameHash = subTypeBehaviourHash;
     }
 
+    RegisterEncounterPopulation();
+
     if (thingType == 2) {
         s32 activeZonePathCount = 0;
         s32 activeZoneSubZoneCount = 0;
@@ -2713,21 +2765,12 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             field348 = 8;
             break;
         case AS_DIVE_ROLL:
-            // State 12 is player dive-roll; non-player callers are normalized to strafe.
-            if (this != static_cast<Humanoid*>(Player::s_player)) {
-                state = AS_STRAFE;
-                field344 = 0;
-                stateDispatch = SD_STRAFE;
-                field348 = 8;
-                break;
-            }
             field344 = 0;
             stateDispatch = SD_DIVE_ROLL_CHAIN;
             field348 = 8;
             if (model) {
                 Model* m = static_cast<Model*>(model);
                 m->SetAnim(24, param, 1, 0);
-                SetCallNextActionCallback(m);
             }
             field488 = 0;
             break;
@@ -3065,6 +3108,11 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             }
             break;
         case AS_SPIN_BACK:
+            // PSX: when Jackie enters state 56, preload his "hurt" line
+            // (dialog 28, priority 0x35) for playback during get-up.
+            if (this == static_cast<Humanoid*>(Player::s_player)) {
+                LoadDialog(0x1C, 0x35);
+            }
             combatFlag = 0;
             if (model) {
                 Model* m = static_cast<Model*>(model);
@@ -3081,6 +3129,10 @@ void Humanoid::SetActionState(u32 state, s32 param) {
             }
             break;
         case AS_FLYING_BACK:
+            // PSX: state 57 preloads the same player-only "hurt" line.
+            if (this == static_cast<Humanoid*>(Player::s_player)) {
+                LoadDialog(0x1C, 0x35);
+            }
             if (model) {
                 Model* m = static_cast<Model*>(model);
                 m->SetAnim(14, param, 1, 0);
@@ -3418,6 +3470,7 @@ void Humanoid::Kill() {
     }
 
     flags |= TF_DEAD;
+    ResolveEncounterPopulation();
 }
 
 // PSX: Killed__8Humanoid (HUMANOID.CPP:9440)
@@ -3430,6 +3483,7 @@ void Humanoid::Killed() {
     }
 
     flags |= TF_DEAD;
+    ResolveEncounterPopulation();
 }
 
 // PSX: GetStraifPhase__8Humanoid (HUMANOID.CPP:9476, 0x8006CF7C)
@@ -3469,8 +3523,10 @@ s32 Humanoid::GetStraifPhase() {
     }
 
     if (animWord2C == 1) {
+        // PSX: keep reverse strafe active until it returns to frame 0;
+        // only then use loopCount to decide whether another reverse pass runs.
         if (animHalf3E != 0) {
-            return 0;
+            return 1;
         }
         return (animWord54 < 2) ? 1 : 0;
     }
@@ -4068,7 +4124,7 @@ void Humanoid::_Stand() {
 
         case 5:
             FaceAngleY(faceAngle, 0);
-            SetActionState(AS_STRAFE, 0);
+            SetActionState(AS_DIVE_ROLL, 0);
             return;
 
         case 6:
@@ -4434,10 +4490,10 @@ void Humanoid::_Run() {
         return;
     }
 
-    // Strafe (bit 5) -> face and strafe
+    // Dive-roll action (bit 5) -> face and enter action state 12.
     if (sd & 0x0020) {
         FaceAngleY(faceAngle, 0);
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
     }
 }
 
@@ -4565,11 +4621,11 @@ void Humanoid::_Straif() {
         return;
     }
 
-    // Strafe (bit 5) -> face + strafe
+    // Dive-roll action (bit 5) -> face and enter action state 12.
     if (sd & 0x0020) {
         FaceAngleY(faceAngle, 0);
         ReleaseTarget();
-        SetActionState(AS_STRAFE, 0);
+        SetActionState(AS_DIVE_ROLL, 0);
         return;
     }
 

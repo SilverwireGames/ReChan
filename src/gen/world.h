@@ -69,12 +69,6 @@ public:
     void CheckThingSwitches(Thing* thing);
     WDBSwitch* FindPrimarySwitchByCRC(u32 crc);
     void ProcessPendingSwitchActions();
-    void RequestPlayerResetOnLoad() { pendingPlayerReset = true; }
-    bool ConsumePlayerResetOnLoad() {
-        const bool shouldReset = pendingPlayerReset;
-        pendingPlayerReset = false;
-        return shouldReset;
-    }
 
     u32 GetCurrentLevelIndex() const { return currentLevelIndex; }
     u32 GetTargetLevelIndex() const { return targetLevelIndex; }
