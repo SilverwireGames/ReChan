@@ -504,7 +504,9 @@ void Camera::Update() {
         Mat4 twistMatrix;
         p3dBuildRotMatrixZ(ANGLE2RAD(camTwist), twistMatrix);
 
-        Mat4 matrix = twistMatrix * headingMatrix;
+        // Apply roll in camera space so it rotates the up/right axes without
+        // changing the direction from camPos to camTarget.
+        Mat4 matrix = headingMatrix * twistMatrix;
         p3dFillTransMatrix(camPos, matrix);
 
         // PSX: GetFOV from G_2ptcam, SetCameraMatrix + SetFOV on embedded tMatrixCamera
