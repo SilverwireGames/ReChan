@@ -1,9 +1,17 @@
 #pragma once
 #include "core.h"
+#include <string>
+#include <vector>
 
 class tTexture;
 class pddiRenderTarget;
 class pddiBaseShader;
+
+struct MovieSubtitleEntry {
+    f64 startSeconds = 0.0;
+    f64 endSeconds = 0.0;
+    std::string text;
+};
 
 // MoviePlayer - plays PSX .STR files with video and audio
 class MoviePlayer {
@@ -69,6 +77,8 @@ private:
 
     bool ParseSectorHeader(const u8* sector, SectorHeader& hdr);
     bool ParseVideoChunkHeader(const u8* sectorData, VideoChunkHeader& hdr);
+    bool LoadSubtitles(const char* moviePath);
+    void RenderSubtitle() const;
 
     // Video decoding (MDEC)
     void DecodeVideoFrame(const u8* demuxData, u32 demuxSize, u16 width, u16 height,
@@ -150,6 +160,8 @@ private:
     f64 playbackTime = 0.0;
     f64 frameInterval = 1.0 / 15.0; // STR typically 15fps
     u32 framesDecoded = 0;
+
+    std::vector<MovieSubtitleEntry> subtitles;
 
     bool finished = false;
 };
