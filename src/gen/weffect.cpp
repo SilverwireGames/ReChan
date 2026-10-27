@@ -6114,10 +6114,10 @@ s32 FWEffect::SetMentor() {
                 curMentorPos = *mentorPosRef;
                 prevMentorPos = curMentorPos;
 #endif
-                LVector* soundPos = mentorLink->GetSoundPosPtr();
-                mentorOffset.x = pos.x - soundPos->x;
-                mentorOffset.y = pos.y - soundPos->y;
-                mentorOffset.z = pos.z - soundPos->z;
+                const LVector* initialPos = mentorLink->GetInitialPos();
+                mentorOffset.x = pos.x - initialPos->x;
+                mentorOffset.y = pos.y - initialPos->y;
+                mentorOffset.z = pos.z - initialPos->z;
             }
 
             canDisplay = 0;
@@ -6148,6 +6148,14 @@ s32 FWEffect::Update() {
     if (mentorPosRef) {
         prevMentorPos = curMentorPos;
         curMentorPos = *mentorPosRef;
+        // Keep following effects attached when their mentor teleports or a
+        // platform path loops; interpolating the jump draws a stray ripple.
+        constexpr s64 kMaxInterpolatedStep = 1024;
+        if (std::abs(static_cast<s64>(curMentorPos.x) - prevMentorPos.x) > kMaxInterpolatedStep
+            || std::abs(static_cast<s64>(curMentorPos.y) - prevMentorPos.y) > kMaxInterpolatedStep
+            || std::abs(static_cast<s64>(curMentorPos.z) - prevMentorPos.z) > kMaxInterpolatedStep) {
+            prevMentorPos = curMentorPos;
+        }
     }
 #endif
 

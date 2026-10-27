@@ -72,7 +72,7 @@ public:
     void SetPlatformToPathNode(const char* name);
     const LVector* GetDeltaVelocity() const override;
     s32 GetFloorMaterial() const override;
-    const LVector* GetInitialPos() const;
+    const LVector* GetInitialPos() override;
     void DeathCheck();
     bool CheckForSquash(const LVector& outPos, const LVector& outNormal, const LVector& collBbox);
 
