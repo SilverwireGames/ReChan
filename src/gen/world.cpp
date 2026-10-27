@@ -2633,8 +2633,7 @@ static void LoadGeoPair(
 
                             if (ReadChunkPStringHash(subBody, subBodyLen, subBodyCursor, &jointNameHash)
                                 && ReadChunkPStringHash(subBody, subBodyLen, subBodyCursor, &modelNameHash)
-                                && modelNameHash != 0
-                                && modelNameHash != nameHash) {
+                                && modelNameHash != 0) {
                                 ETreePartEntry entry = {};
                                 entry.jointHash = jointNameHash;
                                 entry.modelHash = modelNameHash;
@@ -2657,7 +2656,13 @@ static void LoadGeoPair(
                                     subBodyCursor += 4;
                                 }
 
-                                geoPartEntries.push_back(entry);
+                                // A drawable joint may reference a Geo with the same
+                                // name as its ETree (for example SHARD). Geo and ETree
+                                // are kept in separate lists, so this is not recursion.
+                                // Continue to omit same-name non-drawable placeholders.
+                                if (modelNameHash != nameHash || (entry.jointFlags & 0x00040000u) != 0) {
+                                    geoPartEntries.push_back(entry);
+                                }
                             }
                         }
 
