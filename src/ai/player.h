@@ -1,6 +1,7 @@
 #pragma once
 #include "ai/humanoid.h"
 #include "gen/scoremgr.h"
+#include <vector>
 
 // All animation IDs routed through PlayerModel::SetAnim or referenced by Player handlers.
 // IDs named ANIM_ID_X are placeholders for anims not yet identified.
@@ -58,6 +59,13 @@ enum PlayerFlags : s32 {
     PF_COMBAT_READY = 0x04,  // bit 2: combat-ready
 };
 
+// PC: stable identity for encounter completion across AI teardown/repopulate.
+struct DoorGateEncounterKey {
+    s32 levelID = 0;
+    u32 petalIndex = 0;
+    u32 killCRC = 0;
+};
+
 // Player - the player character (Jackie Chan)
 class Player : public Humanoid {
 public:
@@ -76,6 +84,12 @@ public:
 
     // PSX +636..+688: embedded CheckpointInfo (56 bytes)
     CheckpointInfo checkpoint = {};
+
+    // PC: gate completion survives the AI objects being rebuilt on checkpoint
+    // death. The checkpoint copy is captured by OnCheckpoint and restored by
+    // AI::Populate when retrying that checkpoint.
+    std::vector<DoorGateEncounterKey> completedDoorGateEncounters;
+    std::vector<DoorGateEncounterKey> checkpointDoorGateEncounters;
 
     // PSX +692 (s32): current lives left
     s32 livesLeft = 4;
@@ -202,6 +216,10 @@ public:
     void FallingPhysics();
     void CheckForLanding();
     void OnCheckpoint();
+    void CaptureDoorGateCheckpointProgress();
+    bool HasCompletedDoorGateEncounter(s32 levelID, u32 petalIndex, u32 killCRC) const;
+    void MarkDoorGateEncounterCompleted(s32 levelID, u32 petalIndex, u32 killCRC);
+    void RestoreDoorGateCheckpointProgress(bool useCheckpoint);
     void SetLivesLeft(s32 lives);
 
     s32 GetLivesLeft() const { return livesLeft; }

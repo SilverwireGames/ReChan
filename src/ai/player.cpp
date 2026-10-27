@@ -1314,7 +1314,40 @@ void Player::OnCheckpoint() {
         checkpoint.field24 = g_blockManager->GetBlockNumber(pos);
     }
     checkpoint.field28 = 0;
+    if (World* world = g_game ? g_game->GetWorld() : nullptr) {
+        checkpoint.levelIndex = static_cast<s32>(world->GetCurrentLevelIndex());
+        checkpoint.petalIndex = static_cast<s32>(world->GetCurrentPetalIndex());
+    }
     checkpoint.SetValidState(1);
+    CaptureDoorGateCheckpointProgress();
+}
+
+void Player::CaptureDoorGateCheckpointProgress() {
+    checkpointDoorGateEncounters = completedDoorGateEncounters;
+}
+
+bool Player::HasCompletedDoorGateEncounter(s32 levelID, u32 petalIndex, u32 killCRC) const {
+    for (const DoorGateEncounterKey& key : completedDoorGateEncounters) {
+        if (key.levelID == levelID && key.petalIndex == petalIndex && key.killCRC == killCRC) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Player::MarkDoorGateEncounterCompleted(s32 levelID, u32 petalIndex, u32 killCRC) {
+    if (killCRC == 0 || HasCompletedDoorGateEncounter(levelID, petalIndex, killCRC)) {
+        return;
+    }
+
+    completedDoorGateEncounters.push_back({ levelID, petalIndex, killCRC });
+}
+
+void Player::RestoreDoorGateCheckpointProgress(bool useCheckpoint) {
+    completedDoorGateEncounters.clear();
+    if (useCheckpoint) {
+        completedDoorGateEncounters = checkpointDoorGateEncounters;
+    }
 }
 
 void Player::SetLivesLeft(s32 lives) {
