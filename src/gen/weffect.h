@@ -53,6 +53,7 @@ public:
 
     void SetFrame(s32 frame);
     void SetFrameReal(s32 frameReal16);
+    void UpdateAnimation();
     bool EndOfFrame(s32 frame) const;
     bool HasAnimation() const;
     bool PointInView(const LVector& pos, s32 radius) const;
@@ -74,7 +75,7 @@ public:
     OriginalGeo* GetGeo() const;
     OriginalGeo* GetGeo(s32 geoIndex) const;
     bool ResolveGeoByIndex(u32 geoIndex, OriginalGeo** outGeo, Mat4* outLocalMatrix);
-    bool RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flags);
+    bool RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flags, bool cullBackfaces = false);
     u32* GetGeoFastWord1Slot(s32 geoIndex);
     bool FastRenderReady() const;
 

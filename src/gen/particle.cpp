@@ -301,7 +301,7 @@ static s32 QuantizeParticleAngle(s32 rotation) {
 // PSX: dword_8009EF5C from GTEMATH.ASM (P3D_SinCos_GTE quarter-wave packed table).
 // low16 = sin sample, high16 = cos sample in 12-bit fixed scale (0x1000 = 1.0).
 static constexpr u32 kP3dSinCosGteOctantTable[] = {
-    0x10000000, 0x10000009, 0x10000010, 0x10000016, 0x1000001C, 0x10000023, 0x10000029, 0x1000002F,
+    0x10000000, 0x10000009, 0x10000010, 0x10000016, 0x1000001C, 0x10000023, 0x10000029, 0x1000002F, 0x10000035,
     0x1000003C, 0xFFF0042, 0xFFF0048, 0xFFF004F, 0xFFF0055, 0xFFF005B, 0xFFF0061, 0xFFF0068,
     0xFFF006E, 0xFFE0074, 0xFFE007B, 0xFFE0081, 0xFFE0087, 0xFFE008D, 0xFFD0094, 0xFFD009A,
     0xFFD00A0, 0xFFD00A6, 0xFFC00AD, 0xFFC00B3, 0xFFC00B9, 0xFFC00C0, 0xFFB00C6, 0xFFB00CC,
@@ -787,6 +787,11 @@ s32 ParticleSystem::AnalyzeMesh() {
     delete[] meshFrameList;
     meshFrameList = nullptr;
     meshFrameMask = 0;
+
+    // PSX AnalyzeMesh sets the effect's flip to frame 1 and updates it
+    // before capturing the individual geometry transforms.
+    stats->comEffect->SetFrame(1);
+    stats->comEffect->UpdateAnimation();
 
     const s32 geoCount = static_cast<s32>(stats->comEffect->GetGeoCount());
 
@@ -1426,7 +1431,9 @@ void ParticleSystem::Display() {
             // PSX path uses p3dMultMatrix(particleWorld, localMatrix, out),
             // which is localMatrix * particleWorld in host Mat4 terms.
             Mat4 entryWorld = entry.localMatrix * particleWorld;
-            stats->comEffect->RenderGeoByIndex(entry.geoIndex, entryWorld, renderFlags | 0x80000u);
+            // PSX rejects back faces for each fragment. Some particle meshes
+            // contain both windings, which otherwise blend twice on PC.
+            stats->comEffect->RenderGeoByIndex(entry.geoIndex, entryWorld, renderFlags | 0x80000u, true);
             continue;
         }
 

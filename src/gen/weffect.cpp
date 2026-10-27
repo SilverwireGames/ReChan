@@ -3410,6 +3410,13 @@ void ComEffect::SetFrameReal(s32 frameReal16) {
     }
 }
 
+void ComEffect::UpdateAnimation() {
+    MiscAnimNode* liveNode = ComEffect_ResolveLiveMiscAnimNode(this);
+    if (liveNode && frameCount > 0 && currentFrame < frameCount) {
+        ApplyMiscAnimFrame(liveNode, currentFrame, true);
+    }
+}
+
 bool ComEffect::EndOfFrame(s32 frame) const {
     MARKFUNCTION(0x8004E89C);
 
@@ -3967,7 +3974,7 @@ bool ComEffect::ResolveGeoByIndex(u32 geoIndex, OriginalGeo** outGeo, Mat4* outL
     return false;
 }
 
-bool ComEffect::RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flags) {
+bool ComEffect::RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flags, bool cullBackfaces) {
     if (!model || !model->drawable || !p3d::context) {
         return false;
     }
@@ -4059,7 +4066,13 @@ bool ComEffect::RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flag
                 p3d::context->SetReceiveShadows(true);
             }
 #endif
+            if (cullBackfaces) {
+                p3d::context->SetCullMode(PDDI_CULL_NORMAL);
+            }
             p3d::context->DrawPrimBuffer(geo->meshBuffer);
+            if (cullBackfaces) {
+                p3d::context->SetCullMode(PDDI_CULL_NONE);
+            }
 #if MODERN_GRAPHICS
             if (receiveMappedShadows) {
                 p3d::context->SetReceiveShadows(false);
