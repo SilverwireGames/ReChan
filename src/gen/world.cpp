@@ -4701,14 +4701,9 @@ void World::UnloadPetal() {
     WEffect_UnPopulateWEffects(-1);
     WEffect_Unload();
     PWEffect_Unload();
-    ParticleSystem_UnloadLevel();
-    UnloadLevelScaleData();
-    UnloadPaletteData();
-    UnloadUVPrimData();
-    UnloadCBVPrimData();
-    PurgeSwitches();
 
     // Unload current blocks (collision sectors, geometry)
+    PurgeSwitches();
     if (g_blockManager) {
         g_blockManager->InternalClose();
     }
@@ -4717,6 +4712,16 @@ void World::UnloadPetal() {
     if (g_ai) {
         g_ai->UnPopulate(0);
     }
+
+    // GEffects own ParticleSystemMgr instances that can still refer to this
+    // petal's particle systems. Destroy them before unloading those systems.
+    GEffect_Unload();
+    ParticleSystem_UnloadLevel();
+
+    UnloadLevelScaleData();
+    UnloadPaletteData();
+    UnloadUVPrimData();
+    UnloadCBVPrimData();
 
     if (g_director) {
         g_director->PurgeAnims();

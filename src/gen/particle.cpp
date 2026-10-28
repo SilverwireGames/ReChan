@@ -158,6 +158,16 @@ public:
         particleList = list ? list : &ownedParticles;
     }
 
+    bool IsParticleListBound(const ccMinList* list) const {
+        return particleList == list;
+    }
+
+    void UnbindParticleList(ccMinList* list) {
+        if (particleList == list) {
+            particleList = &ownedParticles;
+        }
+    }
+
     void SetDisplayOffset(LVector* offset) {
         displayOffset = offset;
     }
@@ -1617,13 +1627,9 @@ ParticleSystemMgr::ParticleSystemMgr(ParticleSystem* inSystem) {
 ParticleSystemMgr::~ParticleSystemMgr() {
     MARKFUNCTION(0x80097DA4);
 
-    // Manager-local particle storage dies with this object; make sure
-    // the shared system no longer points at this list before teardown.
-    PurgeParticles();
-    if (system) {
-        system->SetDisplayOffset(nullptr);
-        system->BindParticleList(nullptr);
-    }
+    // The list is embedded in this manager, so purge it before the manager
+    // storage goes away and detach only if this system still uses this list.
+    DetachSystem();
 }
 
 void ParticleSystemMgr::BindSystemList() {
@@ -1635,20 +1641,61 @@ void ParticleSystemMgr::BindSystemList() {
 void ParticleSystemMgr::InitMgr(ParticleSystem* inSystem) {
     MARKFUNCTION(0x80097E00);
 
-    system = inSystem;
+    if (system != inSystem) {
+        SetSystem(inSystem);
+    }
+    else {
+        PurgeOwnedParticles();
+        if (system && system->IsParticleListBound(&particles)) {
+            system->SetDisplayOffset(nullptr);
+        }
+    }
 
     direction.x = 0;
     direction.y = 0;
     direction.z = 0;
 
-    particles.head = nullptr;
-    particles.tail = nullptr;
-
     BindSystemList();
 }
 
 void ParticleSystemMgr::SetSystem(ParticleSystem* inSystem) {
+    if (system == inSystem) {
+        BindSystemList();
+        return;
+    }
+
+    DetachSystem();
     system = inSystem;
+    BindSystemList();
+}
+
+void ParticleSystemMgr::DetachSystem() {
+    ParticleSystem* oldSystem = system;
+    PurgeOwnedParticles();
+
+    if (oldSystem && oldSystem->IsParticleListBound(&particles)) {
+        oldSystem->SetDisplayOffset(nullptr);
+        oldSystem->UnbindParticleList(&particles);
+    }
+
+    system = nullptr;
+}
+
+void ParticleSystemMgr::PurgeOwnedParticles() {
+    for (ccMinNode* node = particles.head; node;) {
+        ParticleInfo* info = static_cast<ParticleInfo*>(node);
+        node = node->next;
+
+        info->life = 0;
+        info->active = 0;
+
+        particles.RemNode(info);
+        g_particleAvailList.AddNodeTail(info);
+    }
+
+    if (system && system->stats) {
+        system->stats->burstCounter = 0;
+    }
 }
 
 s32 ParticleSystemMgr::CreateParticles(const LVector& origin, ParticleStats* statsOverride) {
@@ -1742,12 +1789,12 @@ s32 ParticleSystemMgr::ActiveParticles() {
 s32 ParticleSystemMgr::PurgeParticles() {
     MARKFUNCTION(0x80097FF0);
 
-    if (!system) {
-        return 0;
+    if (system) {
+        BindSystemList();
     }
 
-    BindSystemList();
-    return system->PurgeParticles();
+    PurgeOwnedParticles();
+    return 0;
 }
 
 u32 ParticleSystemMgr::GetSystemHash() const {
