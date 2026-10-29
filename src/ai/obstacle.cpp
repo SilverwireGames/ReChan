@@ -137,6 +137,17 @@ void ObstacleBuildRenderTransform(
         smoothState->curOrient = logicOrientation;
     }
 
+    // Path loops and other teleports are instantaneous in the original.
+    // Check even on render-only frames: an off-screen obstacle may have moved
+    // since its last draw, leaving the cached transform behind.
+    constexpr s64 kMaxInterpolatedStep = 1024;
+    if (std::abs(static_cast<s64>(logicPos.x) - smoothState->prevPos.x) > kMaxInterpolatedStep
+        || std::abs(static_cast<s64>(logicPos.y) - smoothState->prevPos.y) > kMaxInterpolatedStep
+        || std::abs(static_cast<s64>(logicPos.z) - smoothState->prevPos.z) > kMaxInterpolatedStep) {
+        smoothState->prevPos = smoothState->curPos = logicPos;
+        smoothState->prevOrient = smoothState->curOrient = logicOrientation;
+    }
+
     f32 alpha = g_time->GetPlayPresentationAlpha();
     if (alpha < 0.0f) {
         alpha = 0.0f;

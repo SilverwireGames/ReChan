@@ -61,6 +61,8 @@ public:
 
 private:
     void BindSystemList();
+    void DetachSystem();
+    void PurgeOwnedParticles();
 
     ParticleSystem* system = nullptr;
     LVector direction = {};

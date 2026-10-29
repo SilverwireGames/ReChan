@@ -153,7 +153,11 @@ void Door::Reset() {
 
     World* world = g_game ? g_game->GetWorld() : nullptr;
     s32 levelID = world ? world->GetCurLevelID() : 0;
-    const bool startsUnlocked = levelID != 7 && killThingsCRC == 0;
+    const u32 petalIndex = world ? world->GetCurrentPetalIndex() : 0u;
+    const bool restoredCompletedEncounter = levelID != 7 && killThingsCRC != 0 &&
+        Player::s_player && Player::s_player->HasCompletedDoorGateEncounter(
+            levelID, petalIndex, static_cast<u32>(killThingsCRC));
+    const bool startsUnlocked = levelID != 7 && (killThingsCRC == 0 || restoredCompletedEncounter);
     if (levelID == 7) {
         doorState = 5;
     }
@@ -491,6 +495,12 @@ void Door::DeathCheck() {
         // PSX: if level != 6, set state 1 + SFX 158; if level 6, call Open
         World* deathWorld = g_game ? g_game->GetWorld() : nullptr;
         s32 levelID = deathWorld ? deathWorld->GetCurLevelID() : 0;
+        if (Player::s_player && killThingsCRC != 0) {
+            Player::s_player->MarkDoorGateEncounterCompleted(
+                levelID,
+                deathWorld ? deathWorld->GetCurrentPetalIndex() : 0u,
+                static_cast<u32>(killThingsCRC));
+        }
         if (levelID == 6) {
             Open();
         }

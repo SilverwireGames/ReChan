@@ -1732,7 +1732,7 @@ s32 Platform::AtEndOfPath() const {
     return splinePath->EndOfPath();
 }
 
-const LVector* Platform::GetInitialPos() const {
+const LVector* Platform::GetInitialPos() {
     MARKFUNCTION(0x80024D04);
     return &initialPos;
 }

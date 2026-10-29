@@ -920,6 +920,19 @@ void AI::MoveCamera() {
 // Special case: type==6/subType==0 = player spawn point (sets position).
 void AI::Populate() {
     MARKFUNCTION(0x80056214);
+
+    // AI entities and ActiveZones are rebuilt on checkpoint death, but the
+    // player's checkpoint object survives. Restore its cleared gate encounters
+    // before any door or enemy population registers against the new zones.
+    Player* player = Player::s_player;
+    World* world = g_game ? g_game->GetWorld() : nullptr;
+    if (player) {
+        const bool matchingCheckpoint = player->checkpoint.IsValid() && world &&
+            player->checkpoint.levelIndex == static_cast<s32>(world->GetCurrentLevelIndex()) &&
+            player->checkpoint.petalIndex == static_cast<s32>(world->GetCurrentPetalIndex());
+        player->RestoreDoorGateCheckpointProgress(matchingCheckpoint);
+    }
+
     PopulateActiveZones();
     PopulateActiveZonesPaths();
     PopulateActiveZonesSubZones();

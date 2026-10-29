@@ -502,6 +502,7 @@ static void ProcessPendingCheckpointWarp() {
     player->checkpoint.SetValidState(1);
     player->checkpoint.levelIndex = static_cast<s32>(sDebugPendingCheckpointWarp.targetLevelIndex);
     player->checkpoint.petalIndex = static_cast<s32>(sDebugPendingCheckpointWarp.targetPetalIndex);
+    player->CaptureDoorGateCheckpointProgress();
 
     if (g_display && g_display->GetCamera()) {
         g_display->GetCamera()->SetLookAtTarget(player, 1);

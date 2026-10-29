@@ -610,14 +610,14 @@ s32 FPWEffect::SetMentor() {
         ccNode* node = g_ai->moveList.FindNodeCRC(followThingHash, nullptr);
         if (node) {
             mentorThing = static_cast<Thing*>(node);
-            const LVector* soundPos = mentorThing->GetSoundPosPtr();
-            if (!soundPos) {
-                soundPos = &mentorThing->pos;
+            const LVector* initialPos = mentorThing->GetInitialPos();
+            if (!initialPos) {
+                initialPos = &mentorThing->pos;
             }
 
-            mentorOffset.x = pos.x - soundPos->x;
-            mentorOffset.y = pos.y - soundPos->y;
-            mentorOffset.z = pos.z - soundPos->z;
+            mentorOffset.x = pos.x - initialPos->x;
+            mentorOffset.y = pos.y - initialPos->y;
+            mentorOffset.z = pos.z - initialPos->z;
 
             mentorPosRef = &mentorThing->pos;
 

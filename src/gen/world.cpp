@@ -2633,8 +2633,7 @@ static void LoadGeoPair(
 
                             if (ReadChunkPStringHash(subBody, subBodyLen, subBodyCursor, &jointNameHash)
                                 && ReadChunkPStringHash(subBody, subBodyLen, subBodyCursor, &modelNameHash)
-                                && modelNameHash != 0
-                                && modelNameHash != nameHash) {
+                                && modelNameHash != 0) {
                                 ETreePartEntry entry = {};
                                 entry.jointHash = jointNameHash;
                                 entry.modelHash = modelNameHash;
@@ -2657,7 +2656,13 @@ static void LoadGeoPair(
                                     subBodyCursor += 4;
                                 }
 
-                                geoPartEntries.push_back(entry);
+                                // A drawable joint may reference a Geo with the same
+                                // name as its ETree (for example SHARD). Geo and ETree
+                                // are kept in separate lists, so this is not recursion.
+                                // Continue to omit same-name non-drawable placeholders.
+                                if (modelNameHash != nameHash || (entry.jointFlags & 0x00040000u) != 0) {
+                                    geoPartEntries.push_back(entry);
+                                }
                             }
                         }
 
@@ -4696,14 +4701,9 @@ void World::UnloadPetal() {
     WEffect_UnPopulateWEffects(-1);
     WEffect_Unload();
     PWEffect_Unload();
-    ParticleSystem_UnloadLevel();
-    UnloadLevelScaleData();
-    UnloadPaletteData();
-    UnloadUVPrimData();
-    UnloadCBVPrimData();
-    PurgeSwitches();
 
     // Unload current blocks (collision sectors, geometry)
+    PurgeSwitches();
     if (g_blockManager) {
         g_blockManager->InternalClose();
     }
@@ -4712,6 +4712,16 @@ void World::UnloadPetal() {
     if (g_ai) {
         g_ai->UnPopulate(0);
     }
+
+    // GEffects own ParticleSystemMgr instances that can still refer to this
+    // petal's particle systems. Destroy them before unloading those systems.
+    GEffect_Unload();
+    ParticleSystem_UnloadLevel();
+
+    UnloadLevelScaleData();
+    UnloadPaletteData();
+    UnloadUVPrimData();
+    UnloadCBVPrimData();
 
     if (g_director) {
         g_director->PurgeAnims();

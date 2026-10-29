@@ -60,6 +60,8 @@ static constexpr s32 LEDGE_TRACE_MIN_Y = 500;
 static constexpr s32 LEDGE_TRACE_MAX_Y = 750;
 static constexpr s32 LEDGE_TRACE_CLEARANCE = 1024;
 static constexpr s32 LEDGE_FLOOR_MIN_HEIGHT = 1022;
+// PSX HUMANOID.CPP case 5 loads GP+0x6D8; the original default is 250.
+static constexpr s32 FIGHTING_JOINT_5_RADIUS = 250;
 static constexpr s32 ATTACKER_WEAPON_RADIUS = 0x40;
 static constexpr s32 TARGET_TRACK_MAX_FRAME = 5;
 static constexpr s32 DIVEROLLKICK_TARGET_TRACK_MAX_FRAME = 3;
@@ -6514,7 +6516,7 @@ s32 Humanoid::ProcessFightingMoveStrikeJoint(
         attack.radiusA = hm->attackFootRadius;
         break;
     case 5:
-        attack.radiusA = ATTACKER_WEAPON_RADIUS;
+        attack.radiusA = FIGHTING_JOINT_5_RADIUS;
         break;
     default:
         attack.radiusA = 0;

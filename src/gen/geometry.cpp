@@ -16,6 +16,13 @@
 #include <tuple>
 #include <vector>
 
+// The PS1 draws GTE-projected screen-space vertices, while the PC path gives
+// OpenGL the original 3D polygon. Do not let a block primitive spanning the
+// camera plane turn into a large GL near-plane clip. Reject only primitives
+// with a vertex behind the eye; ordinary geometry in front of the camera is
+// unchanged.
+static constexpr s32 kBlockFaceDepthCutoff = 0;
+
 // BLK layout:
 //   [0-23]   Block header (translation at +8: s16 x,y,z)
 //   [24+]    tPrimGeom struct, also the base for word offsets
@@ -713,6 +720,16 @@ static pddiPrimBuffer* BuildPrimBufferFromPrimGeom(const tPrimGeom* geom,
         projectToPortScreen(v0, &p0);
         projectToPortScreen(v1, &p1);
         projectToPortScreen(v2, &p2);
+
+        s32 nearestVertexDepth = std::min(p0.vz, std::min(p1.vz, p2.vz));
+        if (v3) {
+            PortProjectedVert p3;
+            projectToPortScreen(*v3, &p3);
+            nearestVertexDepth = std::min(nearestVertexDepth, p3.vz);
+        }
+        if (nearestVertexDepth < kBlockFaceDepthCutoff) {
+            return PsxCullResult::Clip;
+        }
 
         // PSX NCLIP result in MAC0: reject when MAC0 >= 0.
         s64 mac0 = static_cast<s64>(p0.sx) * static_cast<s64>(p1.sy - p2.sy)

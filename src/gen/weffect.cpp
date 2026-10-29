@@ -3410,6 +3410,13 @@ void ComEffect::SetFrameReal(s32 frameReal16) {
     }
 }
 
+void ComEffect::UpdateAnimation() {
+    MiscAnimNode* liveNode = ComEffect_ResolveLiveMiscAnimNode(this);
+    if (liveNode && frameCount > 0 && currentFrame < frameCount) {
+        ApplyMiscAnimFrame(liveNode, currentFrame, true);
+    }
+}
+
 bool ComEffect::EndOfFrame(s32 frame) const {
     MARKFUNCTION(0x8004E89C);
 
@@ -3967,7 +3974,7 @@ bool ComEffect::ResolveGeoByIndex(u32 geoIndex, OriginalGeo** outGeo, Mat4* outL
     return false;
 }
 
-bool ComEffect::RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flags) {
+bool ComEffect::RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flags, bool cullBackfaces) {
     if (!model || !model->drawable || !p3d::context) {
         return false;
     }
@@ -4059,7 +4066,13 @@ bool ComEffect::RenderGeoByIndex(u32 geoIndex, const Mat4& worldMatrix, u32 flag
                 p3d::context->SetReceiveShadows(true);
             }
 #endif
+            if (cullBackfaces) {
+                p3d::context->SetCullMode(PDDI_CULL_NORMAL);
+            }
             p3d::context->DrawPrimBuffer(geo->meshBuffer);
+            if (cullBackfaces) {
+                p3d::context->SetCullMode(PDDI_CULL_NONE);
+            }
 #if MODERN_GRAPHICS
             if (receiveMappedShadows) {
                 p3d::context->SetReceiveShadows(false);
@@ -6101,10 +6114,10 @@ s32 FWEffect::SetMentor() {
                 curMentorPos = *mentorPosRef;
                 prevMentorPos = curMentorPos;
 #endif
-                LVector* soundPos = mentorLink->GetSoundPosPtr();
-                mentorOffset.x = pos.x - soundPos->x;
-                mentorOffset.y = pos.y - soundPos->y;
-                mentorOffset.z = pos.z - soundPos->z;
+                const LVector* initialPos = mentorLink->GetInitialPos();
+                mentorOffset.x = pos.x - initialPos->x;
+                mentorOffset.y = pos.y - initialPos->y;
+                mentorOffset.z = pos.z - initialPos->z;
             }
 
             canDisplay = 0;
@@ -6135,6 +6148,14 @@ s32 FWEffect::Update() {
     if (mentorPosRef) {
         prevMentorPos = curMentorPos;
         curMentorPos = *mentorPosRef;
+        // Keep following effects attached when their mentor teleports or a
+        // platform path loops; interpolating the jump draws a stray ripple.
+        constexpr s64 kMaxInterpolatedStep = 1024;
+        if (std::abs(static_cast<s64>(curMentorPos.x) - prevMentorPos.x) > kMaxInterpolatedStep
+            || std::abs(static_cast<s64>(curMentorPos.y) - prevMentorPos.y) > kMaxInterpolatedStep
+            || std::abs(static_cast<s64>(curMentorPos.z) - prevMentorPos.z) > kMaxInterpolatedStep) {
+            prevMentorPos = curMentorPos;
+        }
     }
 #endif
 

@@ -162,7 +162,8 @@ void t2PointMatrixCamera::UpdateMatrix() {
     Mat4 twistMatrix;
     p3dBuildRotMatrixZ(ANGLE2RAD(twist), twistMatrix);
 
-    Mat4 combined = twistMatrix * headingMatrix;
+    // Roll around the camera's forward axis, not the world Z axis.
+    Mat4 combined = headingMatrix * twistMatrix;
     p3dFillTransMatrix(position, combined);
 
     // Store as our camera matrix (triggers worldToCamera computation)

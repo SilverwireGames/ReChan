@@ -158,6 +158,16 @@ public:
         particleList = list ? list : &ownedParticles;
     }
 
+    bool IsParticleListBound(const ccMinList* list) const {
+        return particleList == list;
+    }
+
+    void UnbindParticleList(ccMinList* list) {
+        if (particleList == list) {
+            particleList = &ownedParticles;
+        }
+    }
+
     void SetDisplayOffset(LVector* offset) {
         displayOffset = offset;
     }
@@ -301,7 +311,7 @@ static s32 QuantizeParticleAngle(s32 rotation) {
 // PSX: dword_8009EF5C from GTEMATH.ASM (P3D_SinCos_GTE quarter-wave packed table).
 // low16 = sin sample, high16 = cos sample in 12-bit fixed scale (0x1000 = 1.0).
 static constexpr u32 kP3dSinCosGteOctantTable[] = {
-    0x10000000, 0x10000009, 0x10000010, 0x10000016, 0x1000001C, 0x10000023, 0x10000029, 0x1000002F,
+    0x10000000, 0x10000009, 0x10000010, 0x10000016, 0x1000001C, 0x10000023, 0x10000029, 0x1000002F, 0x10000035,
     0x1000003C, 0xFFF0042, 0xFFF0048, 0xFFF004F, 0xFFF0055, 0xFFF005B, 0xFFF0061, 0xFFF0068,
     0xFFF006E, 0xFFE0074, 0xFFE007B, 0xFFE0081, 0xFFE0087, 0xFFE008D, 0xFFD0094, 0xFFD009A,
     0xFFD00A0, 0xFFD00A6, 0xFFC00AD, 0xFFC00B3, 0xFFC00B9, 0xFFC00C0, 0xFFB00C6, 0xFFB00CC,
@@ -787,6 +797,11 @@ s32 ParticleSystem::AnalyzeMesh() {
     delete[] meshFrameList;
     meshFrameList = nullptr;
     meshFrameMask = 0;
+
+    // PSX AnalyzeMesh sets the effect's flip to frame 1 and updates it
+    // before capturing the individual geometry transforms.
+    stats->comEffect->SetFrame(1);
+    stats->comEffect->UpdateAnimation();
 
     const s32 geoCount = static_cast<s32>(stats->comEffect->GetGeoCount());
 
@@ -1426,7 +1441,9 @@ void ParticleSystem::Display() {
             // PSX path uses p3dMultMatrix(particleWorld, localMatrix, out),
             // which is localMatrix * particleWorld in host Mat4 terms.
             Mat4 entryWorld = entry.localMatrix * particleWorld;
-            stats->comEffect->RenderGeoByIndex(entry.geoIndex, entryWorld, renderFlags | 0x80000u);
+            // PSX rejects back faces for each fragment. Some particle meshes
+            // contain both windings, which otherwise blend twice on PC.
+            stats->comEffect->RenderGeoByIndex(entry.geoIndex, entryWorld, renderFlags | 0x80000u, true);
             continue;
         }
 
@@ -1610,13 +1627,9 @@ ParticleSystemMgr::ParticleSystemMgr(ParticleSystem* inSystem) {
 ParticleSystemMgr::~ParticleSystemMgr() {
     MARKFUNCTION(0x80097DA4);
 
-    // Manager-local particle storage dies with this object; make sure
-    // the shared system no longer points at this list before teardown.
-    PurgeParticles();
-    if (system) {
-        system->SetDisplayOffset(nullptr);
-        system->BindParticleList(nullptr);
-    }
+    // The list is embedded in this manager, so purge it before the manager
+    // storage goes away and detach only if this system still uses this list.
+    DetachSystem();
 }
 
 void ParticleSystemMgr::BindSystemList() {
@@ -1628,20 +1641,61 @@ void ParticleSystemMgr::BindSystemList() {
 void ParticleSystemMgr::InitMgr(ParticleSystem* inSystem) {
     MARKFUNCTION(0x80097E00);
 
-    system = inSystem;
+    if (system != inSystem) {
+        SetSystem(inSystem);
+    }
+    else {
+        PurgeOwnedParticles();
+        if (system && system->IsParticleListBound(&particles)) {
+            system->SetDisplayOffset(nullptr);
+        }
+    }
 
     direction.x = 0;
     direction.y = 0;
     direction.z = 0;
 
-    particles.head = nullptr;
-    particles.tail = nullptr;
-
     BindSystemList();
 }
 
 void ParticleSystemMgr::SetSystem(ParticleSystem* inSystem) {
+    if (system == inSystem) {
+        BindSystemList();
+        return;
+    }
+
+    DetachSystem();
     system = inSystem;
+    BindSystemList();
+}
+
+void ParticleSystemMgr::DetachSystem() {
+    ParticleSystem* oldSystem = system;
+    PurgeOwnedParticles();
+
+    if (oldSystem && oldSystem->IsParticleListBound(&particles)) {
+        oldSystem->SetDisplayOffset(nullptr);
+        oldSystem->UnbindParticleList(&particles);
+    }
+
+    system = nullptr;
+}
+
+void ParticleSystemMgr::PurgeOwnedParticles() {
+    for (ccMinNode* node = particles.head; node;) {
+        ParticleInfo* info = static_cast<ParticleInfo*>(node);
+        node = node->next;
+
+        info->life = 0;
+        info->active = 0;
+
+        particles.RemNode(info);
+        g_particleAvailList.AddNodeTail(info);
+    }
+
+    if (system && system->stats) {
+        system->stats->burstCounter = 0;
+    }
 }
 
 s32 ParticleSystemMgr::CreateParticles(const LVector& origin, ParticleStats* statsOverride) {
@@ -1735,12 +1789,12 @@ s32 ParticleSystemMgr::ActiveParticles() {
 s32 ParticleSystemMgr::PurgeParticles() {
     MARKFUNCTION(0x80097FF0);
 
-    if (!system) {
-        return 0;
+    if (system) {
+        BindSystemList();
     }
 
-    BindSystemList();
-    return system->PurgeParticles();
+    PurgeOwnedParticles();
+    return 0;
 }
 
 u32 ParticleSystemMgr::GetSystemHash() const {
